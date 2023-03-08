@@ -1,0 +1,23 @@
+
+
+def print_dict(d: dict):
+    str = []
+    d_sorted = dict(sorted(d.items()))
+    for k, v in d_sorted.items():
+        str.append(f"{k}={v}")
+    return "-".join(str)
+
+def append_dictionaries(dict1, dict2, recursive=True):
+    import torch
+    result = {}
+    for k in set(dict1) | set(dict2):
+        item1, item2 = dict1.get(k, 0), dict2.get(k, 0)
+        if isinstance(item1, list) and (isinstance(item2, int) or isinstance(item2, float)):
+            result[k] = item1 + [item2]
+        elif isinstance(item1, int) or isinstance(item1, float):
+            result[k] = [item1, item2]
+        elif isinstance(item1, torch.Tensor) and isinstance(item2, torch.Tensor):
+            result[k] = torch.cat((item1, item2))
+        elif isinstance(item1, dict) and isinstance(item2, dict) and recursive:
+            result[k] = append_dictionaries(item1, item2)
+    return result

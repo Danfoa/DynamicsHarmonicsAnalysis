@@ -1,0 +1,7 @@
+*.pickle
+*.DS_Store
+__pycache__/
+
+.idea/
+
+experiments/

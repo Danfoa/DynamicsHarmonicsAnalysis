@@ -1,0 +1,6 @@
+[submodule "src/RobotEquivariantNN"]
+	path = src/RobotEquivariantNN
+	url = https://github.com/Danfoa/RobotEquivariantNN.git
+[submodule "src/DeepKoopman"]
+	path = src/DeepKoopman
+	url = https://github.com/BethanyL/DeepKoopman.git
