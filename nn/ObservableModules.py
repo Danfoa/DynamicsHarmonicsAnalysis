@@ -1,3 +1,4 @@
+import warnings
 from typing import Optional
 
 import torch
@@ -7,6 +8,11 @@ from src.RobotEquivariantNN.groups.SparseRepresentation import SparseRep
 from src.RobotEquivariantNN.nn.EMLP import EMLP, MLP
 from src.RobotEquivariantNN.nn.EquivariantModules import EquivariantModel
 
+import logging
+
+from utils.complex import interleave_with_conjugate, view_as_complex
+
+log = logging.getLogger(__name__)
 
 class DynamicsAutoEncoder(Module):
 
@@ -75,15 +81,17 @@ class LinearEigenvectorDynamics(Module):
         super().__init__()
         assert dim % 2 == 0, "For now only cope with even dimensions."
         self.dim = dim
-        eigvals = torch.view_as_complex(torch.randn(self.dim//2, 2))
-        eigvals /= eigvals.abs()    # Initialize as stable system.
+        # Initialize as stable system.
+        re_eig = torch.zeros(self.dim//2)
+        img_eig = torch.randn(self.dim//2)
+        eigvals = torch.view_as_complex(torch.stack((re_eig, img_eig), dim=1))
+        # eigvals /= eigvals.abs()
         self.eigvals = torch.nn.Parameter(eigvals, requires_grad=True)
 
     def forward(self, z, dt):
         assert torch.all(torch.isreal(z))
-        z2d = z.view(z.shape[:-1] + (-1, 2))
-        z_complex = torch.view_as_complex(z2d)
-        eigvect_projection = self.interleave_with_conjugate(z_complex)
+        # Force projection to eigenvector basis.
+        eigvect_projection = interleave_with_conjugate(view_as_complex(z))
         eigvect_projection = torch.unsqueeze(eigvect_projection, 1)  # Add timestep dimension,
 
         matrix_eigvals = torch.unsqueeze(self.interleave_with_conjugate(self.eigvals), 0)
@@ -113,4 +121,4 @@ class LinearEigenvectorDynamics(Module):
         return a_conj_a
 
     def get_hparams(self):
-        return {'num_complex_eigval': self.dim//2 }
+        return {'num_complex_eigval': self.dim//2}

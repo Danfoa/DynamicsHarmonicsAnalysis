@@ -5,12 +5,13 @@ robot: "pendulum"
 seed: -1
 exp_name: 'tests'
 device: 0
-num_workers: 0  # Dataloader workers
+num_workers: 4  # Dataloader workers
 debug: False
 debug_loops: False
 equivariance: False
+dynamic_regime: unactuated
 
-batch_size: 128
+batch_size: 256
 window_size: 2
 max_epochs: 400
 augment: False
@@ -18,6 +19,8 @@ lr: 1e-3
 
 rec_loss_lambd: 0.1
 obs_dim: 4
+
+loss_pred_w: 0.01
 
 # Hydra configuration _________
 hydra:

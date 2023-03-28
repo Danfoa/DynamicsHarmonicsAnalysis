@@ -1,5 +1,6 @@
 import copy
 import pickle
+from collections.abc import Iterable
 from math import isnan
 from pathlib import Path
 import random
@@ -23,17 +24,21 @@ import logging
 log = logging.getLogger(__name__)
 
 STATES, CTRLS = "states", "ctrls"
+STATES_OBS = "z"
 FULL_TRAJ = "full"
 
 class ClosedLoopDynDataset(Dataset):
 
-    def __init__(self, path: Path, window_size=1, compute_Q_func=False, input_frames=1, output_frames=1, normalize=True,
+    def __init__(self, path: Union[Path, Iterable], window_size=1, compute_Q_func=False, input_frames=1, output_frames=1, normalize=True,
                  state_scaler: StandardScaler = None, ctrl_scaler: StandardScaler = None, device='cpu',
                  augment=False, rep_state=None, rep_ctrl=None, robot: RobotWrapper=None):
 
-        assert path.exists(), path.absolute()
-        with open(path, "rb") as file_handle:
-            self._data = pickle.load(file_handle)
+        self._data = []
+        paths = [path] if isinstance(path, Path) else path
+        for p in paths:
+            assert p.exists(), f"File not found {p.absolute()}"
+            with open(p, "rb") as file_handle:
+                self._data.append(pickle.load(file_handle))
 
         self._num_terminal_states = 1  # Num of terminal states without control action.
 
@@ -48,12 +53,13 @@ class ClosedLoopDynDataset(Dataset):
             self.standard_scaler[STATES] = copy.deepcopy(state_scaler)
             self.standard_scaler[CTRLS] = copy.deepcopy(ctrl_scaler)
 
-        states, ctrls, costs, sample_ids = self.process_trajectory_data()
+        states, ctrls, costs, sample_ids, trajs_lengths = self.process_trajectory_data()
 
         # TODO: Switch to hugging face API
         self.states = torch.from_numpy(states).type('torch.FloatTensor').to(device)
         self.ctrls = torch.from_numpy(ctrls).type('torch.FloatTensor').to(device)
         self._sample_ids = sample_ids
+        self._trajs_lengths = trajs_lengths
 
         # TODO:
         self._compute_Q_func = compute_Q_func
@@ -82,9 +88,14 @@ class ClosedLoopDynDataset(Dataset):
             u: Control trajectory history. Tensor of dimension (W,C): W: window_size, C: control dimensions.
             u_next: Control trajectory history after x. Tensor of dimension (W,C).
         """
+        if self.window_size == FULL_TRAJ:
+            window_size = self._trajs_lengths[sample_num]
+        else:
+            window_size = self.window_size
+
         sample_idx = self._sample_ids[sample_num]
-        return {STATES: self.states[sample_idx:sample_idx + self.window_size, :],
-                CTRLS: self.ctrls[sample_idx:sample_idx + self.window_size, :],
+        return {STATES: self.states[sample_idx:sample_idx + window_size, :],
+                CTRLS: self.ctrls[sample_idx:sample_idx + window_size, :],
         }
 
     def collate_fn(self, batch):
@@ -107,32 +118,39 @@ class ClosedLoopDynDataset(Dataset):
         from the dataset is a trajectory of `window_size` taken from a particular timestep of one of the recorded full
         trajectories.
         """
-        self._trajs = self._data['trajs']
-        self.dt = self._data['traj_params']['dt']
-        self.traj_length = self._trajs[0]["states"].shape[0] - self._num_terminal_states
-        self.window_size = self.traj_length - 1 if self.window_size == FULL_TRAJ else self.window_size
+        self._trajs = np.concatenate([data['trajs'] for data in self._data])
+        dt = [data['traj_params']['dt'] for data in self._data]
+        assert np.unique(dt).size == 1, f"Trajectories should have the same dt"
+        self.dt = dt[0]
 
         num_timesteps = 0
-        sample_ids = []
+        sample_ids, traj_lengths = [], []
         # state, next state, control, cost.
         states, ctrls, costs = [], [], []
         # Each recorded trajectory is
         for traj in tqdm(self._trajs, desc="Processing trajectories"):
+            traj_length = traj[STATES].shape[0] - self._num_terminal_states
+            ctrl_length = traj[CTRLS].shape[0]
             # Terminal states do not have control action
-            assert traj["states"].shape[0] == traj[CTRLS].shape[0] + self._num_terminal_states, f"We assume OC trajectories"
-            assert traj["states"].shape[0] == self.traj_length + self._num_terminal_states, f"We assume equal length trajs"
-            states.append(traj["states"][:-self._num_terminal_states])
-            ctrls.append(traj[CTRLS])
-            costs.append(traj['cost'][:-self._num_terminal_states])
-            #
+            assert traj_length == ctrl_length, f"We assume OC trajectories"
 
-            num_samples = self.traj_length - self.window_size
+            window_size = traj_length - 1 if self.window_size == FULL_TRAJ else self.window_size
+            assert window_size <= traj_length, f"Window size should be smaller or equal than trajectory length"
+
+            states.append(traj["states"][:traj_length])
+            ctrls.append(traj[CTRLS])
+            costs.append(traj['cost'][:traj_length])
+            num_samples = traj_length - window_size
             sample_ids.append(range(num_timesteps, num_timesteps + num_samples))
-            num_timesteps += self.traj_length
+            traj_lengths.extend([traj_length] * num_samples)
+            num_timesteps += traj_length
         states = np.vstack(states)
         ctrls = np.vstack(ctrls)
-        costs = np.vstack(costs)
+        costs = np.concatenate(costs)
         sample_ids = np.hstack(sample_ids)
+        traj_lengths = np.array(traj_lengths)
+
+        assert np.max(sample_ids) < states.shape[0], f"There is an error counting the timesteps or samples per traj"
 
         # TODO: Allow for delayed coordinates and longer forcasting outputs
         # TODO: Estimate Q and V
@@ -156,7 +174,7 @@ class ClosedLoopDynDataset(Dataset):
         else:
             self._state_scale, self._ctrl_scale, self._state_mean, self._ctrl_mean = 1., 1., 0., 0.
 
-        return states, ctrls, costs, sample_ids
+        return states, ctrls, costs, sample_ids, traj_lengths
 
 if __name__ == "__main__":
     import src.RobotEquivariantNN.nn.LightningModel

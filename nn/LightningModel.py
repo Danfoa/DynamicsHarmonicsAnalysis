@@ -16,12 +16,12 @@ MetricCallable = Callable[[torch.Tensor, torch.Tensor, ], dict]
 
 class LightningModel(pl.LightningModule):
 
-    def __init__(self, model: Module, lr: float, loss_metrics_fn, batch_size: int,
+    def __init__(self, lr: float, loss_metrics_fn, batch_size: int,
                  batch_unpack_fn, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
                  log_preact=False, log_w=False):
         super().__init__()
         # self.model_type = model.__class__.__name__
-        self.model = model
+        self.model = None
         self.lr = lr
         self._batch_size = batch_size
 
@@ -34,6 +34,9 @@ class LightningModel(pl.LightningModule):
         self._log_preact = log_preact
         # Save hyperparams in model checkpoint.
         self.save_hyperparameters()
+    
+    def set_model(self, model):
+        self.model = model
 
     def forward(self, batch):
         inputs = self._batch_unpack_fn(batch)
@@ -45,7 +48,7 @@ class LightningModel(pl.LightningModule):
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
         self.log("train_loss", loss, prog_bar=False, on_step=True, on_epoch=True)
-        self.log_metrics(metrics, prefix="train_", batch_size=self._batch_size)
+        self.log_metrics(metrics, prefix="train/", batch_size=self._batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -54,7 +57,7 @@ class LightningModel(pl.LightningModule):
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
         self.log("val_loss", loss, prog_bar=False, on_epoch=True)
-        self.log_metrics(metrics, prefix="val_", batch_size=self._batch_size)
+        self.log_metrics(metrics, prefix="val/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
     def test_step(self, batch, batch_idx):
@@ -63,7 +66,7 @@ class LightningModel(pl.LightningModule):
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
         self.log("test_loss", loss, prog_bar=False, on_epoch=True)
-        self.log_metrics(metrics, prefix="text_", batch_size=self._batch_size)
+        self.log_metrics(metrics, prefix="test/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
     def predict_step(self, batch, batch_idx, **kwargs):

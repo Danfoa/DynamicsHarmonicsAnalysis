@@ -1,3 +1,4 @@
+import pathlib
 
 
 def print_dict(d: dict):
@@ -21,3 +22,15 @@ def append_dictionaries(dict1, dict2, recursive=True):
         elif isinstance(item1, dict) and isinstance(item2, dict) and recursive:
             result[k] = append_dictionaries(item1, item2)
     return result
+
+def check_if_resume_experiment(ckpt_call):
+    ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
+    best_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.filename + ckpt_call.FILE_EXTENSION)
+
+    terminated = False
+    if best_path.exists() and not ckpt_path.exists():
+        terminated = True
+    elif ckpt_path.exists() and best_path.exists():
+        terminated = False
+
+    return terminated, ckpt_path, best_path
