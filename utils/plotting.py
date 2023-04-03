@@ -160,7 +160,7 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
             plot_traj(ax, t=t, traj=traj[:, dim], traj_area=x2, color=color, legend=False, y_label=y_label,
                       linestyle_kwargs=xs_line_style)
             if traj_des is not None:
-                plot_traj(ax, t=t, traj=x2, color=color, linestyle_kwargs=xs_des_line_style)
+                plot_traj(ax, t=t, traj=x2, color=color, legend=False, linestyle_kwargs=xs_des_line_style)
 
     fig.tight_layout()
     if show:

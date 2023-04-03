@@ -159,12 +159,12 @@ class ClosedLoopDynDataset(Dataset):
             if first_call:
                 self.standard_scaler[STATES].fit(states)
                 self.standard_scaler[CTRLS].fit(ctrls)
-                log.info(f"Calculating first order moments of state & control history "
+                log.debug(f"Calculating first order moments of state & control history "
                          f"\n\tState: µ={self.standard_scaler[STATES].mean_},σ={self.standard_scaler[STATES].var_}"
                          f"\n\tCtrl: µ={self.standard_scaler[CTRLS].mean_},σ={self.standard_scaler[CTRLS].var_}")
             states = self.standard_scaler[STATES].transform(states)
             ctrls = self.standard_scaler[CTRLS].transform(ctrls)
-            log.info(f"State & Control history normalized "
+            log.debug(f"State & Control history normalized "
                      f"\n\tState: µ={np.mean(states, axis=0)},σ={np.std(states, axis=0)}"
                      f"\n\tCtrl: µ={np.mean(ctrls, axis=0)},σ={np.std(ctrls, axis=0)}")
             self._state_scale = torch.from_numpy(self.standard_scaler[STATES].scale_).to(device=self.device)

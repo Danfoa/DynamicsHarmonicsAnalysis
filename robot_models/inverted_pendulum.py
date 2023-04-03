@@ -216,7 +216,7 @@ if __name__ == "__main__":
 
     path = pathlib.Path("data") / robot_name / trajType / print_dict(metadata['traj_params'])
     path.mkdir(parents=True, exist_ok=True)
-    print(f"Saving data to {path}")
+    print(f"Saving data to {path.absolute()}")
     fig.savefig(path / "trajectories.png", dpi=120)
 
     def save_pickle(file_path: pathlib.Path, object):

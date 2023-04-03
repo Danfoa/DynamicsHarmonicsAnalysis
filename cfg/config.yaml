@@ -1,34 +1,39 @@
 defaults:
   - _self_
 
-robot: "pendulum"
-seed: -1
+# Running hyperparameters
 exp_name: 'tests'
+seed: -1
 device: 0
-num_workers: 4  # Dataloader workers
+num_workers: 0       # Dataloader workers
 debug: False
 debug_loops: False
-equivariance: False
-dynamic_regime: unactuated
 
-batch_size: 256
-window_size: 2
-max_epochs: 400
-augment: False
-lr: 1e-3
-
-rec_loss_lambd: 0.1
-obs_dim: 4
-
-loss_pred_w: 0.01
+# Model hyperparameters
+model:
+  robot: "pendulum"
+  dynamic_regime: unactuated
+  equivariance: False
+  window_size: 2       # Prediction horizon of the model per training sample
+  obs_dim: 4
+  # Learning hyperparameters parameters
+  lr: 1e-3
+  augment: False       # Weather to use data-augmentation of the dataset if the system has symmetries.
+  loss_pred_w: 0.01    # Cost function weight for prediction in observation space Z
+  batch_size: 256
+  max_epochs: 900
 
 # Hydra configuration _________
 hydra:
+  launcher:
+    n_jobs: 1
+    backend: multiprocessing
+    
   run:
     dir: ./experiments/${hydra.job.name}/${hydra.job.override_dirname}
   job:
     # TODO: Reorganize output dir
-    name: ${exp_name}_${robot}
+    name: ${exp_name}_${model.robot}
     num: ${seed}
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: 'false'

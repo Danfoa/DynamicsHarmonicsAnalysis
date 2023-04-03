@@ -66,7 +66,7 @@ class EDynamicsAutoEncoder(EquivariantModel):
         if self.observation_dynamics is None:
             z_pred = z
         else:
-            dts = torch.arange(0, z.shape[1]) * self.dt
+            dts = torch.arange(0, z.shape[1], device=x.device) * self.dt
             z_pred = self.observation_dynamics(z[:, 0, :], dts)
         x_pred = self.decoder(z_pred)
         return {"x_pred": x_pred, "z_pred": z_pred, "z": z}
@@ -82,7 +82,7 @@ class LinearEigenvectorDynamics(Module):
         assert dim % 2 == 0, "For now only cope with even dimensions."
         self.dim = dim
         # Initialize as stable system.
-        re_eig = torch.zeros(self.dim//2)
+        re_eig = torch.rand(self.dim//2)
         img_eig = torch.randn(self.dim//2)
         eigvals = torch.view_as_complex(torch.stack((re_eig, img_eig), dim=1))
         # eigvals /= eigvals.abs()

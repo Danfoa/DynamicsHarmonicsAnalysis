@@ -1,7 +1,7 @@
 import math
 import pathlib
 import time
-from typing import Union, Callable
+from typing import Union, Callable, Optional
 
 import numpy as np
 import pytorch_lightning as pl
@@ -9,6 +9,9 @@ import torch
 from torch.nn import Module
 
 import logging
+
+from utils.mysc import flatten_dict
+
 log = logging.getLogger(__name__)
 
 LossCallable = Callable[[torch.Tensor, torch.Tensor, ], torch.Tensor]
@@ -16,9 +19,8 @@ MetricCallable = Callable[[torch.Tensor, torch.Tensor, ], dict]
 
 class LightningModel(pl.LightningModule):
 
-    def __init__(self, lr: float, loss_metrics_fn, batch_size: int,
-                 batch_unpack_fn, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
-                 log_preact=False, log_w=False):
+    def __init__(self, lr: float, batch_size: int, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
+                 log_preact=False, log_w=False, run_hps: Optional[dict]=None):
         super().__init__()
         # self.model_type = model.__class__.__name__
         self.model = None
@@ -26,12 +28,13 @@ class LightningModel(pl.LightningModule):
         self._batch_size = batch_size
 
         # self.model = model
-        self._batch_unpack_fn = batch_unpack_fn
-        self._loss_metrics_fn = loss_metrics_fn
+        self._batch_unpack_fn = None
+        self._loss_metrics_fn = None
         self.test_epoch_metrics_fn = test_epoch_metrics_fn
         self.val_epoch_metrics_fn = val_epoch_metrics_fn
         self._log_w = log_w
         self._log_preact = log_preact
+        self._run_hps = dict(run_hps)
         # Save hyperparams in model checkpoint.
         self.save_hyperparameters()
     
@@ -47,7 +50,7 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("train_loss", loss, prog_bar=False, on_step=True, on_epoch=True)
+        self.log("train_loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="train/", batch_size=self._batch_size)
         return loss
 
@@ -56,7 +59,7 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("val_loss", loss, prog_bar=False, on_epoch=True)
+        self.log("val_loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="val/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
@@ -65,17 +68,12 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("test_loss", loss, prog_bar=False, on_epoch=True)
+        self.log("test_loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="test/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
     def predict_step(self, batch, batch_idx, **kwargs):
         return self(batch)
-
-    def log_metrics(self, metrics: dict, prefix='', batch_size=None):
-        for k, v in metrics.items():
-            name = f"{prefix}{k}"
-            self.log(name, v, prog_bar=False, batch_size=batch_size)
 
     def on_train_epoch_start(self) -> None:
         self.epoch_start_time = time.time()
@@ -101,16 +99,31 @@ class LightningModel(pl.LightningModule):
             gt = torch.cat(gt, dim=0)
             self.test_epoch_metrics_fn([out, gt, self.trainer, self, True, "test_"])
 
+    def on_fit_start(self) -> None:
+        # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics
+        datamodule = self.trainer.datamodule
+        if datamodule is not None:
+            batch_unpack_fn = getattr(datamodule, 'batch_unpack', None)
+            self._batch_unpack_fn = batch_unpack_fn if callable(batch_unpack_fn) else lambda x: x
+            self._loss_metrics_fn = datamodule.compute_loss_metrics
+        else:
+            raise AttributeError("We assume the use of a dataloader with a `compute_loss_metrics -> "
+                                 "(cost: float, metrics:dict)`` function")
+
     def on_train_start(self):
         # TODO: Add number of layers and hidden channels dimensions.
-        hparams = {'lr': self.lr}
+        hparams = flatten_dict(self._run_hps)
         if hasattr(self.model, "get_hparams"):
-            hparams.update(self.model.get_hparams())
+            hparams.update(flatten_dict(self.model.get_hparams()))
+        # Get the labels of metrics
         if self.logger:
-            self.logger.log_hyperparams(hparams, {"val_loss": np.NaN, "train_loss_epoch": np.NaN, "test_loss": np.NaN})
+            self.logger.log_hyperparams(hparams, {"val_loss": 0, "test_loss": 0, "train_loss": 0, "val/pred_loss": 0,
+                                                  "val/rec_loss": 0})
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
+        self.logger.save()
+
         if ckpt_call is not None:
             ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
             best_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.filename + ckpt_call.FILE_EXTENSION)
@@ -122,6 +135,11 @@ class LightningModel(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
+
+    def log_metrics(self, metrics: dict, prefix='', batch_size=None):
+        for k, v in metrics.items():
+            name = f"{prefix}{k}"
+            self.log(name, v, prog_bar=False, batch_size=batch_size)
 
     def log_weights(self):
         raise NotImplementedError()

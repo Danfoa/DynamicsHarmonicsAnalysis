@@ -23,6 +23,15 @@ def append_dictionaries(dict1, dict2, recursive=True):
             result[k] = append_dictionaries(item1, item2)
     return result
 
+def flatten_dict(d: dict, prefix=''):
+    a = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            a.update(flatten_dict(v, prefix=f"{k}/"))
+        else:
+            a[f"{prefix}{k}"] = v
+    return a
+
 def check_if_resume_experiment(ckpt_call):
     ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
     best_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.filename + ckpt_call.FILE_EXTENSION)

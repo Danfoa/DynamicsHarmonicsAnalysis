@@ -106,7 +106,7 @@ class ClosedLoopDynDataModule(pl.LightningDataModule):
             }
         return data
 
-    def losses_and_metrics(self, outputs_pred, outputs):
+    def compute_loss_metrics(self, outputs_pred, outputs):
         """
         :param x: Batched sequence of consecutive states [x0, x1,..., xT], T=num_steps
         :param z: Batches embeddings/observations of `z = ø(x)` [z0, z1,..., zT]
@@ -139,10 +139,16 @@ class ClosedLoopDynDataModule(pl.LightningDataModule):
         if self.robot is not None:
             nq, nv = self.robot.nq, self.robot.nv
             # Get un-standarized error measurements
-            q_err = x_err[:, :, :nq] / self.train_dataset._state_scale[:nq]
-            dq_err = x_err[:, :, nq: nq + nv] / self.train_dataset._state_scale[nq: nq + nv]
-            u_err = x_err[:, :, nq + nv: nx] / self.train_dataset._ctrl_scale
-            metrics.update(q_err=q_err.mean(), dq_err=dq_err.mean(), u_err=u_err.mean())
+            q_err_rec = x_err[:, 0, :nq] / self.train_dataset._state_scale[:nq]
+            q_err_pred = x_err[:, 1:, :nq] / self.train_dataset._state_scale[:nq]
+            dq_err_rec = x_err[:, 0, nq: nq + nv] / self.train_dataset._state_scale[nq: nq + nv]
+            dq_err_pred = x_err[:, 1:, nq: nq + nv] / self.train_dataset._state_scale[nq: nq + nv]
+            u_err_rec = x_err[:, 0, nq + nv: nx] / self.train_dataset._ctrl_scale
+            u_err_pred = x_err[:, 1:, nq + nv: nx] / self.train_dataset._ctrl_scale
+            metrics.update(q_err_rec=q_err_rec.mean(), q_err_pred=q_err_pred.mean(),
+                           dq_err_rec=dq_err_rec.mean(), dq_err_pred=dq_err_pred.mean(),
+                           u_err_rec=u_err_rec.mean(), u_err_pred=u_err_pred.mean(),
+                           x_err_rec=x_err[:, 0].mean(), x_err_pred=x_err[:, 1:].mean())
 
         # Linear dynamics of the observable/embedding.
         avg_obs_pred_err = torch.mean(norm_z_err[:, 1:], dim=1)
@@ -159,6 +165,12 @@ class ClosedLoopDynDataModule(pl.LightningDataModule):
 
         loss = self.pred_w * (reconstruction_loss + metrics["pred_loss"]) + metrics["lin_loss"]
         return loss, metrics
+
+    def batch_unpack(self, batch):
+        return self.state_ctrl_to_x(batch)
+
+    def batch_pack(self, x):
+        return self.x_to_state_crtl(x)
 
     def state_ctrl_to_x(self, batch):
         """
