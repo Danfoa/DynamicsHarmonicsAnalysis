@@ -10,7 +10,8 @@ from lightning_fabric import seed_everything
 from pinocchio import RobotWrapper
 from pytorch_lightning import loggers as pl_loggers, Trainer
 
-import logging as log
+import logging
+log = logging.getLogger(__name__)
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torch.utils.data import DataLoader
@@ -18,7 +19,7 @@ from torch.utils.data import DataLoader
 from data.ClosedLoopDynamics import ClosedLoopDynDataset, STATES, CTRLS
 from data.ClosedLoopDynamicsDataModule import ClosedLoopDynDataModule
 from nn.LightningModel import LightningModel
-from nn.ObservableModules import EDynamicsAutoEncoder, DynamicsAutoEncoder
+from nn.DynamicsAutoencoder import EDynamicsAutoEncoder, DynamicsAutoEncoder
 
 try:
     from src.RobotEquivariantNN.groups.SparseRepresentation import SparseRep
@@ -26,10 +27,10 @@ try:
 except ImportError as e:
     raise Exception("run `git submodule update --init")
 
-from utils.mysc import check_if_resume_experiment
+from utils.mysc import check_if_resume_experiment, class_from_name
 
 
-@hydra.main(config_path='cfg', config_name='config')
+@hydra.main(config_path='cfg', config_name='config', version_base='1.1')
 def main(cfg: DictConfig):
     torch.set_float32_matmul_precision('medium')
     log.info("\n\n NEW RUN \n\n")
@@ -53,7 +54,7 @@ def main(cfg: DictConfig):
     if not training_done:
         stop_call = EarlyStopping(monitor='val_loss', patience=max(10, int(cfg.model.max_epochs * 0.1)), mode='min')
 
-        log.info("\nInitiating Training\n")
+        log.info("Initiating Training\n")
         # Configure Lightning trainer
         trainer = Trainer(gpus=1 if torch.cuda.is_available() and device != 'cpu' else 0,
                           logger=tb_logger,
@@ -78,24 +79,42 @@ def main(cfg: DictConfig):
         double_pendulum_rw = example_robot_data.load('double_pendulum_continuous')
         # Build a single DoF pendulum from the double pendulum model by fixing elbow joint
         robot = double_pendulum_rw.buildReducedRobot(list_of_joints_to_lock=[2])
-        # robot_model = pe/ndulum_rw.model
-        G = C2(generators=[C2.oneline2matrix([0, 1, 2, 3], reflexions=[1, -1, -1, -1])])
-        repX = SparseRep(G)
-        assert G.d == robot.nq + (2 * robot.nv)
+        # robot_model = pendulum_rw.model
+        G_state = C2(generators=[C2.oneline2matrix([0, 1, 2], reflexions=[1, -1, -1])])
+        G_crtl = C2(generators=[C2.oneline2matrix([0], reflexions=[-1])])
+        repX = SparseRep(G_state) + SparseRep(G_crtl)
+        rep_state = SparseRep(G_state)
+        rep_crtl = SparseRep(G_crtl)
+        assert G_state.d == robot.nq + robot.nv
 
         data_path = root_path / "data" / cfg.model.robot
         datamodule = ClosedLoopDynDataModule(data_path, batch_size=cfg.model.batch_size,
-                                             window_size=cfg.model.window_size,
+                                             pred_horizon=cfg.model.pred_horizon,
                                              num_workers=cfg.num_workers, device=device, augment=cfg.model.augment,
+                                             rep_state=rep_state, rep_ctrl=rep_crtl,
                                              robot=robot.model, pred_w=cfg.model.loss_pred_w,
                                              dynamic_regime=cfg.model.dynamic_regime)
+        datamodule.prepare_data()
 
         # Get DynAE model.
         obs_dim = cfg.model.obs_dim
+        nn_input_mean = torch.cat((datamodule.train_dataset._state_mean, datamodule.train_dataset._ctrl_mean)).to(torch.float32)
+        nn_inout_std = torch.cat((datamodule.train_dataset._state_scale, datamodule.train_dataset._ctrl_scale)).to(torch.float32)
+        activation = class_from_name('torch.nn', cfg.model.activation)
         if cfg.model.equivariance:
-            model = EDynamicsAutoEncoder(repX=repX, obs_dim=obs_dim, dt=1e-2)
+            model = EDynamicsAutoEncoder(repX=repX, obs_dim=obs_dim, dt=1e-2, robot=robot.model,
+                                         eigval_init=cfg.model.eigval_init,
+                                         eigval_constraint=cfg.model.eigval_constraint,
+                                         respect_state_topology=cfg.model.state_topology,
+                                         num_hidden_cells=cfg.model.hidden_neurons,
+                                         input_mean=nn_input_mean, input_std=nn_inout_std,
+                                         activation=activation)
         else:
-            model = DynamicsAutoEncoder(in_dim=G.d, obs_dim=obs_dim, dt=1e-2)
+            model = DynamicsAutoEncoder(state_dim=repX.G.d, obs_dim=obs_dim, dt=1e-2, robot=robot.model,
+                                        respect_state_topology=cfg.model.state_topology,
+                                        num_hidden_cells=cfg.model.hidden_neurons,
+                                        input_mean=nn_input_mean, input_std=nn_inout_std,
+                                        activation=activation)
         model.to(device)
         # edae_model = EDynamicsAutoEncoder(repX=repX, obs_dim=obs_dim)
 
@@ -113,8 +132,16 @@ def main(cfg: DictConfig):
 
         trainer.test(model=pl_model, datamodule=datamodule)
         pl_model.to(device)
-        datamodule.plot_test_performance(pl_model, log_fig=True, show=cfg.debug,
+        datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
+                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
                                          eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+        datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
+                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
+                                         eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+        if cfg.debug:
+            datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
+                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+
     else:
         log.warning(f"Training run done. Check {Path(tb_logger.log_dir).absolute()} for results.")
 

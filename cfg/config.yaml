@@ -3,7 +3,7 @@ defaults:
 
 # Running hyperparameters
 exp_name: 'tests'
-seed: -1
+seed: 0
 device: 0
 num_workers: 0       # Dataloader workers
 debug: False
@@ -12,29 +12,34 @@ debug_loops: False
 # Model hyperparameters
 model:
   robot: "pendulum"
-  dynamic_regime: unactuated
+  dynamic_regime: unstable_fix_point
   equivariance: False
-  window_size: 2       # Prediction horizon of the model per training sample
+  pred_horizon: 1.0       # Prediction horizon (int) number of time samples (float) percentage of trajectory
   obs_dim: 4
   # Learning hyperparameters parameters
   lr: 1e-3
+  activation: Tanh
   augment: False       # Weather to use data-augmentation of the dataset if the system has symmetries.
   loss_pred_w: 0.01    # Cost function weight for prediction in observation space Z
-  batch_size: 256
-  max_epochs: 900
+  batch_size: 512
+  max_epochs: 500
+  hidden_neurons: 32
+  state_topology: True
+  eigval_init: "stable"   # Initialization of eigenvalues [stable, ]
+  eigval_constraint: "unconstrained"   # [unconstrained or unit_circle]
 
 # Hydra configuration _________
 hydra:
+  verbose: ${debug}
   launcher:
     n_jobs: 1
-    backend: multiprocessing
-    
   run:
-    dir: ./experiments/${hydra.job.name}/${hydra.job.override_dirname}
+    dir: ./experiments/${hydra.job.name}/${model.dynamic_regime}/${hydra.job.override_dirname}
   job:
     # TODO: Reorganize output dir
     name: ${exp_name}_${model.robot}
     num: ${seed}
+    chdir: True
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: 'false'
       HYDRA_FULL_ERROR: '1'
@@ -43,17 +48,18 @@ hydra:
         kv_sep: "="
         item_sep: " "
         exclude_keys:
-          - batch_size
+          - model.batch_size
           - model
           - device
           - exp_name
-          - max_epochs
+          - model.max_epochs
+          - model.dynamic_regime
           - debug
           - debug_loops
           - seed
 
   sweep:
-    dir: ./experiments/${hydra.job.name}/
+    dir: ./experiments/${hydra.job.name}/${model.dynamic_regime}/
     subdir: ${hydra.job.override_dirname}
 
   job_logging:

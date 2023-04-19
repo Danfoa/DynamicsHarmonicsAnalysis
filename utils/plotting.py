@@ -98,8 +98,9 @@ def plotOCSolution(xs=None, us=None, xs_des=None, us_des=None, robot_model: pino
 
 
 def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTitle="", eigvals=None,
-                 var_name='x', dt: float = None, markersize=2, legend=True, color=None, figsize=(7 / 1.5, 10 / 1.5),
-                 xs_style=None, xs_des_style=None, complex_conjugate_trajs=False, plot_conj_traj=False, artists=None):
+                 var_name='x', dt: float = None, markersize=2, legend=True, color=None, figsize=None,
+                 xs_style=None, xs_des_style=None, artists=None,
+                 ncols=1, **kwargs):
     # TODO: Detect base confituration and separate euclidean E3 states from joint_space QJ
     import matplotlib.pyplot as plt
 
@@ -112,12 +113,10 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
     if xs_des_style is not None: xs_des_line_style.update(xs_style)
 
     complex_traj = traj.dtype in (np.csingle, np.cdouble, np.clongdouble)
-    if complex_traj:
-        nx = traj[0].shape[0] // (2 if complex_conjugate_trajs else 1)
-        if eigvals is not None:
-            assert len(eigvals) == nx, "Number of unique eigenvalues (no conj) should be the number of obs"
-    else:
-        nx = traj[0].shape[0]
+    nx = traj[0].shape[0]
+
+    if complex_traj and eigvals is not None:
+        assert len(eigvals) == nx, "Number of unique eigenvalues (no conj) should be the number of obs"
 
     if traj_des is not None:
         assert traj_des.shape == traj.shape, f"Real and desired state trajs differ in size {traj_des.shape} != {traj.shape}"
@@ -133,28 +132,27 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
 
     # Configure or recover fig.
     if fig is None:
-        fig, axs = plt.subplots(ncols=1, nrows=nx, sharex=not complex_traj, figsize=figsize)
+        nrows = nx//ncols
+        if figsize is None:
+            figsize = (ncols*2.8, nrows*2.8)
+        fig, axs = plt.subplots(ncols=ncols, nrows=nrows, sharex=not complex_traj, figsize=figsize)
         if nx == 1: axs = [axs]
     else:
         axs = fig.get_axes()
 
+    if not isinstance(axs, list):
+        axs = axs.flatten()
+
     # Plotting the state trajectories
     for dim, (ax, y_label) in enumerate(zip(axs, x_labels)):
         if complex_traj:
-            dim_mul = 2 if complex_conjugate_trajs else 1
-            x, x_conj = traj[:, dim * dim_mul], traj[:, dim * dim_mul + 1]
-            x_des, x_conj_des = traj_des[:, dim * dim_mul], traj_des[:, dim * dim_mul + 1]
+            x = traj[:, dim]
+            x_des = traj_des[:, dim ]
             artists = plot_complex_traj(ax, traj=x, artists=artists, color=color, legend=False, y_label=y_label,
-                                        linestyle_kwargs=xs_line_style, eigval=eigvals[dim])
-            if complex_conjugate_trajs and plot_conj_traj:
-                plot_complex_traj(ax, traj=x_conj, artists=artists, color=color, legend=False, y_label=y_label,
-                                  linestyle_kwargs=xs_line_style)
+                                        linestyle_kwargs=xs_line_style, eigval=eigvals[dim], **kwargs)
             if traj_des is not None:
                 plot_complex_traj(ax, traj=x_des, artists=artists, color=color, legend=False, y_label=y_label,
                                   linestyle_kwargs=xs_des_line_style, traj0_markersize=25, traj0_marker="D")
-                if complex_conjugate_trajs and plot_conj_traj:
-                    plot_complex_traj(ax, traj=x_conj_des, artists=artists, color=color, legend=False, y_label=y_label,
-                                      linestyle_kwargs=xs_des_line_style, traj0_markersize=25, traj0_marker="D")
         else:
             x, x2 = traj[:, dim], traj_des[:, dim] if traj_des is not None else None
             plot_traj(ax, t=t, traj=traj[:, dim], traj_area=x2, color=color, legend=False, y_label=y_label,
@@ -190,9 +188,9 @@ def plot_traj(ax, t, traj, traj_area=None, linestyle_kwargs: dict = None, label=
 
 def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_label=None, y_label=None,
                       color=None, legend=True, plot_unit_circle=True, traj0_marker='o', traj0_markersize=10,
-                      eigval=None, artists=None):
+                      eigval=None, artists=None, plot_grad_field=False):
     from matplotlib.ticker import MaxNLocator
-    TRAJ, TRAJ0, UNIT_CIRCLE, EIGENVALS, VECT_FIELD = 'x', 'x0', 'circle', 'eigval', 'quiver'
+    MAX_STATE, TRAJ, TRAJ0, UNIT_CIRCLE, EIGENVALS, VECT_FIELD = 'r_max', 'x', 'x0', 'circle', 'eigval', 'quiver'
     linestyle_kwargs = {} if linestyle_kwargs is None else linestyle_kwargs
     circle_color = (0.202, 0.416, 0.470)
     eigval_color = (1.00, 0.0700, 0.0700)
@@ -200,7 +198,7 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
     if artists is None: artists = {}
     first_draw = False
     if ax not in artists:
-        artists[ax] = {TRAJ: [], TRAJ0: [], }
+        artists[ax] = {TRAJ: [], TRAJ0: [], MAX_STATE: []}
         first_draw = True
 
     assert traj.dtype in (np.csingle, np.cdouble, np.clongdouble), "Trajectory must be complex"
@@ -208,12 +206,23 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
     # Plot trajectory.
     line = ax.plot(np.real(traj), np.imag(traj), label=label, color=color, **linestyle_kwargs)
     artists[ax][TRAJ].append(line)
-
+    artists[ax][MAX_STATE].append(np.max(np.abs(traj)))
     # Plot start state marker.
     init_state_style = dict(marker=traj0_marker, s=traj0_markersize, linewidths=1.5,
                             edgecolors=color, color=circle_color)
     traj0 = ax.scatter(np.real(traj[0]), np.imag(traj[0]), **init_state_style)
     artists[ax][TRAJ0].append(traj0)
+
+    # Set plot limits for good visualization of trajectories
+    ax_lim = np.max(artists[ax][MAX_STATE])
+    ax_lim *= 1.1   # Add 10% border
+    ax.set_xlim(-ax_lim, ax_lim)
+    ax.set_ylim(-ax_lim, ax_lim)
+    if ax_lim < 0.5:  # Fix ticks for visualization of collapsed trajs
+        ax.xaxis.set_ticks(np.arange(-ax_lim, ax_lim, 3))
+        ax.yaxis.set_ticks(np.arange(-ax_lim, ax_lim, 3))
+        # ax.xaxis.set_major_locator(plt.MaxNLocator(3))
+        # ax.yaxis.set_major_locator(plt.MaxNLocator(3))
 
     if plot_unit_circle and UNIT_CIRCLE not in artists[ax]:
         theta = np.linspace(0, 2*np.pi, 50)
@@ -230,9 +239,9 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
         eig_line = ax.plot(eig_pair[0, :], eig_pair[1, :], color=eigval_color + (0.3,), linewidth=1)
         artists[ax][EIGENVALS] = [eig_points, eig_line]
 
-    if eigval is not None and VECT_FIELD not in artists[ax]:
+    if plot_grad_field and eigval is not None and VECT_FIELD not in artists[ax]:
         num_angles, num_rad = 20, 5
-        radius = np.linspace(1/num_rad, max(np.max(np.abs(traj)), 1.1), num_rad)
+        radius = np.linspace(ax_lim/num_rad, ax_lim, num_rad)
         theta = np.linspace(0, 2*np.pi, num_angles)[:-1]
         x, y = [], []
         for r in radius:
@@ -252,18 +261,16 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
         ax.spines['right'].set_visible(False)
         ax.spines['left'].set_visible(False)
         ax.spines['bottom'].set_visible(False)
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax.grid(visible=True, alpha=0.1)
         ax.set_aspect('equal')
         ax.set_xlabel("Re")
         ax.set_ylabel("Im")
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
         ticks_color = (1, 1, 1, 0.4)
-        ax.tick_params(axis='both', which='both', color=ticks_color, labelcolor=(0.4, 0.4, 0.4))
+        ax.tick_params(axis='both', which='both', color=ticks_color, labelcolor=(0.4, 0.4, 0.4), labelsize='xx-small')
+        ax.xaxis.set_major_formatter('{x:.1f}')
+        ax.yaxis.set_major_formatter('{x:.1f}')
         # if legend:
-        ax.legend(fontsize='x-small', frameon=True)
+        ax.legend(fontsize='xx-small', frameon=True)
     return artists
 
 

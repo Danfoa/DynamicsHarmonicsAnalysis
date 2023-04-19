@@ -20,7 +20,7 @@ MetricCallable = Callable[[torch.Tensor, torch.Tensor, ], dict]
 class LightningModel(pl.LightningModule):
 
     def __init__(self, lr: float, batch_size: int, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
-                 log_preact=False, log_w=False, run_hps: Optional[dict]=None):
+                 log_preact=False, log_w=False, run_hps: Optional[dict] = None):
         super().__init__()
         # self.model_type = model.__class__.__name__
         self.model = None
@@ -37,7 +37,7 @@ class LightningModel(pl.LightningModule):
         self._run_hps = dict(run_hps)
         # Save hyperparams in model checkpoint.
         self.save_hyperparameters()
-    
+
     def set_model(self, model):
         self.model = model
 
@@ -92,12 +92,21 @@ class LightningModel(pl.LightningModule):
             self.val_epoch_metrics_fn([out, gt, self.trainer, self, False, "val_"])
 
     def test_epoch_end(self, outputs):
+        print("Fuck")
         if self.test_epoch_metrics_fn is not None:
             out = [o['out'] for o in outputs]
             gt = [o['gt'] for o in outputs]
             out = torch.cat(out, dim=0)
             gt = torch.cat(gt, dim=0)
             self.test_epoch_metrics_fn([out, gt, self.trainer, self, True, "test_"])
+
+    def on_test_end(self) -> None:
+        self.logger.save()
+
+        for logger in self.trainer.loggers:
+            if isinstance(logger, pl.loggers.TensorBoardLogger):
+                tb_logger = logger.experiment
+                tb_logger.flush()
 
     def on_fit_start(self) -> None:
         # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics
@@ -117,8 +126,12 @@ class LightningModel(pl.LightningModule):
             hparams.update(flatten_dict(self.model.get_hparams()))
         # Get the labels of metrics
         if self.logger:
-            self.logger.log_hyperparams(hparams, {"val_loss": 0, "test_loss": 0, "train_loss": 0, "val/pred_loss": 0,
-                                                  "val/rec_loss": 0})
+            self.logger.log_hyperparams(hparams, {"val_loss": 0, "test_loss": 0, "train_loss": 0,
+                                                  "test/rec_loss": 0, "test/pred_loss": 0,
+                                                  "test/lin_loss": 0, "test/linf_loss": 0,
+                                                  "val/rec_loss": 0, "val/pred_loss": 0,
+                                                  "val/lin_loss": 0, "val/linf_loss": 0
+                                                  })
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback

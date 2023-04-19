@@ -1,9 +1,19 @@
+import importlib
 import pathlib
 
+import torch.nn
 
-def print_dict(d: dict):
+
+def class_from_name(module_name, class_name):
+    # load the module, will raise ImportError if module cannot be loaded
+    m = importlib.import_module(module_name)
+    # get the class, will raise AttributeError if class cannot be found
+    c = getattr(m, class_name)
+    return c
+
+def print_dict(d: dict, sort=False):
     str = []
-    d_sorted = dict(sorted(d.items()))
+    d_sorted = dict(sorted(d.items())) if sort else d
     for k, v in d_sorted.items():
         str.append(f"{k}={v}")
     return "-".join(str)
