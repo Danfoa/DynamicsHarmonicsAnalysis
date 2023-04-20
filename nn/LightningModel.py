@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 LossCallable = Callable[[torch.Tensor, torch.Tensor, ], torch.Tensor]
 MetricCallable = Callable[[torch.Tensor, torch.Tensor, ], dict]
 
+
 class LightningModel(pl.LightningModule):
 
     def __init__(self, lr: float, batch_size: int, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
@@ -50,7 +51,7 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("train_loss", loss, prog_bar=False)
+        self.log("train/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="train/", batch_size=self._batch_size)
         return loss
 
@@ -59,7 +60,7 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("val_loss", loss, prog_bar=False)
+        self.log("val/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="val/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
@@ -68,7 +69,7 @@ class LightningModel(pl.LightningModule):
         outputs_pred = self.model(inputs)
         loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
 
-        self.log("test_loss", loss, prog_bar=False)
+        self.log("test/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="test/", batch_size=self._batch_size)
         return {'out': outputs_pred, 'gt': inputs}
 
@@ -110,14 +111,16 @@ class LightningModel(pl.LightningModule):
 
     def on_fit_start(self) -> None:
         # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics
-        datamodule = self.trainer.datamodule
-        if datamodule is not None:
-            batch_unpack_fn = getattr(datamodule, 'batch_unpack', None)
-            self._batch_unpack_fn = batch_unpack_fn if callable(batch_unpack_fn) else lambda x: x
-            self._loss_metrics_fn = datamodule.compute_loss_metrics
-        else:
-            raise AttributeError("We assume the use of a dataloader with a `compute_loss_metrics -> "
-                                 "(cost: float, metrics:dict)`` function")
+        batch_unpack_fn = getattr(self.model, 'batch_unpack', None)
+        try:
+            loss_metrics_fn = getattr(self.model, 'compute_loss_metrics')
+            assert callable(loss_metrics_fn)
+        except:
+            raise RuntimeError(f"Model {self.model.__class__.__name__} is expected to implement the function "
+                               f"`compute_loss_metrics`, returning a metric of (loss:Tensor, metrics:dict)")
+
+        self._batch_unpack_fn = batch_unpack_fn if callable(batch_unpack_fn) else lambda x: x
+        self._loss_metrics_fn = loss_metrics_fn
 
     def on_train_start(self):
         # TODO: Add number of layers and hidden channels dimensions.
@@ -126,19 +129,24 @@ class LightningModel(pl.LightningModule):
             hparams.update(flatten_dict(self.model.get_hparams()))
         # Get the labels of metrics
         if self.logger:
-            self.logger.log_hyperparams(hparams, {"val_loss": 0, "test_loss": 0, "train_loss": 0,
-                                                  "test/rec_loss": 0, "test/pred_loss": 0,
-                                                  "test/lin_loss": 0, "test/linf_loss": 0,
-                                                  "val/rec_loss": 0, "val/pred_loss": 0,
-                                                  "val/lin_loss": 0, "val/linf_loss": 0
-                                                  })
+            metrics = {"val/loss": 0, "test/loss": 0, "train/loss": 0}
+            if callable(getattr(self.model, 'get_metric_labels', None)):
+                metric_labels = self.model.get_metric_labels()
+                for k in metric_labels:
+                    metrics[f"test/{k}"] = 0
+                    metrics[f"val/{k}"] = 0
+            else:
+                log.warning(f"Model does not implement `get_metric_labels` function. Only default metrics "
+                            f"{list(metrics.keys())} will be logged to tensorboard hyperparam metrics")
+            self.logger.log_hyperparams(hparams, metrics)
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
         self.logger.save()
 
         if ckpt_call is not None:
-            ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
+            ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(
+                ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
             best_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.filename + ckpt_call.FILE_EXTENSION)
             if ckpt_path.exists() and best_path.exists():
                 # Remove last model ckpt leave only best, to hint training successful termination.

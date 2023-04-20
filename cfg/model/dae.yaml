@@ -1,0 +1,9 @@
+defaults:
+  - base_model
+
+name: DAE
+# Model hyperparameters
+loss_pred_w: 0.01    # Cost function weight for prediction in observation space Z
+state_topology: True
+eigval_init: "stable"   # Initialization of eigenvalues [stable, ]
+eigval_constraint: "unconstrained"   # [unconstrained or unit_circle]

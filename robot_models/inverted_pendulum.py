@@ -91,11 +91,11 @@ if __name__ == "__main__":
     num_trajs = 150
     # Hyperparameters of trajectory
     dt = 1e-2
-    n_traj_nodes = 300
+    n_traj_nodes = 150
     # trajType = "unstable_fix_point"
     # trajType = "inverted_periodic"
     # trajType = "periodic"
-    trajType = "unactuated"
+    trajType = "periodic"
     state_dim_error_w = np.array([25, .1])  # 0.5 * (||r||_w)^2 => w: weights
     state_error_cost_w = 1
     terminal_state_error_cost_w = state_error_cost_w
@@ -213,6 +213,7 @@ if __name__ == "__main__":
                          f"Nodes: {n_traj_nodes}, dt: {dt}, train:{len(train_trajs)}-test:{len(test_trajs)}-"
                          f"val:{len(val_trajs)}")
     fig.show()
+
 
     path = pathlib.Path("data") / robot_name / trajType / print_dict(metadata['traj_params'])
     path.mkdir(parents=True, exist_ok=True)

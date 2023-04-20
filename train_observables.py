@@ -20,6 +20,7 @@ from data.ClosedLoopDynamics import ClosedLoopDynDataset, STATES, CTRLS
 from data.ClosedLoopDynamicsDataModule import ClosedLoopDynDataModule
 from nn.LightningModel import LightningModel
 from nn.DynamicsAutoencoder import EDynamicsAutoEncoder, DynamicsAutoEncoder
+from nn.VAMP import VAMP
 
 try:
     from src.RobotEquivariantNN.groups.SparseRepresentation import SparseRep
@@ -28,7 +29,6 @@ except ImportError as e:
     raise Exception("run `git submodule update --init")
 
 from utils.mysc import check_if_resume_experiment, class_from_name
-
 
 @hydra.main(config_path='cfg', config_name='config', version_base='1.1')
 def main(cfg: DictConfig):
@@ -47,12 +47,12 @@ def main(cfg: DictConfig):
     # Check if experiment already run
     tb_logger = pl_loggers.TensorBoardLogger(".", name=f'seed={cfg.seed}', version=cfg.seed, default_hp_metric=False)
     ckpt_folder_path = Path(tb_logger.log_dir) / "ckpt"
-    ckpt_call = ModelCheckpoint(dirpath=ckpt_folder_path, filename='best', monitor="val_loss", save_last=True)
+    ckpt_call = ModelCheckpoint(dirpath=ckpt_folder_path, filename='best', monitor="val/loss", save_last=True)
     training_done, ckpt_path, best_path = check_if_resume_experiment(ckpt_call)
     # test_metrics_path = Path(tb_logger.log_dir) / 'test_metrics.csv'
 
     if not training_done:
-        stop_call = EarlyStopping(monitor='val_loss', patience=max(10, int(cfg.model.max_epochs * 0.1)), mode='min')
+        stop_call = EarlyStopping(monitor='val/loss', patience=max(10, int(cfg.model.max_epochs * 0.1)), mode='min')
 
         log.info("Initiating Training\n")
         # Configure Lightning trainer
@@ -92,36 +92,47 @@ def main(cfg: DictConfig):
                                              pred_horizon=cfg.model.pred_horizon,
                                              num_workers=cfg.num_workers, device=device, augment=cfg.model.augment,
                                              rep_state=rep_state, rep_ctrl=rep_crtl,
-                                             robot=robot.model, pred_w=cfg.model.loss_pred_w,
+                                             robot=robot.model,
                                              dynamic_regime=cfg.model.dynamic_regime)
         datamodule.prepare_data()
 
-        # Get DynAE model.
-        obs_dim = cfg.model.obs_dim
-        nn_input_mean = torch.cat((datamodule.train_dataset._state_mean, datamodule.train_dataset._ctrl_mean)).to(torch.float32)
-        nn_inout_std = torch.cat((datamodule.train_dataset._state_scale, datamodule.train_dataset._ctrl_scale)).to(torch.float32)
+        # Get the selected model for observation learning _____________________________________________________________
         activation = class_from_name('torch.nn', cfg.model.activation)
-        if cfg.model.equivariance:
-            model = EDynamicsAutoEncoder(repX=repX, obs_dim=obs_dim, dt=1e-2, robot=robot.model,
-                                         eigval_init=cfg.model.eigval_init,
-                                         eigval_constraint=cfg.model.eigval_constraint,
-                                         respect_state_topology=cfg.model.state_topology,
-                                         num_hidden_cells=cfg.model.hidden_neurons,
-                                         input_mean=nn_input_mean, input_std=nn_inout_std,
-                                         activation=activation)
-        else:
-            model = DynamicsAutoEncoder(state_dim=repX.G.d, obs_dim=obs_dim, dt=1e-2, robot=robot.model,
-                                        respect_state_topology=cfg.model.state_topology,
-                                        num_hidden_cells=cfg.model.hidden_neurons,
-                                        input_mean=nn_input_mean, input_std=nn_inout_std,
-                                        activation=activation)
-        model.to(device)
-        # edae_model = EDynamicsAutoEncoder(repX=repX, obs_dim=obs_dim)
+        shared_model_params = dict(obs_dim=cfg.model.obs_dim, activation=activation, robot=robot.model,
+                                   n_hidden_neurons=cfg.model.hidden_neurons, n_layers=cfg.model.n_layers)
+        if cfg.model.name == "VAMP":
+            if cfg.model.equivariance:
+                raise NotImplementedError("VAMP is not implemented with equivariance yet")
+            else:
+                # Current implementation of this variant needs to know in advance how many timesteps we will use
+                # since a NN head needs to be created for each timestep (This is what I want to check if we can avoid)
+                model = VAMP(state_dim=repX.G.d, pred_horizon=cfg.model.pred_horizon, reg_lambda=cfg.model.reg_w,
+                             **shared_model_params)
 
+        elif cfg.model.name == "DAE":
+            dt = 1e-2 # TODO: Get from trajectory meta-data
+            # Model output in state coordinates is unstandarized to get original coordinates
+            nn_input_mean = torch.cat((datamodule.train_dataset._state_mean, datamodule.train_dataset._ctrl_mean)).to(
+                torch.float32)
+            nn_inout_std = torch.cat((datamodule.train_dataset._state_scale, datamodule.train_dataset._ctrl_scale)).to(
+                torch.float32)
+            dae_params = dict(dt=dt, respect_state_topology=cfg.model.state_topology, pred_w=cfg.model.loss_pred_w,
+                              eigval_init=cfg.model.eigval_init, eigval_constraint=cfg.model.eigval_constraint,
+                              input_mean=nn_input_mean, input_std=nn_inout_std,)
+            if cfg.model.equivariance:
+                model = EDynamicsAutoEncoder(repX=repX, **dae_params, **shared_model_params)
+            else:
+                model = DynamicsAutoEncoder(state_dim=repX.G.d, **dae_params, **shared_model_params)
+        else:
+            raise NotImplementedError(f"Model {cfg.model.name} not implemented")
+        model.to(device)
+        # Load lightning module handling the operations of all model variants
         pl_model = LightningModel(lr=cfg.model.lr, batch_size=cfg.model.batch_size, run_hps=cfg.model)
         pl_model.set_model(model)
         pl_model.to(device)
+        # ____________________________________________________________________________________________________________
 
+        #
         trainer.fit(model=pl_model, datamodule=datamodule)
 
         # Plot performance of best model
@@ -132,12 +143,14 @@ def main(cfg: DictConfig):
 
         trainer.test(model=pl_model, datamodule=datamodule)
         pl_model.to(device)
-        datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
-                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
-                                         eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
-        datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
-                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
-                                         eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+
+        if cfg.model.name == "DAE":
+            datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
+                                             log_fig=True, show=cfg.debug_loops or cfg.debug,
+                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+            datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
+                                             log_fig=True, show=cfg.debug_loops or cfg.debug,
+                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
         if cfg.debug:
             datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
                                              eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())

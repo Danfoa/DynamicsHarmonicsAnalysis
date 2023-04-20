@@ -1,5 +1,6 @@
 defaults:
   - _self_
+  - model: dae
 
 # Running hyperparameters
 exp_name: 'tests'
@@ -8,25 +9,6 @@ device: 0
 num_workers: 0       # Dataloader workers
 debug: False
 debug_loops: False
-
-# Model hyperparameters
-model:
-  robot: "pendulum"
-  dynamic_regime: unstable_fix_point
-  equivariance: False
-  pred_horizon: 1.0       # Prediction horizon (int) number of time samples (float) percentage of trajectory
-  obs_dim: 4
-  # Learning hyperparameters parameters
-  lr: 1e-3
-  activation: Tanh
-  augment: False       # Weather to use data-augmentation of the dataset if the system has symmetries.
-  loss_pred_w: 0.01    # Cost function weight for prediction in observation space Z
-  batch_size: 512
-  max_epochs: 500
-  hidden_neurons: 32
-  state_topology: True
-  eigval_init: "stable"   # Initialization of eigenvalues [stable, ]
-  eigval_constraint: "unconstrained"   # [unconstrained or unit_circle]
 
 # Hydra configuration _________
 hydra:

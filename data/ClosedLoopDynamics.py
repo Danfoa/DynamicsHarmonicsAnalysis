@@ -16,7 +16,6 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
 
-from nn.DynamicsAutoencoder import UNBOUND_REVOLUTE
 # TODO: dependencies to update.
 from src.RobotEquivariantNN.utils.utils import dense
 
