@@ -121,10 +121,13 @@ class VAMP(torch.nn.Module):
         avg_rayleigh_score = torch.mean(torch.stack(gen_rayleigh_quotients))
         avg_reg_rayleigh_score = torch.mean(torch.stack(reg_gen_rayleigh_quotients))
         # Store relevant metrics.
-        metrics['avg_obs_independence'] = torch.mean(torch.stack(obs_independence_scores))
+        metrics['avg_obs_dependence'] = torch.mean(torch.stack(obs_independence_scores))
         metrics['avg_obs_Var_Fnorm'] = torch.mean(torch.stack(obs_cov_FNorms))
         metrics['avg_gen_rayleigh'] = avg_rayleigh_score
         metrics['avg_reg_gen_rayleigh'] = avg_reg_rayleigh_score
+        # Store metrics
+        metrics['gen_rayleigh'] = gen_rayleigh_quotients[0]
+        metrics['obs_dependence'] = obs_independence_scores[0]
         # We assume the optimizer is set (as default) to minimize the loss. Thus, we return the negative of the score.
         return -avg_reg_rayleigh_score, metrics
 
@@ -166,11 +169,11 @@ class VAMP(torch.nn.Module):
         dimZ = covZZ.shape[0]
         orthogonality_error = covZZ - torch.eye(covZZ.shape[0], device=covZZ.device)
         # Scale the regularization term with 1/dim**2 to obtain some invariance to the dimension of obs vector.
-        Z_dependence = torch.norm(orthogonality_error, p='fro')**2  #/ (dimZ ** 2)
+        Z_dependence = torch.norm(orthogonality_error, p='fro')**2
         return Z_centered, covZZ, covZZ_Fnorm, Z_dependence
 
     def get_metric_labels(self) -> Iterable[str]:
-        return []
+        return ['gen_rayleigh', 'obs_dependence', 'avg_gen_rayleigh', 'avg_obs_dependence']
 
     def batch_unpack(self, batch):
         return self.state_ctrl_to_x(batch)
