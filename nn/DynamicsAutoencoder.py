@@ -1,19 +1,15 @@
-import warnings
-from typing import Optional, Iterable
-from abc import ABC
+from typing import Iterable
 
 import torch
 from torch.nn import Module
 
 from data.ClosedLoopDynamics import STATES, CTRLS
+from nn.EigenDynamics import EigenspaceDynamics
 from src.RobotEquivariantNN.groups.SparseRepresentation import SparseRep
 from src.RobotEquivariantNN.nn.EMLP import EMLP, MLP
-from src.RobotEquivariantNN.nn.EquivariantModules import EquivariantModule, BasisConv1d, BasisLinear
+from src.RobotEquivariantNN.nn.EquivariantModules import EquivariantModule, BasisLinear
 
 import logging
-
-from utils.complex import view_as_complex
-
 log = logging.getLogger(__name__)
 
 UNBOUND_REVOLUTE = "JointModelRUB"
@@ -225,7 +221,7 @@ class DynamicsAutoEncoder(DynamicsModule):
         self.decoder = MLP(d_in=obs_dim * 2, d_out=state_dim, ch=n_hidden_neurons, n_layers=num_hidden_layers,
                            activation=activation)
 
-        self.observation_dynamics = LinearEigenvectorDynamics(dim=obs_dim, **kwargs)
+        self.observation_dynamics = EigenspaceDynamics(dim=obs_dim, **kwargs)
 
     def forcast(self, x):
 
@@ -267,7 +263,7 @@ class EDynamicsAutoEncoder(EquivariantModule, DynamicsModule):
         self.decoder = EMLP(rep_in=self.repZ + self.repZ, rep_out=self.rep_in, ch=n_hidden_neurons,
                             n_layers=num_hidden_layers + 1,
                             activation=[activation] * num_hidden_layers + [torch.nn.Identity])
-        self.observation_dynamics = LinearEigenvectorDynamics(dim=obs_dim, **kwargs)
+        self.observation_dynamics = EigenspaceDynamics(dim=obs_dim, **kwargs)
 
         # print(list(self.parameters(recurse=True)))
         # Test equivariance after observations are evolved. That is, test for G-equivariant linear observation dynamics
@@ -294,7 +290,6 @@ class EDynamicsAutoEncoder(EquivariantModule, DynamicsModule):
         # Turn complex observations into stacked vectors [re(ø_1),...re(ø_m), img(ø_1),...img(ø_m)
         # Such that we can apply the symmetry as rep=block_diag(repZ, repZ)
         z_pred_real = torch.view_as_real(z_pred)
-        z_
 
         x_pred = self.decoder(z_pred)
         return {"x_pred": x_pred, "z_pred": z_pred, "z": z}
@@ -304,94 +299,3 @@ class EDynamicsAutoEncoder(EquivariantModule, DynamicsModule):
                 'decoder': self.decoder.get_hparams()}
 
 
-class LinearEigenvectorDynamics(Module):
-
-    def __init__(self, dim: int, eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
-        super().__init__()
-        assert dim % 2 == 0, "For now only cope with even dimensions."
-        self.dim = dim
-        self._eigval_init = eigval_init
-        self._eigval_constraint = eigval_constraint
-
-        # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
-        # Each eigval is parameterized as re^(iw)
-        w = torch.rand(self.dim)
-        r = torch.rand(self.dim)
-        if eigval_constraint == "unconstrained":
-            self.w = torch.nn.Parameter(w, requires_grad=True)
-            self.r = torch.nn.Parameter(r, requires_grad=True)
-        elif eigval_constraint == "unit_circle":
-            self.w = torch.nn.Parameter(w, requires_grad=True)
-            r = r * 0 + 1.
-            self.r = torch.nn.Parameter(r, requires_grad=False)
-
-        else:
-            raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
-
-        # Initialize eigenvalues.
-        self.reset_parameters(init_mode=eigval_init)
-
-    def forward(self, z_real, dt):
-        assert torch.all(torch.isreal(z_real)), "We assume each complex observation is passed as a 2D real vector"
-        # Each complex observation is assumed to be an eigenfunction, forced to experience linear/eigenvalue dynamics
-        z_cplx = view_as_complex(z_real)
-        z_cplx = torch.unsqueeze(z_cplx, 1)  # Add timestep dimension,
-
-        # Diagonal of the eigen matrix
-        matrix_eigvals = torch.unsqueeze(self.eigvals, 0)
-
-        # Matrix exponential of a diagonal matrix is the exponent of the diagonal elements.
-        discrete_eigvals = torch.exp(torch.mul(torch.unsqueeze(dt, 1), matrix_eigvals))
-
-        # Evolve the eigenfunctions z_t+dt = K·z_t
-        z_pred_cplx = torch.mul(z_cplx, discrete_eigvals)
-        # Reshape to original shape is required because of how view_as_real works.
-        original_shape = (tuple(z_pred_cplx.shape[:2]) + (-1,))
-        z_pred_real = torch.reshape(torch.view_as_real(z_pred_cplx), original_shape)
-        return z_pred_real
-
-    @property
-    def eigvals(self) -> torch.Tensor:
-        re_eig = self.r * torch.cos(self.w)
-        img_eig = self.r * torch.sin(self.w)
-        eigvals = torch.view_as_complex(torch.stack((re_eig, img_eig), dim=1))
-        return eigvals
-
-    def reset_parameters(self, init_mode: str):
-        self._eigval_init = init_mode
-        if init_mode == "stable":
-            torch.nn.init.uniform_(self.w, torch.pi / 2, 3 * torch.pi / 2)
-            torch.nn.init.ones_(self.r)
-            eigvals = self.eigvals
-            # Check stability
-            assert torch.all(torch.real(eigvals) < 0), f"Not stable eigenvalues"
-            # Check unit circle
-            assert torch.allclose(torch.abs(eigvals), torch.ones_like(self.r)), f"Not in unit circle"
-        else:
-            raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
-        log.info(f"Eigenvalues initialization to {init_mode}")
-
-    @staticmethod
-    def interleave_with_conjugate(a: torch.Tensor):
-        assert a.dtype == torch.cfloat or a.dtype == torch.cdouble
-        new_shape = list(a.shape)
-        if a.shape != 1:  # multi dimensional tensor
-            d = a.shape[-1]
-            new_shape[-1] = 2 * d
-        else:
-            d = 1
-            new_shape = 2 * d
-
-        a_conj_a = torch.concatenate([torch.unsqueeze(a, -1), torch.unsqueeze(torch.conj(a), -1)], dim=-1).view(
-            new_shape)
-        return a_conj_a
-
-    def get_hparams(self):
-        return {'n_cplx_eigval': self.dim // 2,
-                'eigval_init': self._eigval_init,
-                'eigval_constraint': self._eigval_constraint}
-
-    def extra_repr(self):
-        return f"EigMatrix: n_cplx_eigval:{self.dim//2}" + \
-               "on unit circle" if self._eigval_constraint == "unit_circle" else "" + \
-               f" - init: {self._eigval_init}"

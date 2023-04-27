@@ -2,8 +2,6 @@
 
 name: ??
 # Dataset related parameters
-robot: "pendulum"
-dynamic_regime: unstable_fix_point
 augment: False          # Weather to use data-augmentation of the dataset if the system has symmetries.
 # Architectural and Task parameters
 equivariance: False     # Impose equivariance constraints on NNs
@@ -16,5 +14,5 @@ n_layers: 3             # Number MLPs' layers (including input and output layers
 # Optimization hyperparameters parameters
 lr: 1e-3
 batch_size: 512
-max_epochs: 500
+
 

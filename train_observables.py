@@ -52,7 +52,7 @@ def main(cfg: DictConfig):
     # test_metrics_path = Path(tb_logger.log_dir) / 'test_metrics.csv'
 
     if not training_done:
-        stop_call = EarlyStopping(monitor='val/loss', patience=max(10, int(cfg.model.max_epochs * 0.1)), mode='min')
+        stop_call = EarlyStopping(monitor='val/loss', patience=max(10, int(cfg.max_epochs * 0.1)), mode='min')
 
         log.info("Initiating Training\n")
         # Configure Lightning trainer
@@ -60,7 +60,7 @@ def main(cfg: DictConfig):
                           logger=tb_logger,
                           accelerator="auto",
                           log_every_n_steps=50,
-                          max_epochs=cfg.model.max_epochs if not cfg.debug_loops else 2,
+                          max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
                           check_val_every_n_epoch=1,
                           benchmark=True,
                           callbacks=[ckpt_call, stop_call],
@@ -87,18 +87,19 @@ def main(cfg: DictConfig):
         rep_crtl = SparseRep(G_crtl)
         assert G_state.d == robot.nq + robot.nv
 
-        data_path = root_path / "data" / cfg.model.robot
+        data_path = root_path / "data" / cfg.robot
         datamodule = ClosedLoopDynDataModule(data_path, batch_size=cfg.model.batch_size,
                                              pred_horizon=cfg.model.pred_horizon,
                                              num_workers=cfg.num_workers, device=device, augment=cfg.model.augment,
                                              rep_state=rep_state, rep_ctrl=rep_crtl,
                                              robot=robot.model,
-                                             dynamic_regime=cfg.model.dynamic_regime)
+                                             dynamic_regime=cfg.dynamic_regime)
         datamodule.prepare_data()
 
         # Get the selected model for observation learning _____________________________________________________________
         activation = class_from_name('torch.nn', cfg.model.activation)
-        shared_model_params = dict(obs_dim=cfg.model.obs_dim, activation=activation, robot=robot.model,
+        dt = 1e-2  # TODO: Get from trajectory meta-data
+        shared_model_params = dict(obs_dim=cfg.model.obs_dim, dt=dt, activation=activation, robot=robot.model,
                                    n_hidden_neurons=cfg.model.hidden_neurons, n_layers=cfg.model.n_layers)
         if cfg.model.name == "VAMP":
             if cfg.model.equivariance:
@@ -110,13 +111,12 @@ def main(cfg: DictConfig):
                              **shared_model_params)
 
         elif cfg.model.name == "DAE":
-            dt = 1e-2 # TODO: Get from trajectory meta-data
             # Model output in state coordinates is unstandarized to get original coordinates
             nn_input_mean = torch.cat((datamodule.train_dataset._state_mean, datamodule.train_dataset._ctrl_mean)).to(
                 torch.float32)
             nn_inout_std = torch.cat((datamodule.train_dataset._state_scale, datamodule.train_dataset._ctrl_scale)).to(
                 torch.float32)
-            dae_params = dict(dt=dt, respect_state_topology=cfg.model.state_topology, pred_w=cfg.model.loss_pred_w,
+            dae_params = dict(respect_state_topology=cfg.model.state_topology, pred_w=cfg.model.loss_pred_w,
                               eigval_init=cfg.model.eigval_init, eigval_constraint=cfg.model.eigval_constraint,
                               input_mean=nn_input_mean, input_std=nn_inout_std,)
             if cfg.model.equivariance:
@@ -127,7 +127,9 @@ def main(cfg: DictConfig):
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
         model.to(device)
         # Load lightning module handling the operations of all model variants
-        pl_model = LightningModel(lr=cfg.model.lr, batch_size=cfg.model.batch_size, run_hps=cfg.model)
+        epoch_metrics_fn = model.evaluate_observation_space if hasattr(model, "evaluate_observation_space") else None
+        pl_model = LightningModel(lr=cfg.model.lr, batch_size=cfg.model.batch_size, run_hps=cfg.model,
+                                  test_epoch_metrics_fn=epoch_metrics_fn, val_epoch_metrics_fn=epoch_metrics_fn)
         pl_model.set_model(model)
         pl_model.to(device)
         # ____________________________________________________________________________________________________________
@@ -144,16 +146,16 @@ def main(cfg: DictConfig):
         trainer.test(model=pl_model, datamodule=datamodule)
         pl_model.to(device)
 
-        if cfg.model.name == "DAE":
-            datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
-                                             log_fig=True, show=cfg.debug_loops or cfg.debug,
-                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
-            datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
-                                             log_fig=True, show=cfg.debug_loops or cfg.debug,
-                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
-        if cfg.debug:
-            datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
-                                             eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+
+        datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
+                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
+                                         eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+        # datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
+        #                                  log_fig=True, show=cfg.debug_loops or cfg.debug,
+        #                                  eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+        # if cfg.debug:
+        #     datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
+        #                                      eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
 
     else:
         log.warning(f"Training run done. Check {Path(tb_logger.log_dir).absolute()} for results.")

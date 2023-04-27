@@ -4,8 +4,54 @@ from collections.abc import Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 import pinocchio
+import torch
 from matplotlib.figure import Figure
 from pinocchio import RobotWrapper
+
+from utils.mysc import best_rectangular_grid
+
+
+def plot_observations(z: torch.Tensor, z_pred: torch.Tensor, eigvals=None, dt=None, cmap=None, fig=None, artists=None):
+    assert z.shape == z_pred.shape, f"Real and predicted state trajs differ in size {z.shape} != {z_pred.shape}"
+    assert torch.is_complex(z) and torch.is_complex(z_pred)
+    assert eigvals is None or eigvals.shape[0] == z.shape[-1], f"Eigenval and obs dim {eigvals.shape} != {z.shape[-1]}"
+    n_trajs = z.shape[0]
+    assert n_trajs < 5, "More than five trajectories becomes too crowded"
+
+    if cmap is None:
+        cmap = plt.cm.get_cmap('inferno', z.shape[0] + 1)
+
+    for i, (state_obs, state_obs_pred) in enumerate(zip(z, z_pred)):
+        r, c = best_rectangular_grid(state_obs.shape[-1])
+        ncols, nrows = max(r, c), min(r, c)
+        fig, axs, artists = plotNdimTraj(traj=state_obs.cpu().detach().numpy(),
+                                         traj_des=state_obs_pred.cpu().detach().numpy(), eigvals=eigvals,
+                                         var_name="ø(x)", show=False, dt=dt,
+                                         fig=fig, legend=False, color=cmap(i),
+                                         plot_grad_field=i == n_trajs - 1,
+                                         markersize=0, artists=artists, ncols=ncols)
+
+    return fig, artists
+
+
+def plot_state_actions(states, ctrls, states_pred, ctrls_pred, dt=None, cmap=None, fig=None, artists=None, robot=None):
+    assert states.shape == states_pred.shape, f"Real and pred state trajs differ {states.shape} != {states_pred.shape}"
+    n_trajs = states.shape[0]
+    assert n_trajs < 5, "More than five trajectories becomes too crowded"
+    if cmap is None:
+        cmap = plt.cm.get_cmap('inferno', n_trajs + 1)
+
+    for i, (state, ctrl, state_pred, ctrl_pred) in enumerate(zip(states, ctrls, states_pred, ctrls_pred)):
+        # TODO: temporary check of topology
+        n_gt = torch.norm(state_pred[:, [0, 1]], dim=-1)
+        n_pred = torch.norm(state[:, [0, 1]], dim=-1)
+        assert torch.allclose(n_pred, torch.ones_like(n_pred))
+        assert torch.allclose(n_gt, torch.ones_like(n_gt))
+        fig, axs = plotOCSolution(xs=state.cpu().detach().numpy(), us=ctrl.cpu().detach().numpy(),
+                                  xs_des=state_pred.cpu().detach().numpy(), us_des=ctrl_pred.cpu().detach().numpy(),
+                                  robot_model=robot, show=False, dt=dt, plot_area=True, legend=False,
+                                  fig=fig, color=cmap(i), markersize=0)
+    return fig
 
 
 def plotOCSolution(xs=None, us=None, xs_des=None, us_des=None, robot_model: pinocchio.Model = None, fig: Figure = None,
@@ -70,14 +116,18 @@ def plotOCSolution(xs=None, us=None, xs_des=None, us_des=None, robot_model: pino
                            linestyle_kwargs=des_state_traj_style)
     else:
         q_ax, dq_ax, u_ax = axs[:robot_model.nq], axs[robot_model.nq:robot_model.nq + robot_model.nv], axs[-nu:]
-        plot_ndim_traj(q_ax, t=t, traj=X[:, :robot_model.nq], traj_area=xs_des[:, :robot_model.nq] if plot_area else None,
-                       dim_labels=x_labels[:robot_model.nq], color=color, legend=legend, linestyle_kwargs=state_traj_style, y_label="State pos")
+        plot_ndim_traj(q_ax, t=t, traj=X[:, :robot_model.nq],
+                       traj_area=xs_des[:, :robot_model.nq] if plot_area else None,
+                       dim_labels=x_labels[:robot_model.nq], color=color, legend=legend,
+                       linestyle_kwargs=state_traj_style, y_label="State pos")
         if xs_des is not None:
             plot_ndim_traj(q_ax, t=t, traj=xs_des[:, :robot_model.nq], color=color, legend=legend,
                            dim_labels=xdes_labels[:robot_model.nq], linestyle_kwargs=des_state_traj_style)
 
-        plot_ndim_traj(dq_ax, t=t, traj=X[:, robot_model.nq:], traj_area=xs_des[:, robot_model.nq:] if plot_area else None,
-                       dim_labels=x_labels[robot_model.nq:], color=color, legend=legend, linestyle_kwargs=state_traj_style, y_label="State vel")
+        plot_ndim_traj(dq_ax, t=t, traj=X[:, robot_model.nq:],
+                       traj_area=xs_des[:, robot_model.nq:] if plot_area else None,
+                       dim_labels=x_labels[robot_model.nq:], color=color, legend=legend,
+                       linestyle_kwargs=state_traj_style, y_label="State vel")
         if xs_des is not None:
             plot_ndim_traj(dq_ax, t=t, traj=xs_des[:, robot_model.nq:], color=color, legend=legend,
                            dim_labels=xdes_labels[robot_model.nq:], linestyle_kwargs=des_state_traj_style)
@@ -132,9 +182,9 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
 
     # Configure or recover fig.
     if fig is None:
-        nrows = nx//ncols
+        nrows = nx // ncols
         if figsize is None:
-            figsize = (ncols*2.8, nrows*2.8)
+            figsize = (ncols * 2.8, nrows * 2.8)
         fig, axs = plt.subplots(ncols=ncols, nrows=nrows, sharex=not complex_traj, figsize=figsize)
         if nx == 1: axs = [axs]
     else:
@@ -147,12 +197,13 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
     for dim, (ax, y_label) in enumerate(zip(axs, x_labels)):
         if complex_traj:
             x = traj[:, dim]
-            x_des = traj_des[:, dim ]
+            x_des = traj_des[:, dim]
             artists = plot_complex_traj(ax, traj=x, artists=artists, color=color, legend=False, y_label=y_label,
-                                        linestyle_kwargs=xs_line_style, eigval=eigvals[dim], **kwargs)
+                                        linestyle_kwargs=xs_line_style,
+                                        eigval=eigvals[dim] if eigvals is not None else None, **kwargs)
             if traj_des is not None:
                 plot_complex_traj(ax, traj=x_des, artists=artists, color=color, legend=False, y_label=y_label,
-                                  linestyle_kwargs=xs_des_line_style, traj0_markersize=25, traj0_marker="D")
+                                  linestyle_kwargs=xs_des_line_style, traj0_markersize=25, traj0_marker="D", **kwargs)
         else:
             x, x2 = traj[:, dim], traj_des[:, dim] if traj_des is not None else None
             plot_traj(ax, t=t, traj=traj[:, dim], traj_area=x2, color=color, legend=False, y_label=y_label,
@@ -215,7 +266,7 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
 
     # Set plot limits for good visualization of trajectories
     ax_lim = np.max(artists[ax][MAX_STATE])
-    ax_lim *= 1.1   # Add 10% border
+    ax_lim *= 1.1  # Add 10% border
     ax.set_xlim(-ax_lim, ax_lim)
     ax.set_ylim(-ax_lim, ax_lim)
     if ax_lim < 0.5:  # Fix ticks for visualization of collapsed trajs
@@ -225,7 +276,7 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
         # ax.yaxis.set_major_locator(plt.MaxNLocator(3))
 
     if plot_unit_circle and UNIT_CIRCLE not in artists[ax]:
-        theta = np.linspace(0, 2*np.pi, 50)
+        theta = np.linspace(0, 2 * np.pi, 50)
         x, y = np.cos(theta), np.sin(theta)
         unit_circle = ax.plot(x, y, color=circle_color, alpha=0.3)
         center_point = ax.scatter(0, 0, marker="+", color=circle_color, s=60)
@@ -233,23 +284,25 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
 
     if eigval is not None and EIGENVALS not in artists[ax]:
         # Plot conjugate pair of eigenvalues.
-        eig_pair = np.array([[np.real(eigval), np.real(eigval)], [np.imag(eigval), -np.imag(eigval)]])
-        eig_points = ax.scatter(eig_pair[0, :], eig_pair[1, :], marker="X", color=eigval_color, s=80,
-                                label=r"$\lambda=%.2f \pm %.2fi$" % (np.real(eigval), np.imag(eigval)))
-        eig_line = ax.plot(eig_pair[0, :], eig_pair[1, :], color=eigval_color + (0.3,), linewidth=1)
+        eig_points = ax.scatter([np.real(eigval)], [np.imag(eigval)], marker="X", color=eigval_color, s=80,
+                                label=r"$\lambda=%.2f e^{i %d^{\circ}} |P=%.2f[s]$" %
+                                      (np.abs(eigval), np.rad2deg(np.angle(eigval)),
+                                       1 / (np.abs(np.angle(eigval)) / (2 * np.pi))))
+        eig_line = ax.plot([0, np.real(eigval)], [0, np.imag(eigval)], color=eigval_color + (0.3,), linewidth=1)
         artists[ax][EIGENVALS] = [eig_points, eig_line]
+        ax.legend(fontsize='xx-small', frameon=True)
 
     if plot_grad_field and eigval is not None and VECT_FIELD not in artists[ax]:
         num_angles, num_rad = 20, 5
-        radius = np.linspace(ax_lim/num_rad, ax_lim, num_rad)
-        theta = np.linspace(0, 2*np.pi, num_angles)[:-1]
+        radius = np.linspace(ax_lim / num_rad, ax_lim, num_rad)
+        theta = np.linspace(0, 2 * np.pi, num_angles)[:-1]
         x, y = [], []
         for r in radius:
             for a in theta:
                 x.append(r * np.cos(a))
                 y.append(r * np.sin(a))
         x, y = np.asarray(x).flatten(), np.asarray(y).flatten()
-        vel = eigval * (x + 1j*y)
+        vel = eigval * (x + 1j * y)
         u, v = np.real(vel), np.imag(vel)
         quiver = ax.quiver(x, y, u, v, angles='xy', units='xy', color=quiver_color)
         artists[ax][VECT_FIELD] = quiver
@@ -269,8 +322,6 @@ def plot_complex_traj(ax, traj, linestyle_kwargs: dict = None, label=None, x_lab
         ax.tick_params(axis='both', which='both', color=ticks_color, labelcolor=(0.4, 0.4, 0.4), labelsize='xx-small')
         ax.xaxis.set_major_formatter('{x:.1f}')
         ax.yaxis.set_major_formatter('{x:.1f}')
-        # if legend:
-        ax.legend(fontsize='xx-small', frameon=True)
     return artists
 
 

@@ -35,11 +35,14 @@ class ClosedLoopDynDataset(Dataset):
 
         self._data = []
         paths = [path] if isinstance(path, Path) else path
+        self.dataset_type = (''.join(np.unique([f"{p.stem} " for p in paths]))).strip()
         for p in paths:
             assert p.exists(), f"File not found {p.absolute()}"
             with open(p, "rb") as file_handle:
-                self._data.append(pickle.load(file_handle))
-
+                data = pickle.load(file_handle)
+                self._data.append(data)
+                log.debug(f"[{self.dataset_type}] Loaded dataset of {data['robot_name']} "
+                          f"on dynamic regime {data['dynamic_regime']}. Params: {data['traj_params']}")
         self._num_terminal_states = 1  # Num of terminal states without control action.
 
         self.device = device
@@ -138,7 +141,7 @@ class ClosedLoopDynDataset(Dataset):
                 pred_horizon = ceil((traj_length - 1) * self.pred_horizon)
             else:
                 if self.pred_horizon >= traj_length:
-                    log.warning(f"Requested prediction horizon frames {self.pred_horizon} exceed trajectory length "
+                    log.warning(f"[{self.dataset_type}]Requested prediction horizon frames {self.pred_horizon} exceed trajectory length "
                                 f"{traj_length}. Using {traj_length} instead.")
                 pred_horizon = min(self.pred_horizon, traj_length - 1)
             assert pred_horizon <= traj_length, f"Window size should be smaller or equal than trajectory length"
@@ -170,9 +173,9 @@ class ClosedLoopDynDataset(Dataset):
             if first_call:
                 self.standard_scaler[STATES].fit(states)
                 self.standard_scaler[CTRLS].fit(ctrls)
-                log.info(f"Calculating first order moments of state & control history "
-                          f"\n\tState: µ={self.standard_scaler[STATES].mean_},σ={self.standard_scaler[STATES].scale_}"
-                          f"\n\tCtrl: µ={self.standard_scaler[CTRLS].mean_},σ={self.standard_scaler[CTRLS].scale_}")
+                log.info(f"[{self.dataset_type}] Empirical moments from state & control trajectories"
+                          f"\n\tState: \n\t\tµ={self.standard_scaler[STATES].mean_},\n\t\tσ={self.standard_scaler[STATES].scale_}"
+                          f"\n\tCtrl: \n\t\tµ={self.standard_scaler[CTRLS].mean_},\n\t\tσ={self.standard_scaler[CTRLS].scale_}")
 
                 state_mean, state_std = self.standard_scaler[STATES].mean_, self.standard_scaler[STATES].scale_
                 ctrl_mean, ctrl_std = self.standard_scaler[CTRLS].mean_, self.standard_scaler[CTRLS].scale_
@@ -208,6 +211,9 @@ class ClosedLoopDynDataset(Dataset):
                     self.standard_scaler[STATES].mean_, self.standard_scaler[STATES].scale_ = expected_state_mean, np.sqrt(expected_state_var)
                     self.standard_scaler[CTRLS].mean_, self.standard_scaler[CTRLS].scale_ = expected_ctrl_mean, np.sqrt(expected_ctrl_var)
                     self.standard_scaler[STATES].var_, self.standard_scaler[CTRLS].var_ = expected_state_var, expected_ctrl_var
+                    log.info(f"[{self.dataset_type}] Adjusted moments accounting for the expected symmetry in data"
+                             f"\n\tState: \n\t\tµ={self.standard_scaler[STATES].mean_},\n\t\tσ={self.standard_scaler[STATES].scale_}"
+                             f"\n\tCtrl: \n\t\tµ={self.standard_scaler[CTRLS].mean_},\n\t\tσ={self.standard_scaler[CTRLS].scale_}")
 
                 # for i, joint in enumerate(self.robot.joints):
                 #     joint_type = joint.shortname()
@@ -226,9 +232,9 @@ class ClosedLoopDynDataset(Dataset):
 
             states = self.standard_scaler[STATES].transform(states)
             ctrls = self.standard_scaler[CTRLS].transform(ctrls)
-            log.debug(f"State & Control history normalized "
-                     f"\n\tState: µ={np.mean(states, axis=0)},σ={np.std(states, axis=0)}"
-                     f"\n\tCtrl: µ={np.mean(ctrls, axis=0)},σ={np.std(ctrls, axis=0)}")
+            log.debug(f"[{self.dataset_type}] Empirical state & control moments after standarization"
+                     f"\n\tState: \n\t\tµ={np.mean(states, axis=0)},\n\t\tσ={np.std(states, axis=0)}"
+                     f"\n\tCtrl: \n\t\tµ={np.mean(ctrls, axis=0)},\n\t\tσ={np.std(ctrls, axis=0)}")
             self._state_scale = torch.from_numpy(self.standard_scaler[STATES].scale_).to(device=self.device)
             self._ctrl_scale = torch.from_numpy(self.standard_scaler[CTRLS].scale_).to(device=self.device)
             self._state_mean = torch.from_numpy(self.standard_scaler[STATES].mean_).to(device=self.device)

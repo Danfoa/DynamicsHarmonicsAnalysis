@@ -10,13 +10,11 @@ from torch.nn import Module
 
 import logging
 
-from utils.mysc import flatten_dict
+from nn.VAMP import VAMP
 
 log = logging.getLogger(__name__)
 
-LossCallable = Callable[[torch.Tensor, torch.Tensor, ], torch.Tensor]
-MetricCallable = Callable[[torch.Tensor, torch.Tensor, ], dict]
-
+from utils.mysc import flatten_dict
 
 class LightningModel(pl.LightningModule):
 
@@ -31,8 +29,8 @@ class LightningModel(pl.LightningModule):
         # self.model = model
         self._batch_unpack_fn = None
         self._loss_metrics_fn = None
-        self.test_epoch_metrics_fn = test_epoch_metrics_fn
-        self.val_epoch_metrics_fn = val_epoch_metrics_fn
+        self.test_metrics_fn = test_epoch_metrics_fn
+        self.val_metrics_fn = val_epoch_metrics_fn
         self._log_w = log_w
         self._log_preact = log_preact
         self._run_hps = dict(run_hps)
@@ -57,21 +55,27 @@ class LightningModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         inputs = self._batch_unpack_fn(batch)
-        outputs_pred = self.model(inputs)
-        loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
+        outputs = self.model(inputs)
+        loss, metrics = self._loss_metrics_fn(outputs, inputs)
+        if self.val_metrics_fn is not None:
+            val_metrics = self.val_metrics_fn(outputs, inputs)
+            metrics.update(val_metrics)
 
         self.log("val/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="val/", batch_size=self._batch_size)
-        return {'out': outputs_pred, 'gt': inputs}
+        return {'output': outputs, 'input': inputs}
 
     def test_step(self, batch, batch_idx):
         inputs = self._batch_unpack_fn(batch)
-        outputs_pred = self.model(inputs)
-        loss, metrics = self._loss_metrics_fn(outputs_pred, inputs)
+        outputs = self.model(inputs)
+        loss, metrics = self._loss_metrics_fn(outputs, inputs)
+        if self.val_metrics_fn is not None:
+            test_metrics = self.test_metrics_fn(outputs, inputs)
+            metrics.update(test_metrics)
 
         self.log("test/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="test/", batch_size=self._batch_size)
-        return {'out': outputs_pred, 'gt': inputs}
+        return {'output': outputs, 'input': inputs}
 
     def predict_step(self, batch, batch_idx, **kwargs):
         return self(batch)
@@ -84,30 +88,32 @@ class LightningModel(pl.LightningModule):
         if self._log_w: self.log_weights()
         if self._log_preact: self.log_preactivations()
 
-    def validation_epoch_end(self, outputs):
-        if self.val_epoch_metrics_fn is not None:
-            out = [o['out'] for o in outputs]
-            gt = [o['gt'] for o in outputs]
-            out = torch.cat(out, dim=0)
-            gt = torch.cat(gt, dim=0)
-            self.val_epoch_metrics_fn([out, gt, self.trainer, self, False, "val_"])
+    def on_validation_start(self) -> None:
+        if isinstance(self.model, VAMP):
+            # If there is a new function space we need to update the Koopman approximation
+            if not self.model.updated_eigenmatrix:
+                train_dataloader = self.trainer.datamodule.train_dataloader()
+                batched_outputs = []
+                for i, batch in enumerate(train_dataloader):
+                    batched_outputs.append(self.predict_step(batch, i))
+                self.model.approximate_koopman_op(batched_outputs)
 
-    def test_epoch_end(self, outputs):
-        print("Fuck")
-        if self.test_epoch_metrics_fn is not None:
-            out = [o['out'] for o in outputs]
-            gt = [o['gt'] for o in outputs]
-            out = torch.cat(out, dim=0)
-            gt = torch.cat(gt, dim=0)
-            self.test_epoch_metrics_fn([out, gt, self.trainer, self, True, "test_"])
+                if self.val_metrics_fn is not None:
+                    # Compute the training error in prediction of observation dynamics
+                    for i, batch in enumerate(train_dataloader):
+                        obs = self.predict_step(batch, i)
+                        metrics = self.val_metrics_fn(obs, self._batch_unpack_fn(batch))
+                        self.log_metrics(metrics, prefix="train/")
 
-    def on_test_end(self) -> None:
-        self.logger.save()
-
-        for logger in self.trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                tb_logger = logger.experiment
-                tb_logger.flush()
+    def on_test_start(self) -> None:
+        if isinstance(self.model, VAMP):
+            # If there is a new function space we need to update the Koopman approximation
+            if not self.model.updated_eigenmatrix:
+                train_dataloader = self.trainer.datamodule.train_dataloader()
+                batched_outputs = []
+                for i, batch in enumerate(train_dataloader):
+                    batched_outputs.append(self.predict_step(batch, i))
+                self.model.approximate_koopman_op(batched_outputs)
 
     def on_fit_start(self) -> None:
         # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics

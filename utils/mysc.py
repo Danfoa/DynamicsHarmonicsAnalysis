@@ -3,6 +3,22 @@ import pathlib
 
 import torch.nn
 
+import math
+
+
+def best_rectangular_grid(n):
+
+    best_pair = (1, n)
+    best_perimeter = sum(best_pair)
+    for i in range(2, int(math.sqrt(n)) + 1):
+        if n % i == 0:
+            new_pair = (i, n // i)
+            if (sum(new_pair) < best_perimeter):
+                best_pair = new_pair
+                best_perimeter = sum(new_pair)
+
+    return best_pair
+
 
 def class_from_name(module_name, class_name):
     # load the module, will raise ImportError if module cannot be loaded
@@ -11,12 +27,14 @@ def class_from_name(module_name, class_name):
     c = getattr(m, class_name)
     return c
 
+
 def print_dict(d: dict, sort=False):
     str = []
     d_sorted = dict(sorted(d.items())) if sort else d
     for k, v in d_sorted.items():
         str.append(f"{k}={v}")
     return "-".join(str)
+
 
 def append_dictionaries(dict1, dict2, recursive=True):
     import torch
@@ -33,6 +51,7 @@ def append_dictionaries(dict1, dict2, recursive=True):
             result[k] = append_dictionaries(item1, item2)
     return result
 
+
 def flatten_dict(d: dict, prefix=''):
     a = {}
     for k, v in d.items():
@@ -41,6 +60,7 @@ def flatten_dict(d: dict, prefix=''):
         else:
             a[f"{prefix}{k}"] = v
     return a
+
 
 def check_if_resume_experiment(ckpt_call):
     ckpt_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.CHECKPOINT_NAME_LAST + ckpt_call.FILE_EXTENSION)
