@@ -18,8 +18,14 @@ from utils.mysc import flatten_dict
 
 class LightningModel(pl.LightningModule):
 
-    def __init__(self, lr: float, batch_size: int, test_epoch_metrics_fn=None, val_epoch_metrics_fn=None,
-                 log_preact=False, log_w=False, run_hps: Optional[dict] = None):
+    def __init__(self,
+                 lr: float,
+                 batch_size: int,
+                 test_epoch_metrics_fn=None,
+                 val_epoch_metrics_fn=None,
+                 log_preact=False,
+                 log_w=False,
+                 run_hps: Optional[dict] = None):
         super().__init__()
         # self.model_type = model.__class__.__name__
         self.model = None

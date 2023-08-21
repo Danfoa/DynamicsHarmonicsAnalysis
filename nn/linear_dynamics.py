@@ -1,3 +1,4 @@
+import logging
 from collections import OrderedDict
 from typing import Optional
 
@@ -8,51 +9,106 @@ from escnn.group import Representation
 from escnn.nn import FieldType
 from torch.nn import Module
 
-import logging
-
+from nn.markov_dynamics import MarkovDynamicsModule
 from utils.representation_theory import identify_isotypic_spaces
 
 log = logging.getLogger(__name__)
 
 
-class LinearDynamics(Module):
+class EquivariantLinearDynamics(MarkovDynamicsModule):
 
-    def __init__(self, rep: Optional[Representation] = None, state_dim: int = -1,
-                 trainable=True, eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
-        assert rep is not None or state_dim > 0, "Either provide a representation or a state dimension"
-        assert state_dim % 2 == 0, "For now only cope with even dimensions."
-
-        super().__init__()
-
-        self.state_dim = state_dim if rep is None else rep.size
+    def __init__(self,
+                 in_type: FieldType,
+                 dt: float,
+                 trainable=True,
+                 eigval_init="stable",
+                 **kwargs):
+        super().__init__(state_dim=in_type.size, dt=dt, **kwargs)
+        rep = in_type.representation
         self.is_trainable = trainable
 
-        # Extract the Isotypic Decomposition information from the state representation.
-        if rep is not None:
-            self.G = rep.group
-            if 'isotypic_reps' in rep.attributes:
-                self.Q_iso = rep.change_of_basis
-                self.rep = Representation(group=rep.group, irreps=rep.irreps, name=f"{rep.name}-iso",
-                                          change_of_basis=np.eye(self.state_dim))
-            else:
-                self.rep, self.Q_iso = identify_isotypic_spaces(rep)
-            # Check if features already come in an isotypic basis. If so avoid changing basis at each forward pass.
-            self.is_state_in_isotypic_basis = np.allclose(self.Q_iso, np.eye(self.state_dim))
-            # Dictionary mapping active irreps with their corresponding Isotypic Subspace group representation
-            self.iso_reps = self.rep.attributes['isotypic_reps']
-            assert isinstance(self.iso_reps, OrderedDict), "We rely on ordered dict"
-            # Ordered list of active irreps
-            self.iso_irreps = [self.G.irrep(*irrep_id) for irrep_id in self.iso_reps.keys()]
-            # Define the input and output field types for ESCNN.
-            gspace = escnn.gspaces.no_base_space(self.G)
-            self.in_field_type = FieldType(gspace, self.iso_reps.values())
-            self.out_field_type = FieldType(gspace, self.iso_reps.values())
+        self.symm_group = rep.group
 
-        number_of_params = self.calc_num_trainable_params() if self.is_trainable else 0
+        # Assert that the input field type is already in a symmetry enabled basis / isotypic basis.
+        for rep in in_type.representations:
+            assert len(np.unique(rep.irreps, axis=0)) == 1, f"Field rep:{rep} is not a rep of an isotypic subspace"
 
+        # Use ESCNN to create a G-equivariant linear layer.
+        # TODO: Modify initialization to account not for information flow but rather for different dynamical properties
+        #  such as stability, etc.
+        self._equiv_lin_layer = escnn.nn.Linear(in_type=in_type,
+                                                out_type=in_type,
+                                                bias=False,
+                                                basisexpansion='blocks',  # TODO: Improve basis expansion
+                                                initialize=True,          # TODO: Modify initialization
+                                                )
+        # Initialize eigenvalues.
+        # TODO: Init
+
+    def forcast(self, initial_state: torch.Tensor, n_steps: int = 1):
+
+        state_trajectory = torch.unsqueeze(initial_state, 1)  # Add time dimension
+
+        # Evolve dynamics
+        for step in range(n_steps):
+            # TODO: Push for numerical efficiency doing block-diagonal matrix multiplication
+            state_pred = self._equiv_lin_layer(state_trajectory[:, step, :])
+            # Append pred state to state trajectory
+            state_trajectory = torch.cat((state_trajectory, state_pred), dim=1)
+
+        # If required prediction is only a single step, return only that step.
+        if state_trajectory.shape[1] == 1:
+            state_trajectory = state_trajectory.squeeze(1)
+
+        return state_trajectory
+
+    def pre_process_state(self, state: torch.Tensor) -> torch.Tensor:
+        if not self.rep_trivial_change_of_basis:
+            # Change basis to the isotypic decomposition basis
+            state_iso = torch.matmul(self.Q_iso, state)
+            return state_iso
+        return state
+
+    def post_process_state(self, state: torch.Tensor) -> torch.Tensor:
+        if not self.rep_trivial_change_of_basis:
+            # Change basis back to the original basis
+            state_orig = torch.matmul(self.Q_iso.T, state)
+            return state_orig
+        return state
+
+    def get_hparams(self):
+        return {'state_dim': self.state_dim,
+                'n_isotypic_spaces': len(self.isotypic_subspaces_reps),
+                'isotypic_spaces_dim': [rep.size for rep in self.iso_reps.values()],
+                'is_state_in_isotypic_basis': self.rep_trivial_change_of_basis,
+                }
+
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class LinearDynamics(Module):
+
+    def __init__(self, dim: int, trainable=True, eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
+        super().__init__()
+        assert dim % 2 == 0, "For now only cope with even dimensions."
+        self.dim = dim
+        self.trainable = trainable
         self._eigval_init = eigval_init
         self._eigval_constraint = eigval_constraint
 
+        # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
+        # Each eigval is parameterized as re^(iw)
+        w = torch.rand(self.dim)
+        r = torch.rand(self.dim)
+        if eigval_constraint == "unconstrained":
+            self.w = torch.nn.Parameter(w, requires_grad=self.trainable)
+            self.r = torch.nn.Parameter(r, requires_grad=self.trainable)
+        elif eigval_constraint == "unit_circle":
+            self.w = torch.nn.Parameter(w, requires_grad=self.trainable)
+            self.r = torch.nn.Parameter(r * 0 + 1., requires_grad=False)
+        else:
+            raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
 
         # Initialize eigenvalues.
         self.reset_parameters(init_mode=eigval_init)
@@ -83,41 +139,6 @@ class LinearDynamics(Module):
             return z_pred, z_pred_eigen
         return z_pred
 
-    def calc_num_trainable_params(self):
-        if self.is_equivariant:
-            # Compute the number of trainable parameters per Isotypic Subspace. This number will depend on the type
-            # of irrep associated with the space.
-            for iso_re_irrep, iso_rep in zip(self.iso_irreps, self.iso_reps.values()):
-                n_G_irred_spaces = iso_rep.size // iso_re_irrep.size  # Number of G-irreducible spaces in Iso subspace.
-                basis = iso_re_irrep.endomorphism_basis()
-                basis_dim = len(basis)
-
-                n_params_per_irred_space = None
-                if iso_re_irrep.type == "R":  # Only Isomorphism are scalar multiple of the identity
-                    n_params_per_irred_space = 1
-                elif iso_re_irrep.type == "C":  # Realification: [re(eig1), im(eig1), ...]
-                    n_params_per_irred_space = 2
-                elif iso_re_irrep.type == "H":  # Realification: [re(eig1), im_i(eig1), im_j(eig1), im_k(eig1),...]
-                    n_params_per_irred_space = 4
-                else:
-                    raise NotImplementedError(f"What is this representation type:{type}? Dunno.")
-
-
-        else:
-            raise NotImplementedError("TODO: Implement this")
-            # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
-            # Each eigval is parameterized as re^(iw)
-            w = torch.rand(self.state_dim)
-            r = torch.rand(self.state_dim)
-            if eigval_constraint == "unconstrained":
-                self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
-                self.r = torch.nn.Parameter(r, requires_grad=self.is_trainable)
-            elif eigval_constraint == "unit_circle":
-                self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
-                self.r = torch.nn.Parameter(r * 0 + 1., requires_grad=False)
-            else:
-                raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
-
     @property
     def eigvals(self) -> torch.Tensor:
         re_eig = self.r * torch.cos(self.w)
@@ -126,8 +147,8 @@ class LinearDynamics(Module):
         return eigvals
 
     def update_eigvals_and_eigvects(self, eigvals: torch.Tensor, eigvects: Optional[torch.Tensor] = None):
-        assert eigvals.shape[0] == self.state_dim
-        assert eigvects is None or eigvects.shape == (self.state_dim, self.state_dim)
+        assert eigvals.shape[0] == self.dim
+        assert eigvects is None or eigvects.shape == (self.dim, self.dim)
         device = self.r.device
         self.r.data = torch.abs(eigvals).to(device)
         self.w.data = torch.angle(eigvals).to(device)
@@ -146,7 +167,7 @@ class LinearDynamics(Module):
         assert obs.ndim == 3, "Expected (batch_size, time, dim(z))"
         if not hasattr(self, "V_inv"):
             raise RuntimeError("Koopman operator data has not been provided. Call `update_eigvals_and_eigvects` first")
-        obs_eig = self.V_inv @ torch.transpose(obs, dim1=2, dim0=1)
+        obs_eig = torch.matmul(self.V_inv.to(obs.device), torch.transpose(obs, dim1=2, dim0=1))
         obs_eig = torch.transpose(obs_eig, dim1=2, dim0=1)
         return obs_eig
 
@@ -162,7 +183,7 @@ class LinearDynamics(Module):
         assert obs_eigen.ndim == 3, "Expected (batch_size, time, dim(z))"
         if not hasattr(self, "V"):
             raise RuntimeError("Koopman operator data has not been provided. Call `update_eigvals_and_eigvects` first")
-        obs = self.V.to(obs_eigen.device) @ torch.transpose(obs_eigen, dim1=2, dim0=1)
+        obs = torch.matmul(self.V.to(obs_eigen.device), torch.transpose(obs_eigen, dim1=2, dim0=1))
         obs = torch.transpose(obs, dim1=2, dim0=1)
         return obs
 
@@ -177,10 +198,6 @@ class LinearDynamics(Module):
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
         log.info(f"Eigenvalues initialization to {init_mode}")
-
-    @property
-    def is_equivariant(self):
-        return hasattr(self, 'rep') and self.rep is not None
 
     @staticmethod
     def interleave_with_conjugate(a: torch.Tensor):
@@ -197,11 +214,11 @@ class LinearDynamics(Module):
         return a_conj_a
 
     def get_hparams(self):
-        return {'n_cplx_eigval':     self.state_dim // 2,
+        return {'n_cplx_eigval': self.dim // 2,
                 'eigval_init': self._eigval_init,
                 'eigval_constraint': self._eigval_constraint}
 
     def extra_repr(self):
-        return f"EigMatrix: n_cplx_eigval:{self.state_dim // 2}" + \
+        return f"EigMatrix: n_cplx_eigval:{self.dim//2}" + \
                "on unit circle" if self._eigval_constraint == "unit_circle" else "" + \
-               f" - init: {self._eigval_init}"
+                                                                                 f" - init: {self._eigval_init}"

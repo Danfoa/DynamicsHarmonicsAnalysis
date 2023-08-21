@@ -10,7 +10,7 @@ num_workers: 0       # Dataloader workers
 debug: False
 debug_loops: False
 max_epochs: 800
-robot: "pendulum"
+system: "pendulum"
 dynamic_regime: unstable_fix_point
 
 # Hydra configuration _________

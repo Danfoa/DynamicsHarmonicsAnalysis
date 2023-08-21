@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class MarkovDataStructure:
+class MarkovDynamicsRecording:
     description: Optional[str] = None
     dynamics_parameters: Dict = field(default_factory=lambda: {'dt': None})
 
@@ -76,10 +76,10 @@ class MarkovDataStructure:
         os.remove('temp_recordings.npz')
         os.remove('temp_metadata.json')
 
-        return MarkovDataStructure(recordings=recordings, **other_attributes)
+        return MarkovDynamicsRecording(recordings=recordings, **other_attributes)
 
 
-def samples_generator(markov_data: MarkovDataStructure, n_frames_per_state: int = 1):
+def samples_generator(markov_data: MarkovDynamicsRecording, n_frames_per_state: int = 1):
     recordings = markov_data.recordings
     # Get any measurement list of trajectories and count the number of trajectories
     # We assume all measurements have the same number of trajectories
@@ -102,7 +102,7 @@ def load_data_generator(shards: list[Path], n_frames_per_state: int = 1,
                         state_measurements: Optional[list[str]] = None,
                         action_measurements: Optional[list[str]] = None):
     for file_path in shards:
-        file_data = MarkovDataStructure.load_from_file(file_path)
+        file_data = MarkovDynamicsRecording.load_from_file(file_path)
         if state_measurements is not None:
             file_data.state_measurements = file_data.measurements
         if action_measurements is not None:
@@ -131,7 +131,7 @@ def get_markov_dynamics_dataset(train_shards: list[Path], test_shards: list[Path
     shards = train_shards + test_shards + val_shards
 
     # TODO: ensure all shards come from the same dynamical system
-    metadata = MarkovDataStructure.load_from_file(train_shards[0], only_metadata=True)
+    metadata = MarkovDynamicsRecording.load_from_file(train_shards[0], only_metadata=True)
 
     features = {}
     for measurement, dim in metadata.measurements.items():

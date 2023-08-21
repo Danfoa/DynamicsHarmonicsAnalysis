@@ -186,3 +186,34 @@ def random_well_conditioned_invertible_matrix(n, perturbation_scale=0.1):
     if np.linalg.cond(T) > 10:
         warnings.warn(f"Condition number of invertible matrix cond(T): {np.linalg.cond(T)}")
     return T
+
+
+def find_combinations(target_dim, irreps_dims, idx=0):
+    """# A = np.array([[0, 1], [-2, -1]]).
+
+    # target_dim = 8
+    # irreps_dims = [2, 1]
+    # combinations = find_combinations(target_dim, irreps_dims)
+    # combinations = [tuple(sorted(c)) for c in combinations]
+    # combinations = list(set(combinations))  # remove duplicates
+    #
+    """
+    # Base case: if target is 0, we're done
+    if target_dim == 0:
+        return [[]]
+    if idx == len(irreps_dims):
+        return []
+
+    current_dim = irreps_dims[idx]
+    max_irreps = target_dim // current_dim
+
+    results = []
+
+    # Try to fit as many of the current irrep dimension into the target as possible
+    for num_irreps in range(max_irreps + 1):
+        remaining_dim = target_dim - current_dim * num_irreps
+        sub_combinations = find_combinations(remaining_dim, irreps_dims, idx + 1)
+        for comb in sub_combinations:
+            results.append([current_dim] * num_irreps + comb)
+
+    return results

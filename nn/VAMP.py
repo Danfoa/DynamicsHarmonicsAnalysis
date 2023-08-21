@@ -3,7 +3,7 @@ from typing import Iterable
 import torch
 
 from data.dynamics_dataset import STATES, CTRLS
-from nn.EigenDynamics import LinearDynamics
+from nn.EquivariantLinearDynamics import EquivariantLinearDynamics
 from src.RobotEquivariantNN.nn.EMLP import MLP
 
 
@@ -53,7 +53,7 @@ class VAMP(torch.nn.Module):
         # self.heads = torch.nn.ModuleList(heads)
 
         # Module for evolving observations in eigenspace basis.
-        self.observation_dynamics = LinearDynamics(state_dim=obs_dim, trainable=False)
+        self.observation_dynamics = EquivariantLinearDynamics(state_dim=obs_dim, trainable=False)
         self._set_updated_eigenmatrix(False)
         # Everytime the observation function approximation is modified, we need to update Koopman approximation.
         # To detect changes in obs function, we place a backward hook on its parameters.

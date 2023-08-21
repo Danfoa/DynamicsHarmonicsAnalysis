@@ -1,19 +1,15 @@
-from collections import OrderedDict
-from pathlib import Path
 from typing import Optional
 
 import chart_studio
 import escnn
 import numpy as np
 import scipy
-from escnn.group import Representation, directsum
-import morpho_symm
-from morpho_symm.groups.isotypic_decomposition import cplx_isotypic_decomposition
+from escnn.group import Representation
 
-from data.dynamics_dataset import MarkovDataStructure
-from utils.mysc import (companion_matrix, matrix_average_trick, random_orthogonal_matrix,
-                        random_well_conditioned_invertible_matrix)
+from data.dynamics_dataset import MarkovDynamicsRecording
+from utils.mysc import companion_matrix, matrix_average_trick, random_orthogonal_matrix
 from utils.plotting import plot_system_2D, plot_system_3D
+from utils.representation_theory import identify_isotypic_spaces
 
 
 def sample_initial_condition(state_dim, P=None, z=None):
@@ -39,9 +35,8 @@ def sample_initial_condition(state_dim, P=None, z=None):
 
 def stable_lin_dynamics(rep: Optional[Representation] = None, state_dim: int = -1,
                         stable_eigval_prob: float = 0.2, time_constant=1, min_period=0.5, max_period=None):
-    """
-
-    Args:
+    """Args:
+    ----
         state_dim: Dimension of the state of the linear system x[t+dt] = A x[t] + eta
         rep: Representation of the group of linear transformations of the state space.
         time_constant: Time constant of the slowest transient eigenvalue of A. Represents the decay rate of the
@@ -50,7 +45,8 @@ def stable_lin_dynamics(rep: Optional[Representation] = None, state_dim: int = -
         min_period: Determines the minimum period of oscillation/rotation of the fastest transient mode in seconds.
         max_period: Determines the maximum period of oscillation/rotation of the slowest transient mode in seconds.
 
-    Returns:
+    Returns
+    -------
     """
     assert min_period > 0, f"Negative minimum period {min_period}"
     assert max_period is None or max_period > min_period, f"Negative maximum period {max_period}"
@@ -61,13 +57,13 @@ def stable_lin_dynamics(rep: Optional[Representation] = None, state_dim: int = -
     max_freq = (1 / min_period) / (2 * np.pi)
     min_freq = (1 / max_period) * (2 * np.pi)
 
-    assert rep is not None or state_dim > 0, f"Either a representation or a state dimension must be provided"
+    assert rep is not None or state_dim > 0, "Either a representation or a state dimension must be provided"
 
     def sample_stable_eigval() -> complex:
         if np.random.uniform() < stable_eigval_prob:
-            real_part = 0   # Stable eigenvalue
+            real_part = 0  # Stable eigenvalue
         else:
-            real_part = -1 * 1 / np.random.uniform(time_constant, time_constant/5)
+            real_part = -1 * 1 / np.random.uniform(time_constant, time_constant / 5)
         imag_part = np.random.uniform(min_freq, max_freq)  # Rotations per second
         return complex(real_part, imag_part)
 
@@ -133,7 +129,7 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     for isotypic_id, rep_iso in isotypic_reps.items():
         A_iso = stable_lin_dynamics(rep_iso,
                                     time_constant=5,
-                                    stable_eigval_prob=1/(state_dim + 1),
+                                    stable_eigval_prob=1 / (state_dim + 1),
                                     min_period=min_period,
                                     max_period=max_period)
         # Enforce G-equivariance
@@ -156,17 +152,17 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
         assert np.allclose(rep_X(g) @ A_G, A_G @ rep_X(g)), f"G-equiv err:{np.max((rep_X(g) @ A_G) - (A_G @ rep_X(g)))}"
 
     # Ensure stability
-    eigvals = np.linalg.eigvals(A_G)
+    np.linalg.eigvals(A_G)
     # assert np.all(np.real(eigvals) < 0), f"Unstable eigenvalues: {eigvals}"
     return A_G, rep_X
 
 
 def evolve_linear_dynamics(A, x0, dt, T, sigma=0.1, P=None, constraint_offset=None):
-    """
-    Evolve the stochastic `x[t+dt] = Ax[t] + eta` system using Euler-Maruyama. Cimplying with the linear
+    """Evolve the stochastic `x[t+dt] = Ax[t] + eta` system using Euler-Maruyama. Cimplying with the linear
     constraints `P @ x[t] >= z`. Equivalent to imposing some Hyperplanes in the state space that cannot be crossed.
 
-    Parameters:
+    Parameters
+    ----------
     - A: System matrix.
     - z: RHS of the constraint.
     - x0: Initial condition.
@@ -174,7 +170,8 @@ def evolve_linear_dynamics(A, x0, dt, T, sigma=0.1, P=None, constraint_offset=No
     - T: Total simulation time.
     - sigma: Noise intensity.
 
-    Returns:
+    Returns
+    -------
     - trajectory: List of state vectors over time.
     """
     x_dim = x0.shape[0]
@@ -212,100 +209,6 @@ def evolve_linear_dynamics(A, x0, dt, T, sigma=0.1, P=None, constraint_offset=No
     return t, np.array(trajectory)
 
 
-def find_combinations(target_dim, irreps_dims, idx=0):
-    """
-    # A = np.array([[0, 1], [-2, -1]])
-
-    # target_dim = 8
-    # irreps_dims = [2, 1]
-    # combinations = find_combinations(target_dim, irreps_dims)
-    # combinations = [tuple(sorted(c)) for c in combinations]
-    # combinations = list(set(combinations))  # remove duplicates
-    #
-    """
-    # Base case: if target is 0, we're done
-    if target_dim == 0:
-        return [[]]
-    if idx == len(irreps_dims):
-        return []
-
-    current_dim = irreps_dims[idx]
-    max_irreps = target_dim // current_dim
-
-    results = []
-
-    # Try to fit as many of the current irrep dimension into the target as possible
-    for num_irreps in range(max_irreps + 1):
-        remaining_dim = target_dim - current_dim * num_irreps
-        sub_combinations = find_combinations(remaining_dim, irreps_dims, idx + 1)
-        for comb in sub_combinations:
-            results.append([current_dim] * num_irreps + comb)
-
-    return results
-
-
-def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Representation]:
-    """
-    Identify the isotypic subspaces of a representation. See Isotypic Basis for more details (TODO).
-    Args:
-        rep (Representation): Input representation in any arbitrary basis.
-
-    Returns: A `Representation` with a change of basis exposing an Isotypic Basis (a.k.a symmetry enabled basis).
-        The instance of the representation contains an additional parameter `isotypic_subspaces` which is an
-        `OrderedDict` of representations per each isotypic subspace. The keys are the active irreps' ids associated
-        with each Isotypic subspace.
-    """
-
-    potential_irreps = rep.group.irreps()
-    isotypic_subspaces_indices = {irrep.id: [] for irrep in potential_irreps}
-    rep.irreps[0] == rep.irreps[0]
-    for irrep in potential_irreps:
-        for index, rep_irrep_id in enumerate(rep.irreps):
-            if G.irrep(*rep_irrep_id) == irrep:
-                isotypic_subspaces_indices[rep_irrep_id].append(index)
-
-    # Remove inactive Isotypic Spaces
-    for irrep in potential_irreps:
-        if len(isotypic_subspaces_indices[irrep.id]) == 0:
-            del isotypic_subspaces_indices[irrep.id]
-
-    # Each Isotypic Space will be indexed by the irrep it is associated with.
-    active_isotypic_reps = {}
-    for irrep_id, indices in isotypic_subspaces_indices.items():
-        # if indices are not consecutive numbers raise an error
-        if not np.all(np.diff(indices) == 1):
-            raise NotImplementedError("TODO: Add permutations needed to handle this case")
-        irrep_dim = G.irrep(*irrep_id).size
-        multiplicities = len(indices)
-        active_isotypic_reps[irrep_id] = Representation(group=rep.group,
-                                                        irreps=[irrep_id] * multiplicities,
-                                                        name=f'IsoSubspace {irrep_id}',
-                                                        change_of_basis=np.identity(irrep_dim * multiplicities))
-
-    # Impose canonical order on the Isotypic Subspaces.
-    # If the trivial representation is active it will be the first Isotypic Subspace.
-    # Then sort by dimension of the space from smallest to largest.
-    ordered_isotypic_reps = OrderedDict(sorted(active_isotypic_reps.items(), key=lambda item: item[1].size))
-    if G.trivial_representation.id in ordered_isotypic_reps.keys():
-        ordered_isotypic_reps.move_to_end(G.trivial_representation.id, last=False)
-
-    # Compute the decomposition of Real Irreps into Complex Irreps and store this information in irrep.attributes
-    # cplx_irrep_i(g) = Q_re2cplx @ re_irrep_i(g) @ Q_re2cplx^-1`
-    for irrep_id in ordered_isotypic_reps.keys():
-        re_irrep = G.irrep(*irrep_id)
-        cplx_subreps, Q_re2cplx = cplx_isotypic_decomposition(G, re_irrep)
-        re_irrep.is_cplx_irrep = len(cplx_subreps) == 1
-        G.irrep(*irrep_id).attributes['cplx_irreps'] = cplx_subreps
-        G.irrep(*irrep_id).attributes['Q_re2cplx'] = Q_re2cplx
-
-    new_rep = directsum(list(ordered_isotypic_reps.values()),
-                        name=rep.name + '-Iso',
-                        change_of_basis=None)  # TODO: Check for additional permutations
-    new_rep.supported_nonlinearities = rep.supported_nonlinearities
-    new_rep.attributes['isotypic_reps'] = ordered_isotypic_reps
-    return new_rep, rep.change_of_basis
-
-
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
@@ -326,28 +229,15 @@ if __name__ == '__main__':
 
     # Define the state representation.
     # rep_X = G.regular_representation # + G.irrep(1)
-    rep_X = G.irrep(1) +  G.irrep(0)
+    rep_X = G.irrep(1) + G.irrep(0)
 
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
     time_constant = 5  # [s] Maximum time constant of the system.
     A_G, rep_X = stable_equivariant_lin_dynamics(rep_X,
                                                  time_constant=time_constant,
-                                                 min_period=time_constant/3,
-                                                 max_period=time_constant*2)
-
-    for _ in range(30):
-        A_G, rep_X = stable_equivariant_lin_dynamics(rep_X,
-                                                     time_constant=time_constant,
-                                                     min_period=time_constant / 3,
-                                                     max_period=time_constant * 2)
-        eigvals = np.linalg.eigvals(A_G)
-        re = np.real(eigvals)
-        if len(re[re < 0]) > 0:
-            t_constant = 1 / np.max(np.abs(re[re < 0]))
-        else:
-            t_constant = 'stable'
-        print(f"Time constant: {t_constant}")
+                                                 min_period=time_constant / 3,
+                                                 max_period=time_constant * 2)
 
     # Generate hyperplanes that constraint outer region of space
     n_constraints = 3
@@ -373,7 +263,6 @@ if __name__ == '__main__':
         t, state_traj = evolve_linear_dynamics(A_G, x0, dt, T, sigma, P=P_symm, constraint_offset=offset)
         state_trajs.append(state_traj)
 
-
     state_trajs = np.asarray(state_trajs)
     # plot_system_2D(A, state_traj, P=P, z=z_val)
     if state_dim == 2:
@@ -384,28 +273,28 @@ if __name__ == '__main__':
     fig.write_html('test.html')
     chart_studio.tools.set_credentials_file(username='danfoa', api_key='YOUR_API_KEY')
 
-    # # Save MarkovDataset
-    # data = MarkovDataStructure(
-    #     description="Stable linear system with stochastic additive noise",
-    #     dynamics_parameters=dict(
-    #         transition_matrix=A_G,
-    #         constraint_matrix=P_symm,
-    #         constraint_vector=offset,
-    #         noise_std=sigma,
-    #         dt=dt,
-    #         time_constant=time_constant,
-    #         ),
-    #     measurements=dict(
-    #         state=state_trajs[0].shape[-1]
-    #         ),
-    #     state_measurements=['state'],
-    #     group_representations=dict(state=rep_X),
-    #     measurements_representations=dict(state='state'),
-    #     recordings=dict(
-    #         state=state_trajs,
-    #         )
-    #     )
-    #
+    # Save MarkovDataset
+    data = MarkovDynamicsRecording(
+        description="Stable linear system with stochastic additive noise",
+        dynamics_parameters=dict(
+            transition_matrix=A_G,
+            constraint_matrix=P_symm,
+            constraint_vector=offset,
+            noise_std=sigma,
+            dt=dt,
+            time_constant=time_constant,
+            ),
+        measurements=dict(
+            state=state_trajs[0].shape[-1]
+            ),
+        state_measurements=['state'],
+        group_representations=dict(state=rep_X),
+        measurements_representations=dict(state='state'),
+        recordings=dict(
+            state=state_trajs,
+            )
+        )
+
     # path_to_data = Path(__file__).parents[1] / 'data'
     # assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
     # path_to_data = path_to_data / 'linear_systems'
