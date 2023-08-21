@@ -2,8 +2,8 @@ from typing import Iterable
 
 import torch
 
-from data.ClosedLoopDynamics import STATES, CTRLS
-from nn.EigenDynamics import EigenspaceDynamics
+from data.dynamics_dataset import STATES, CTRLS
+from nn.EigenDynamics import LinearDynamics
 from src.RobotEquivariantNN.nn.EMLP import MLP
 
 
@@ -39,20 +39,21 @@ class VAMP(torch.nn.Module):
         # create the observations at each time-step.
         # Input to encoder is expected to be [batch_size, time_steps, state_dim]
         self.encoder = MLP(d_in=state_dim, d_out=output_dim, ch=n_hidden_neurons, n_layers=n_layers,
-                           # activation=[activation] * (n_layers - 1) + [torch.nn.Identity],)
-                           activation=[activation] * n_layers)
+                           activation=[activation] * (n_layers - 1) + [torch.nn.Identity],)
+                           # activation=[activation] * n_layers)
 
-        heads = []
-        for head_id in range(pred_horizon + 1):
-            # Each head is constructed as squared perceptrons, one with non-linearity and the last without.
-            # This is a convenient convention. Nothing special behind it.
-            heads.append(MLP(d_in=output_dim, d_out=output_dim, ch=n_hidden_neurons, n_layers=n_head_layers,
-                             with_bias=False, activation=[activation] * (n_head_layers - 1) + [torch.nn.Identity]))
-
-        self.heads = torch.nn.ModuleList(heads)
+        # heads = []
+        # for head_id in range(pred_horizon + 1):
+        #     # Each head is constructed as squared perceptrons, one with non-linearity and the last without.
+        #     # This is a convenient convention. Nothing special behind it.
+        #     n_head_layers = 2
+        #     heads.append(MLP(d_in=n_hidden_neurons, d_out=output_dim, ch=n_hidden_neurons, n_layers=n_head_layers,
+        #                      with_bias=False, activation=[activation] * (n_head_layers - 1) + [torch.nn.Identity]))
+        #
+        # self.heads = torch.nn.ModuleList(heads)
 
         # Module for evolving observations in eigenspace basis.
-        self.observation_dynamics = EigenspaceDynamics(dim=obs_dim, trainable=False)
+        self.observation_dynamics = LinearDynamics(state_dim=obs_dim, trainable=False)
         self._set_updated_eigenmatrix(False)
         # Everytime the observation function approximation is modified, we need to update Koopman approximation.
         # To detect changes in obs function, we place a backward hook on its parameters.
@@ -62,38 +63,49 @@ class VAMP(torch.nn.Module):
         # Backbone operation
         encoder_out = self.encoder(x)
 
-        observations = []
-        for i, head in enumerate(self.heads):
-            # Each head computes observation functions from each timestep [t+i*dt]
-            head_out = head(encoder_out[:, i, :])
-            # output is composed of:
-            # (re(Ψi_1(x_t+i*dt), img(Ψi_1(x_t+i*dt),..., re(Ψi_N(x_t+i*dt)), img(Ψi_N(x_t+i*dt))),
-            # Convert it to a complex tensor
-            # With reshape consecutive scalars are assumed to be real and imaginary parts of a complex number
-            psi = torch.reshape(head_out, shape=(head_out.shape[:-1] + (head_out.shape[-1] // 2, 2)))
-            z_t_idt = torch.view_as_complex(psi)
-            observations.append(z_t_idt)
-
-        # Output original observations of the shape [batch_size, pred_horizon+1, obs_dim]
-        obs = torch.stack(observations, dim=1)
-
+        # observations = []
+        # for i, head in enumerate(self.heads):
+        #     # Each head computes observation functions from each timestep [t+i*dt]
+        #     head_out = head(encoder_out[:, i, :])
+        #     z_t_idt = self.realobs2complex(head_out)
+        #     observations.append(z_t_idt)
+        # obs = torch.stack(observations, dim=1)  # [batch_size, pred_horizon+1, obs_dim]
         # psi = torch.reshape(encoder_out, shape=(encoder_out.shape[:-1] + (encoder_out.shape[-1] // 2, 2)))
         # z_t_idt = torch.view_as_complex(psi)
         # obs = z_t_idt
-        return obs
+        return self.realobs2complex(encoder_out)
+
+    def realobs2complex(self, obs):
+        # obs is composed of:
+        # (re(Ψi_1(x_t+i*dt), img(Ψi_1(x_t+i*dt),..., re(Ψi_N(x_t+i*dt)), img(Ψi_N(x_t+i*dt))),
+        psi = torch.reshape(obs, shape=(obs.shape[:-1] + (obs.shape[-1] // 2, 2)))
+        return torch.view_as_complex(psi)
 
     def forecast(self, x):
+        # Forcasting uses only the first head as the obs function.
         # Compute observations
-        z = self(x)
+        z = self.forward(x)
+        # z_real = self.heads[0](encoder_out)
+        # z = self.realobs2complex(z_real)
+
         n_frames = z.shape[1]
         # Take initial observation z0 and use it to forcast using eigenfunction/value dynamics.
         z0 = z[:, 0, :]
-        dts = torch.arange(0, n_frames, device=z.device) * self.dt
-        z_pred, z_eigen_pred = self.observation_dynamics.forcast(z0, dts, obs_in_eigenbasis=False)
+
+        z_pred = torch.zeros_like(z)
+        z_pred[:, 0, :] = z0
+        for i in range(1, n_frames):
+            z_pred[:, i, :] = torch.matmul(z_pred[:, i-1, :], self.K)
+
+        # TODO: Once everything works use eigendecomp for forcasting
+        # dts = torch.arange(0, n_frames, device=z.device) * self.dt
+        # z_pred, z_eigen_pred = self.observation_dynamics.forcast(z0, dts, obs_in_eigenbasis=False)
+        #
         # Change basis of observations to compute metrics in eigenbasis
-        z_eigen = self.observation_dynamics.obs2eigenbasis(z)
+        # z_eigen = self.observation_dynamics.obs2eigenbasis(z)
         # return obs and predictions in eigenbasis for now.
-        return {'z': z_eigen, 'z_pred': z_eigen_pred, 'z_obs': z, 'z_pred_obs': z_pred}
+        # return {'z': z_eigen, 'z_pred': z_eigen_pred, 'z_obs': z, 'z_pred_obs': z_pred}
+        return {'z': z, 'z_pred': z_pred}
 
     def approximate_koopman_op(self, bacthed_obs: list[torch.Tensor]):
         assert isinstance(bacthed_obs, list), "We expect a list of observations of [(batch_size, time, obs_dim), ...]"
@@ -103,6 +115,7 @@ class VAMP(torch.nn.Module):
 
         # TODO: We will face a problem once the storage of all training data becomes too large. For iterative
         #   DMD we have https://oar.princeton.edu/bitstream/88435/pr1002j/1/RowleyPoFV26-N11-2014.pdf
+        # Define the data matrices X':(D, N) and Y':(D, M) containing the observations at time t and t+1
         X, Y = [], []
         for t in range(n_frames - 1):
             X += [obs[:, t, :] for obs in bacthed_obs]
@@ -118,23 +131,22 @@ class VAMP(torch.nn.Module):
         # Y_pred = torch.matmul(X, KK)
         # error = torch.mean(torch.abs(Y_pred - YY))
 
-        # Torch convention uses X':(D, N) and Y':(D, M) to solve for K':(N, M) to solve the system of eq. Y' = X'·K'
+        # Torch convention uses X':(D, N) and Y':(D, M) to solve the least squares problem Y' = X'·K', where
+        # K':(N, M) is our approximate Koopman operator, for the current function space.
         sol = torch.linalg.lstsq(X, Y)
-        # DMD most common convention is to use data matrices X:(N, D) and Y:(M, D) to solve for K:(M, M)
-        # For the system Y = K·X  <==> Y'^T = X'^T·K'^T. We assume this convention. Thus, our Koopman operator is:
-        K = sol.solution.T
-
+        K = sol.solution
+        self.K = K
         # Decompose Koopman operator into K = V·Λ·V^-1 where V are the eigenvectors and Λ are the eigenvalues.
-        eigvals, eigvects = torch.linalg.eig(K)
+        eigvals, eigvects = torch.linalg.eig(self.K)
 
+        # K_p = eigvects @ torch.diag(eigvals) @ torch.linalg.inv(eigvects)
+        # assert torch.allclose(K_p, self.K, atol=1e-3), "-"
         self.observation_dynamics.update_eigvals_and_eigvects(eigvals, eigvects)
         self._set_updated_eigenmatrix(True)
 
     def evaluate_observation_space(self, obs: torch.Tensor, state: torch.Tensor) -> dict:
-        metrics = {}
         out = self.forecast(state)
-        obs_dynamics_error = observation_dynamics_error(z=out['z'], z_pred=out['z_pred'])
-        metrics["obs_dynamics_error"] = obs_dynamics_error
+        metrics = observation_dynamics_error(z=out['z'][:, 1:, :], z_pred=out['z_pred'][:, 1:, :])
         return metrics
 
     def compute_loss_metrics(self, obs, _):
@@ -163,10 +175,16 @@ class VAMP(torch.nn.Module):
         X_uncentered = obs[:, 0, :]
         X, covXX, covXX_eigvals, covXX_Fnorm, covXX_OPnorm, covXX_reg = self.compute_statistical_metrics(X_uncentered)
 
-        obs_independence_scores.append(covXX_reg)
-        obs_covZZ_Fnorms.append(covXX_Fnorm)
-        obs_covZZ_OPnorms.append(covXX_OPnorm)
-        obs_covZZ_sval_min.append(covXX_eigvals[0])
+        # obs_independence_scores.append(covXX_reg)
+        # obs_covZZ_Fnorms.append(covXX_Fnorm)
+        # obs_covZZ_OPnorms.append(covXX_OPnorm)
+        # obs_covZZ_sval_min.append(covXX_eigvals[0])
+        # if i == 1:
+        #     X_uncentered = obs[:, 0, :]
+        #     X, covXX, covXX_eigvals, covXX_Fnorm, covXX_OPnorm, covXX_reg = self.compute_statistical_metrics(
+        #         X_uncentered)
+        # else:
+        #     X, covXX, covXX_eigvals, covXX_Fnorm, covXX_OPnorm, covXX_reg = Y, covYY, covYY_eigvals, covYY_Fnorm, covYY_OPnorm, covYY_reg
 
         for i in range(1, n_frames):
             Y_uncentered = obs[:, i, :]
@@ -182,25 +200,25 @@ class VAMP(torch.nn.Module):
             # Considering the SVD of A=U·Σ·V^H, and of A^H·A=V·Σ^H·Σ·V^H = V·|Σ|^2·V^H, this is also equivalent to
             # (2) ||A||_F = sqrt(sum<σ_i,σ_i>^2) = sqrt(sum(|σ_i|^2)) | σ_i singular vals of A, and |c| the modulus of c
             # TODO: check whats the fastest way to compute the norm. For now we use svdvals to get min singular value
-            covXY_singular_vals = torch.linalg.svdvals(covXY)  # + (1e-6 * torch.eye(covXY.shape[0], device=covXY.device)))
-            covXY_Fnorm = torch.norm(covXY_singular_vals, p=2)
-            covXY_max_singval, covXY_min_singval = covXY_singular_vals[0], covXY_singular_vals[-1]
+            covXY_svals = torch.linalg.svdvals(covXY)  # + (1e-6 * torch.eye(covXY.shape[0], device=covXY.device)))
+            covXY_Fnorm = torch.norm(covXY_svals, p=2)
+            covXY_max_singval, covXY_min_singval = covXY_svals[0], covXY_svals[-1]
             assert torch.isclose(covXY_Fnorm, torch.linalg.matrix_norm(covXY, ord='fro'))
             covXY_OPnorm = covXY_max_singval
 
             # Compute the generalized Rayleigh quotient
-            # r = ||CovXY||_F^2 / sqrt(||CovXX||_op · ||CovYY||_op)   # Add small reg term for numerical stability
-            gen_rayleigh = covXY_Fnorm**2 / ((covXX_OPnorm * covYY_OPnorm) + 1e-6)
+            # r = ||CovXY||_F^2 / ||CovXX||_op · ||CovYY||_op   # Add small reg term for numerical stability
+            gen_rayleigh = covXY_Fnorm**2 / (covXX_OPnorm * covYY_OPnorm)
             # Add regularization term encouraging orthogonality of observation dimensions.
-            reg_gen_rayleigh = gen_rayleigh - (self.reg_lambda * (covYY_reg + covXX_reg))
+            reg_gen_rayleigh = gen_rayleigh - (self.reg_lambda * covYY_reg)
 
             # Save each time-frame scores for metrics and loss computation.
             gen_rayleigh_quotients.append(gen_rayleigh)
             reg_gen_rayleigh_quotients.append(reg_gen_rayleigh)
-            obs_independence_scores.append(covYY_reg)
-            obs_covZZ_Fnorms.append(covYY_Fnorm)
-            obs_covZZ_OPnorms.append(covYY_OPnorm)
-            obs_covZZ_sval_min.append(covYY_eigvals[0])
+            obs_independence_scores.append(covXX_reg)
+            obs_covZZ_Fnorms.append(covXX_Fnorm)
+            obs_covZZ_OPnorms.append(covXX_OPnorm)
+            obs_covZZ_sval_min.append(covXX_eigvals[0])
             obs_covXY_OPnorms.append(covXY_OPnorm)
             obs_covXY_sval_min.append(covXY_min_singval)
 
@@ -246,7 +264,7 @@ class VAMP(torch.nn.Module):
             - Z_dependence: (float) Metric measuring orthogonality/independence of dimensions of Z.
                 0 means complete independece of dimensions.
         """
-        assert Z.dim() == 2, "We expect a batch of samples of shape (M, dim(z)) | M = batch_size"
+        assert Z.state_dim() == 2, "We expect a batch of samples of shape (M, dim(z)) | M = batch_size"
         # Z_mean = torch.mean(Z_uncentered, dim=0, keepdim=True)
         Z_centered = Z    # Avoid centering feature maps for now - Z_mean
         # Compute covariance per sample in batch
@@ -287,7 +305,7 @@ class VAMP(torch.nn.Module):
             module._set_updated_eigenmatrix(False)
 
     def get_metric_labels(self) -> Iterable[str]:
-        return ['avg_gen_rayleigh', 'avg_obs_dependence', 'obs_dynamics_error']
+        return ['avg_gen_rayleigh', 'avg_obs_dependence', 'obs_dyn_error']
 
     def batch_unpack(self, batch):
         return self.state_ctrl_to_x(batch)

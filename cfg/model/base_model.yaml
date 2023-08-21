@@ -9,7 +9,7 @@ activation: ReLU
 pred_horizon: 1.0       # Prediction horizon (int) number of time samples (float) percentage of trajectory
 obs_dim: 4              # Dimensions of the observation space `m`. Assumed to be a complex valued vector space C^m.
 hidden_neurons: 32      # Number of neurons in hidden layers of MLPs
-n_layers: 3             # Number MLPs' layers (including input and output layers)
+n_layers: 4             # Number MLPs' layers (including input and output layers)
 
 # Optimization hyperparameters parameters
 lr: 1e-3

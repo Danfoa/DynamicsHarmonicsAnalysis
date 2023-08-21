@@ -1,31 +1,36 @@
 from typing import Optional
 
 import torch
+from escnn.group import Representation
 from torch.nn import Module
 
 import logging
 log = logging.getLogger(__name__)
 
 
-class EigenspaceDynamics(Module):
+class LinearDynamics(Module):
 
-    def __init__(self, dim: int, trainable=True, eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
+    def __init__(self, rep: Optional[Representation] = None, state_dim: int = -1, trainable=True,
+                 eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
         super().__init__()
-        assert dim % 2 == 0, "For now only cope with even dimensions."
-        self.dim = dim
-        self.trainable = trainable
+
+        assert rep is not None or state_dim > 0, "Either provide a representation or a state dimension"
+        assert state_dim % 2 == 0, "For now only cope with even dimensions."
+
+        self.state_dim = state_dim if rep is None else rep.size
+        self.is_trainable = trainable
         self._eigval_init = eigval_init
         self._eigval_constraint = eigval_constraint
 
         # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
         # Each eigval is parameterized as re^(iw)
-        w = torch.rand(self.dim)
-        r = torch.rand(self.dim)
+        w = torch.rand(self.state_dim)
+        r = torch.rand(self.state_dim)
         if eigval_constraint == "unconstrained":
-            self.w = torch.nn.Parameter(w, requires_grad=self.trainable)
-            self.r = torch.nn.Parameter(r, requires_grad=self.trainable)
+            self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
+            self.r = torch.nn.Parameter(r, requires_grad=self.is_trainable)
         elif eigval_constraint == "unit_circle":
-            self.w = torch.nn.Parameter(w, requires_grad=self.trainable)
+            self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
             self.r = torch.nn.Parameter(r * 0 + 1., requires_grad=False)
         else:
             raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
@@ -67,8 +72,8 @@ class EigenspaceDynamics(Module):
         return eigvals
 
     def update_eigvals_and_eigvects(self, eigvals: torch.Tensor, eigvects: Optional[torch.Tensor] = None):
-        assert eigvals.shape[0] == self.dim
-        assert eigvects is None or eigvects.shape == (self.dim, self.dim)
+        assert eigvals.shape[0] == self.state_dim
+        assert eigvects is None or eigvects.shape == (self.state_dim, self.state_dim)
         device = self.r.device
         self.r.data = torch.abs(eigvals).to(device)
         self.w.data = torch.angle(eigvals).to(device)
@@ -87,7 +92,7 @@ class EigenspaceDynamics(Module):
         assert obs.ndim == 3, "Expected (batch_size, time, dim(z))"
         if not hasattr(self, "V_inv"):
             raise RuntimeError("Koopman operator data has not been provided. Call `update_eigvals_and_eigvects` first")
-        obs_eig = torch.matmul(self.V_inv.to(obs.device), torch.transpose(obs, dim1=2, dim0=1))
+        obs_eig = self.V_inv @ torch.transpose(obs, dim1=2, dim0=1)
         obs_eig = torch.transpose(obs_eig, dim1=2, dim0=1)
         return obs_eig
 
@@ -103,7 +108,7 @@ class EigenspaceDynamics(Module):
         assert obs_eigen.ndim == 3, "Expected (batch_size, time, dim(z))"
         if not hasattr(self, "V"):
             raise RuntimeError("Koopman operator data has not been provided. Call `update_eigvals_and_eigvects` first")
-        obs = torch.matmul(self.V.to(obs_eigen.device), torch.transpose(obs_eigen, dim1=2, dim0=1))
+        obs = self.V.to(obs_eigen.device) @ torch.transpose(obs_eigen, dim1=2, dim0=1)
         obs = torch.transpose(obs, dim1=2, dim0=1)
         return obs
 
@@ -134,11 +139,11 @@ class EigenspaceDynamics(Module):
         return a_conj_a
 
     def get_hparams(self):
-        return {'n_cplx_eigval': self.dim // 2,
+        return {'n_cplx_eigval':     self.state_dim // 2,
                 'eigval_init': self._eigval_init,
                 'eigval_constraint': self._eigval_constraint}
 
     def extra_repr(self):
-        return f"EigMatrix: n_cplx_eigval:{self.dim//2}" + \
+        return f"EigMatrix: n_cplx_eigval:{self.state_dim // 2}" + \
                "on unit circle" if self._eigval_constraint == "unit_circle" else "" + \
                f" - init: {self._eigval_init}"

@@ -144,7 +144,7 @@ class LightningModel(pl.LightningModule):
             else:
                 log.warning(f"Model does not implement `get_metric_labels` function. Only default metrics "
                             f"{list(metrics.keys())} will be logged to tensorboard hyperparam metrics")
-            self.logger.log_hyperparams(hparams, metrics)
+            # self.logger.experiment.config.update(hparams)
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback

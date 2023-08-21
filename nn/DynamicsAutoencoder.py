@@ -3,8 +3,8 @@ from typing import Iterable
 import torch
 from torch.nn import Module
 
-from data.ClosedLoopDynamics import STATES, CTRLS
-from nn.EigenDynamics import EigenspaceDynamics
+from data.dynamics_dataset import STATES, CTRLS
+from nn.EigenDynamics import LinearDynamics
 from src.RobotEquivariantNN.groups.SparseRepresentation import SparseRep
 from src.RobotEquivariantNN.nn.EMLP import EMLP, MLP
 from src.RobotEquivariantNN.nn.EquivariantModules import EquivariantModule, BasisLinear
@@ -221,7 +221,7 @@ class DynamicsAutoEncoder(DynamicsModule):
         self.decoder = MLP(d_in=obs_dim * 2, d_out=state_dim, ch=n_hidden_neurons, n_layers=num_hidden_layers,
                            activation=activation)
 
-        self.observation_dynamics = EigenspaceDynamics(dim=obs_dim, **kwargs)
+        self.observation_dynamics = LinearDynamics(state_dim=obs_dim, **kwargs)
 
     def forcast(self, x):
 
@@ -263,7 +263,7 @@ class EDynamicsAutoEncoder(EquivariantModule, DynamicsModule):
         self.decoder = EMLP(rep_in=self.repZ + self.repZ, rep_out=self.rep_in, ch=n_hidden_neurons,
                             n_layers=num_hidden_layers + 1,
                             activation=[activation] * num_hidden_layers + [torch.nn.Identity])
-        self.observation_dynamics = EigenspaceDynamics(dim=obs_dim, **kwargs)
+        self.observation_dynamics = LinearDynamics(state_dim=obs_dim, **kwargs)
 
         # print(list(self.parameters(recurse=True)))
         # Test equivariance after observations are evolved. That is, test for G-equivariant linear observation dynamics

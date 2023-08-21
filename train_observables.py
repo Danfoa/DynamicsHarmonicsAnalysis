@@ -1,9 +1,13 @@
+import os
+
 import example_robot_data
 import numpy as np
 import torch
 import hydra
 from pathlib import Path
 
+import wandb
+from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 from hydra.utils import get_original_cwd
 from lightning_fabric import seed_everything
@@ -16,7 +20,7 @@ log = logging.getLogger(__name__)
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torch.utils.data import DataLoader
 
-from data.ClosedLoopDynamics import ClosedLoopDynDataset, STATES, CTRLS
+from data.dynamics_dataset import ClosedLoopDynDataset, STATES, CTRLS
 from data.ClosedLoopDynamicsDataModule import ClosedLoopDynDataModule
 from nn.LightningModel import LightningModel
 from nn.DynamicsAutoencoder import EDynamicsAutoEncoder, DynamicsAutoEncoder
@@ -41,12 +45,19 @@ def main(cfg: DictConfig):
     seed_everything(seed=cfg.seed)
 
     root_path = Path(get_original_cwd()).resolve()
-
+    run_path = Path(os.getcwd())
+    # Create seed folder
+    seed_path = run_path / f"seed={cfg.seed:03d}"
+    seed_path.mkdir(exist_ok=True)
     # Check CLI arguments/params
 
     # Check if experiment already run
-    tb_logger = pl_loggers.TensorBoardLogger(".", name=f'seed={cfg.seed}', version=cfg.seed, default_hp_metric=False)
-    ckpt_folder_path = Path(tb_logger.log_dir) / "ckpt"
+    run_name = run_path.name
+    wandb_logger = WandbLogger(project=f'{cfg.robot}-{cfg.exp_name}-{cfg.dynamic_regime}',
+                               save_dir=seed_path, config=cfg, group=run_name,
+                               job_type='debug' if cfg.debug else None)
+
+    ckpt_folder_path = seed_path
     ckpt_call = ModelCheckpoint(dirpath=ckpt_folder_path, filename='best', monitor="val/loss", save_last=True)
     training_done, ckpt_path, best_path = check_if_resume_experiment(ckpt_call)
     # test_metrics_path = Path(tb_logger.log_dir) / 'test_metrics.csv'
@@ -57,7 +68,7 @@ def main(cfg: DictConfig):
         log.info("Initiating Training\n")
         # Configure Lightning trainer
         trainer = Trainer(gpus=1 if torch.cuda.is_available() and device != 'cpu' else 0,
-                          logger=tb_logger,
+                          logger=wandb_logger,
                           accelerator="auto",
                           log_every_n_steps=50,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
@@ -126,12 +137,15 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
         model.to(device)
+
         # Load lightning module handling the operations of all model variants
         epoch_metrics_fn = model.evaluate_observation_space if hasattr(model, "evaluate_observation_space") else None
         pl_model = LightningModel(lr=cfg.model.lr, batch_size=cfg.model.batch_size, run_hps=cfg.model,
                                   test_epoch_metrics_fn=epoch_metrics_fn, val_epoch_metrics_fn=epoch_metrics_fn)
         pl_model.set_model(model)
         pl_model.to(device)
+        wandb_logger.watch(pl_model, log_graph=False, log='all')
+
         # ____________________________________________________________________________________________________________
 
         #
@@ -150,15 +164,17 @@ def main(cfg: DictConfig):
         datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
                                          log_fig=True, show=cfg.debug_loops or cfg.debug,
                                          eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
-        # datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
-        #                                  log_fig=True, show=cfg.debug_loops or cfg.debug,
-        #                                  eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
+        datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
+                                         log_fig=True, show=cfg.debug_loops or cfg.debug,
+                                         eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
         # if cfg.debug:
         #     datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
         #                                      eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach().numpy())
 
     else:
-        log.warning(f"Training run done. Check {Path(tb_logger.log_dir).absolute()} for results.")
+        log.warning(f"Training run done. Check {run_path} for results.")
+
+    wandb_logger.experiment.unwatch(pl_model)
 
 
 if __name__ == '__main__':

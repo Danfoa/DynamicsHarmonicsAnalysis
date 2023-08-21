@@ -42,6 +42,7 @@ hydra:
           - debug
           - debug_loops
           - seed
+          - max_epochs
 
   sweep:
     dir: ./experiments/${hydra.job.name}/${dynamic_regime}/
