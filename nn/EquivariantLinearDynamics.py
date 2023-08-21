@@ -1,39 +1,58 @@
+from collections import OrderedDict
 from typing import Optional
 
+import escnn
+import numpy as np
 import torch
 from escnn.group import Representation
+from escnn.nn import FieldType
 from torch.nn import Module
 
 import logging
+
+from utils.representation_theory import identify_isotypic_spaces
+
 log = logging.getLogger(__name__)
 
 
 class LinearDynamics(Module):
 
-    def __init__(self, rep: Optional[Representation] = None, state_dim: int = -1, trainable=True,
-                 eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
-        super().__init__()
-
+    def __init__(self, rep: Optional[Representation] = None, state_dim: int = -1,
+                 trainable=True, eigval_init="stable", eigval_constraint="unconstrained", **kwargs):
         assert rep is not None or state_dim > 0, "Either provide a representation or a state dimension"
         assert state_dim % 2 == 0, "For now only cope with even dimensions."
 
+        super().__init__()
+
         self.state_dim = state_dim if rep is None else rep.size
         self.is_trainable = trainable
+
+        # Extract the Isotypic Decomposition information from the state representation.
+        if rep is not None:
+            self.G = rep.group
+            if 'isotypic_reps' in rep.attributes:
+                self.Q_iso = rep.change_of_basis
+                self.rep = Representation(group=rep.group, irreps=rep.irreps, name=f"{rep.name}-iso",
+                                          change_of_basis=np.eye(self.state_dim))
+            else:
+                self.rep, self.Q_iso = identify_isotypic_spaces(rep)
+            # Check if features already come in an isotypic basis. If so avoid changing basis at each forward pass.
+            self.is_state_in_isotypic_basis = np.allclose(self.Q_iso, np.eye(self.state_dim))
+            # Dictionary mapping active irreps with their corresponding Isotypic Subspace group representation
+            self.iso_reps = self.rep.attributes['isotypic_reps']
+            assert isinstance(self.iso_reps, OrderedDict), "We rely on ordered dict"
+            # Ordered list of active irreps
+            self.iso_irreps = [self.G.irrep(*irrep_id) for irrep_id in self.iso_reps.keys()]
+            # Define the input and output field types for ESCNN.
+            gspace = escnn.gspaces.no_base_space(self.G)
+            self.in_field_type = FieldType(gspace, self.iso_reps.values())
+            self.out_field_type = FieldType(gspace, self.iso_reps.values())
+
+        number_of_params = self.calc_num_trainable_params() if self.is_trainable else 0
+
         self._eigval_init = eigval_init
         self._eigval_constraint = eigval_constraint
 
-        # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
-        # Each eigval is parameterized as re^(iw)
-        w = torch.rand(self.state_dim)
-        r = torch.rand(self.state_dim)
-        if eigval_constraint == "unconstrained":
-            self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
-            self.r = torch.nn.Parameter(r, requires_grad=self.is_trainable)
-        elif eigval_constraint == "unit_circle":
-            self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
-            self.r = torch.nn.Parameter(r * 0 + 1., requires_grad=False)
-        else:
-            raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
 
         # Initialize eigenvalues.
         self.reset_parameters(init_mode=eigval_init)
@@ -63,6 +82,41 @@ class LinearDynamics(Module):
         if not obs_in_eigenbasis:
             return z_pred, z_pred_eigen
         return z_pred
+
+    def calc_num_trainable_params(self):
+        if self.is_equivariant:
+            # Compute the number of trainable parameters per Isotypic Subspace. This number will depend on the type
+            # of irrep associated with the space.
+            for iso_re_irrep, iso_rep in zip(self.iso_irreps, self.iso_reps.values()):
+                n_G_irred_spaces = iso_rep.size // iso_re_irrep.size  # Number of G-irreducible spaces in Iso subspace.
+                basis = iso_re_irrep.endomorphism_basis()
+                basis_dim = len(basis)
+
+                n_params_per_irred_space = None
+                if iso_re_irrep.type == "R":  # Only Isomorphism are scalar multiple of the identity
+                    n_params_per_irred_space = 1
+                elif iso_re_irrep.type == "C":  # Realification: [re(eig1), im(eig1), ...]
+                    n_params_per_irred_space = 2
+                elif iso_re_irrep.type == "H":  # Realification: [re(eig1), im_i(eig1), im_j(eig1), im_k(eig1),...]
+                    n_params_per_irred_space = 4
+                else:
+                    raise NotImplementedError(f"What is this representation type:{type}? Dunno.")
+
+
+        else:
+            raise NotImplementedError("TODO: Implement this")
+            # Create the parameters determining the learnable eigenvalues of the eigenmatrix.
+            # Each eigval is parameterized as re^(iw)
+            w = torch.rand(self.state_dim)
+            r = torch.rand(self.state_dim)
+            if eigval_constraint == "unconstrained":
+                self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
+                self.r = torch.nn.Parameter(r, requires_grad=self.is_trainable)
+            elif eigval_constraint == "unit_circle":
+                self.w = torch.nn.Parameter(w, requires_grad=self.is_trainable)
+                self.r = torch.nn.Parameter(r * 0 + 1., requires_grad=False)
+            else:
+                raise NotImplementedError(f"Eigval constraint {self._eigval_constraint} not implemented")
 
     @property
     def eigvals(self) -> torch.Tensor:
@@ -123,6 +177,10 @@ class LinearDynamics(Module):
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
         log.info(f"Eigenvalues initialization to {init_mode}")
+
+    @property
+    def is_equivariant(self):
+        return hasattr(self, 'rep') and self.rep is not None
 
     @staticmethod
     def interleave_with_conjugate(a: torch.Tensor):
