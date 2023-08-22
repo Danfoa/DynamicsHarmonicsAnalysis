@@ -6,7 +6,7 @@ import numpy as np
 import scipy
 from escnn.group import Representation
 
-from data.dynamics_dataset import DynamicsRecording
+from data.DynamicsRecording import DynamicsRecording
 from utils.mysc import companion_matrix, matrix_average_trick, random_orthogonal_matrix
 from utils.plotting import plot_system_2D, plot_system_3D
 from utils.representation_theory import identify_isotypic_spaces
@@ -327,6 +327,7 @@ if __name__ == '__main__':
                 noise_std=sigma,
                 dt=dt,
                 time_constant=max_time_constant,
+                group=dict(subgroup_id=G_id),
                 ),
             measurements=dict(state=state_trajs[0].shape[-1]),
             state_measurements=['state'],
