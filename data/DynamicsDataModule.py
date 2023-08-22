@@ -1,23 +1,17 @@
-import warnings
+import logging
 from pathlib import Path
 from typing import Optional, Union
 
 import escnn.group
-import matplotlib.pyplot as plt
 import numpy as np
-import pinocchio
-import torch
-from escnn.group import Representation, directsum
-from escnn.nn import FieldType
-from lightning.pytorch.loggers import WandbLogger
-from pinocchio import RobotWrapper
 import pytorch_lightning as pl
+import torch
+from escnn.group import Representation
+from escnn.nn import FieldType
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from data.DynamicsRecording import get_dynamics_dataset, get_train_test_val_file_paths, map_state_next_state
-from utils.plotting import plot_observations, plot_state_actions
-
-import logging
 
 log = logging.getLogger(__name__)
 
@@ -117,19 +111,16 @@ class DynamicsDataModule(pl.LightningDataModule):
             action_reps = [rep for frame_reps in action_reps for rep in frame_reps]  # flatten list of reps
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
-        if self.augment:  # Apply data augmentation to the state and state trajectories
-            train_dataset = train_dataset.map(self.augment_data_map, batched=True, num_proc=self.num_workers)
+        # if self.augment:  # Apply data augmentation to the state and state trajectories
+        #     train_dataset = train_dataset.map(self.augment_data_map, batched=True)
 
         self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size, shuffle=False,
-                                            num_workers=self.num_workers)
+                                            num_workers=self.num_workers,
+                                            collate_fn=self.data_augmentation_collate_fn if self.augment else None)
         self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=self.batch_size, shuffle=False,
                                            num_workers=self.num_workers)
         self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=self.batch_size, shuffle=False,
                                           num_workers=self.num_workers)
-
-    def setup(self, stage: str):
-        # Assign train/val datasets for use in dataloaders
-        log.debug(f"Stage change to {stage}")
 
     def train_dataloader(self):
         return self._train_dataloader
@@ -147,27 +138,33 @@ class DynamicsDataModule(pl.LightningDataModule):
     def prepared(self):
         return self._train_dataloader is not None
 
-    def augment_data_map(self, sample: dict) -> dict:
-        state = sample['state']
-        next_state = sample['next_state']
-        action = sample.get(['action'], None)
-        next_action = sample.get(['next_action'], None)
+    def data_augmentation_collate_fn(self, batch_list: dict) -> dict:
+        batch = torch.utils.data.default_collate(batch_list)
+        state = batch['state']
+        next_state = batch['next_state']
+        action = batch.get('action', None)
+        next_action = batch.get('next_action', None)
 
         # Sample a random symmetry transformation
         g = self.symm_group.sample()
         if g == self.symm_group.identity:  # Avoid the computational overhead of applying the identity
-            return sample
+            return batch
 
-        g_state = self.state_field_type.transform_fibers(input=state, group_element=g)
-        g_next_state = self.state_field_type.transform_fibers(input=next_state, group_element=g)
-        sample['state'] = g_state
-        sample['next_state'] = g_next_state
+        rep_state = self.state_field_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
+        # Use einsum notation to apply the tensor operations required. Here o=state_dim is the output dimension,
+        # s=state_dim is the input dimension, b=batch_size, t=horizon, ... = arbitrary dimensions
+        g_state = torch.einsum("os,bs...->bo...", rep_state, state)
+        g_next_state = torch.einsum("os,bts...->bto...", rep_state, next_state)
+
+        batch['state'] = g_state
+        batch['next_state'] = g_next_state
         if action is not None:
-            g_action = self.action_field_type.transform_fibers(input=action, group_element=g)
-            g_next_action = self.action_field_type.transform_fibers(input=next_action, group_element=g)
-            sample['action'] = g_action
-            sample['next_action'] = g_next_action
-        return sample
+            rep_action = self.action_field_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
+            g_action = torch.einsum("oa,ba...->bo...", rep_action, action)
+            g_next_action = torch.einsum("oa,bta...->bto...", rep_action, next_action)
+            batch['action'] = g_action
+            batch['next_action'] = g_next_action
+        return batch
 
     # def plot_test_performance(self, pl_model: pl.LightningModule, dataset: ClosedLoopDynDataset,
     #                           log_fig=False, show=False, eigvals=None, log_prefix=''):
@@ -259,14 +256,14 @@ if __name__ == "__main__":
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=2,
                                      frames_per_step=5,
-                                     num_workers=1,
-                                     batch_size=10,
-                                     augment=False
+                                     num_workers=2,
+                                     batch_size=500,
+                                     augment=True
                                      )
 
     # Test loading of the DynamicsRecording
     data_module.prepare_data()
 
-    for i, batch in enumerate(data_module.train_dataloader()):
+    for i, batch in tqdm(enumerate(data_module.train_dataloader())):
         if i > 5000:
             break
