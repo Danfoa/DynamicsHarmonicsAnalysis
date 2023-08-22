@@ -441,7 +441,7 @@ def plot_system_2D(A, trajectories: Union[list, np.ndarray], P=None, z_constrain
         # Create a gradient based on the progression of time
         alpha_scale = np.linspace(0.0, 1, traj_len)  # Values from 0.1 (10% opacity) to 1 (100% opacity)
         # Define the colormap with a gradient in alpha
-        fig.add_trace(go.Scatter(x=traj[:, 0], y=traj[:, 1], mode='markers+lines',
+        fig.add_trace(go.Scatter(x=traj[:, 0], y=traj[:, 1], mode='markers+lines', opacity=0.8, showlegend=False,
                                  marker=dict(color=alpha_scale, size=2, colorscale='Viridis')))
     # Make plot square and axis equal
     fig.update_layout(
@@ -517,8 +517,8 @@ def plot_system_3D(A, trajectories, P=None, z_constraint=None):
         alpha_scale = np.linspace(0.3, 1, traj_len)  # Values from 0.1 (10% opacity) to 1 (100% opacity)
         # Define the colormap with a gradient in alpha
         colors = [f'rgba(0, 102, 102, {1 - alpha})' for alpha in alpha_scale]
-        fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines',
-                                   line=dict(color=alpha_scale, colorscale='Viridis', width=6)))
+        fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines', opacity=0.5,
+                                   showlegend=False, line=dict(color=alpha_scale, colorscale='Viridis', width=6,)))
 
     # Layout
     fig.update_layout(

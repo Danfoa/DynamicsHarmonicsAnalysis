@@ -1,117 +1,98 @@
-import os
-import zipfile
-from dataclasses import asdict, dataclass, field
+import logging
+import pickle
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import datasets
 import numpy as np
-
-import json
 from datasets import Features, IterableDataset
 
-import logging
+from utils.mysc import compare_dictionaries
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
-class MarkovDynamicsRecording:
+class DynamicsRecording:
+    """Data structure to store recordings of a Markov Dynamics."""
+
     description: Optional[str] = None
     dynamics_parameters: Dict = field(default_factory=lambda: {'dt': None})
 
     # Dictionary providing the map between measurement name and measurement dimension
     measurements: Dict[str, int] = field(default_factory=dict)
 
-    # List of measurements composing to the state and action space of the Markov Process.
+    # Ordered list of measurements composing to the state and action space of the Markov Process.
     state_measurements: List[str] = field(default_factory=list)
     action_measurements: List[str] = field(default_factory=list)
 
     # Named group representations needed to transform all measurements.
     # The keys are the representation names used by `measurements_representations`.
-    group_representations: Dict[str, dict] = field(default_factory=dict)
+    reps_irreps: Dict[str, Iterable] = field(default_factory=dict)
+    reps_change_of_basis: Dict[str, Iterable] = field(default_factory=dict)
     # Map from measurement name to the measurement representation name. This name should be in `group_representations`.
     measurements_representations: Dict[str, str] = field(default_factory=dict)
 
-    recordings: Dict[str, List] = field(default_factory=dict)
+    recordings: Dict[str, Iterable] = field(default_factory=dict)
 
-    def save_to_file(self, filename: Path):
-        # Separate numpy arrays from other attributes
-        other_attributes = asdict(self)
-        recordings = other_attributes.pop('recordings')
-        # Save numpy arrays to a temp .npz file
-        np.savez('temp_recordings.npz', **recordings)
-
-        # Serialize other attributes to JSON
-        with open('temp_metadata.json', 'w') as f:
-            from utils.mysc import NumpyEncoder
-            json.dump(other_attributes, f, cls=NumpyEncoder)
-
-        # Package both into a single .zip file
-        with zipfile.ZipFile(filename.with_suffix('.zip'), 'w') as myzip:
-            myzip.write('temp_recordings.npz')
-            myzip.write('temp_metadata.json')
-
-        # Clean up temporary files
-        os.remove('temp_recordings.npz')
-        os.remove('temp_metadata.json')
+    def save_to_file(self, file_path: Path):
+        with file_path.with_suffix(".pkl").open('wb') as file:
+            pickle.dump(self, file, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
-    def load_from_file(filename, only_metadata=False):
-        with zipfile.ZipFile(filename, 'r') as myzip:
-            myzip.extractall()
-
-        if only_metadata:
-            recordings = None
-        else:
-            # Load numpy arrays
-            with np.load('temp_recordings.npz', allow_pickle=True) as data:
-                recordings = dict(data)
-
-        # Deserialize other attributes from JSON
-        with open('temp_metadata.json', 'r') as f:
-            other_attributes = json.load(f)
-
-        # Clean up temporary files
-        os.remove('temp_recordings.npz')
-        os.remove('temp_metadata.json')
-
-        return MarkovDynamicsRecording(recordings=recordings, **other_attributes)
+    def load_from_file(file_path: Path, only_metadata=False):
+        with file_path.with_suffix(".pkl").open('rb') as file:
+            data = pickle.load(file)
+            if only_metadata:
+                del data.recordings
+        return data
 
 
-def samples_generator(markov_data: MarkovDynamicsRecording, n_frames_per_state: int = 1):
-    recordings = markov_data.recordings
-    # Get any measurement list of trajectories and count the number of trajectories
-    # We assume all measurements have the same number of trajectories
-    n_trajs = len(next(iter(recordings.values())))
-
-    # Since we assume trajectories can have different lengths, we iterate over each trajectory
-    # and generate samples of length `n_frames_per_state` from each trajectory.
-    for traj_id in range(n_trajs):
-        traj_length = next(iter(recordings.values()))[traj_id].shape[0]
-
-        for i in range(traj_length - n_frames_per_state):
-            sample = {}
-            for measurement, trajs in recordings.items():
-                sample[measurement] = trajs[traj_id][i:i + n_frames_per_state]
-                sample[f"next_{measurement}"] = trajs[traj_id][i + n_frames_per_state:i + (2 * n_frames_per_state)]
-            yield sample
-
-
-def load_data_generator(shards: list[Path], n_frames_per_state: int = 1,
+def load_data_generator(shards: list[Path],
+                        n_frames_per_state: int = 1,
                         state_measurements: Optional[list[str]] = None,
                         action_measurements: Optional[list[str]] = None):
+    """Generator that yields measurement samples of length `n_frames_per_state` from the Markov Dynamics recordings.
+
+    Args:
+    ----
+        shards: List of files containing Markov Dynamics recordings.
+        n_frames_per_state: Number of frames to compose a single measurement sample at time `t`.
+        state_measurements: Ordered list of measurements names composing the state space.
+        action_measurements: Ordered list of measurements names composing the action space.
+
+    Returns:
+    -------
+        A dictionary containing the measurement samples at time `t` and `t+1` for each measurement.
+    """
     for file_path in shards:
-        file_data = MarkovDynamicsRecording.load_from_file(file_path)
+        file_data = DynamicsRecording.load_from_file(file_path)
         if state_measurements is not None:
             file_data.state_measurements = file_data.measurements
         if action_measurements is not None:
             file_data.action_measurements = file_data.measurements
-        for sample in samples_generator(file_data, n_frames_per_state):
-            yield sample
+
+        recordings = file_data.recordings
+        # Get any measurement list of trajectories and count the number of trajectories
+        # We assume all measurements have the same number of trajectories
+        n_trajs = len(next(iter(recordings.values())))
+
+        # Since we assume trajectories can have different lengths, we iterate over each trajectory
+        # and generate samples of length `n_frames_per_state` from each trajectory.
+        for traj_id in range(n_trajs):
+            traj_length = next(iter(recordings.values()))[traj_id].shape[0]
+
+            for i in range(traj_length - n_frames_per_state):
+                sample = {}
+                for measurement, trajs in recordings.items():
+                    sample[measurement] = trajs[traj_id][i:i + n_frames_per_state]
+                    sample[f"next_{measurement}"] = trajs[traj_id][i + n_frames_per_state:i + (2 * n_frames_per_state)]
+                yield sample
 
 
 def map_state_action_state(sample, state_measurements: List[str], action_measurements: List[str]):
+    """Map composing multiple measurements to single state, action, next_state samples."""
     state = np.concatenate([sample[measurement] for measurement in state_measurements], axis=-1)
     next_state = np.concatenate([sample[f"next_{measurement}"] for measurement in state_measurements], axis=-1)
     action = np.concatenate([sample[measurement] for measurement in action_measurements], axis=-1)
@@ -119,51 +100,80 @@ def map_state_action_state(sample, state_measurements: List[str], action_measure
 
 
 def map_state_next_state(sample, state_measurements: List[str]):
+    """Map composing multiple measurements to a single state and next_state."""
     state = np.concatenate([sample[measurement] for measurement in state_measurements], axis=-1)
     next_state = np.concatenate([sample[f"next_{measurement}"] for measurement in state_measurements], axis=-1)
     return dict(state=state, next_state=next_state)
 
 
-def get_markov_dynamics_dataset(train_shards: list[Path], test_shards: list[Path], val_shards: List[Path],
-                                num_proc: int = 1, n_frames_per_state: int = 1,
+def get_markov_dynamics_dataset(train_shards: list[Path],
+                                test_shards: list[Path],
+                                val_shards: List[Path],
+                                num_proc: int = 1,
+                                n_frames_per_state: int = 1,
                                 state_measurements: Optional[list[str]] = None,
-                                action_measurements: Optional[list[str]] = None) -> IterableDataset:
-    shards = train_shards + test_shards + val_shards
-
+                                action_measurements: Optional[list[str]] = None) -> list[IterableDataset]:
+    """Load Markov Dynamics recordings from a list of files and return a train, test and validation dataset."""
     # TODO: ensure all shards come from the same dynamical system
-    metadata = MarkovDynamicsRecording.load_from_file(train_shards[0], only_metadata=True)
+    metadata = DynamicsRecording.load_from_file(train_shards[0], only_metadata=True)
+    test_metadata = DynamicsRecording.load_from_file(test_shards[0], only_metadata=True)
+
+    dyn_params_diff = compare_dictionaries(metadata.dynamics_parameters, test_metadata.dynamics_parameters)
+    assert len(dyn_params_diff) == 0, "Different dynamical systems loaded in train/test sets"
 
     features = {}
     for measurement, dim in metadata.measurements.items():
         features[measurement] = datasets.Array2D(shape=(n_frames_per_state, dim), dtype='float32')
         features[f"next_{measurement}"] = datasets.Array2D(shape=(n_frames_per_state, dim), dtype='float32')
 
-    markov_dataset = IterableDataset.from_generator(load_data_generator,
-                                                    features=Features(features),
-                                                    gen_kwargs=dict(shards=shards,
-                                                                    state_measurements=state_measurements,
-                                                                    action_measurements=action_measurements,
-                                                                    n_frames_per_state=n_frames_per_state),
-                                                    )
-    markov_dataset.info.dataset_name = "Linear dynamics"
-    markov_dataset.info.description = metadata.description
+    part_datasets = []
+    for partition, partition_shards in zip(["train", "test", "val"], [train_shards, test_shards, val_shards]):
+        dataset = IterableDataset.from_generator(load_data_generator,
+                                                 features=Features(features),
+                                                 gen_kwargs=dict(shards=partition_shards,
+                                                                 state_measurements=state_measurements,
+                                                                 action_measurements=action_measurements,
+                                                                 n_frames_per_state=n_frames_per_state),
+                                                 )
+        dataset.info.dataset_name = f"[{partition}] Linear dynamics"
+        dataset.info.description = metadata.description
+        part_datasets.append(dataset)
 
-    return markov_dataset
+    return part_datasets
+
+
+def get_train_test_val_file_paths(data_path: Path):
+    """Search in folder for files ending in train/test/val.pkl and return a list of paths to each file."""
+    train_data, test_data, val_data = [], [], []
+    for file_path in data_path.iterdir():
+        if file_path.name.endswith("train.pkl"):
+            train_data.append(file_path)
+        elif file_path.name.endswith("test.pkl"):
+            test_data.append(file_path)
+        elif file_path.name.endswith("val.pkl"):
+            val_data.append(file_path)
+    return train_data, test_data, val_data
 
 
 if __name__ == "__main__":
     path_to_data = Path(__file__).parent
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
+    # Find all dynamic systems recordings
     path_to_data /= 'linear_systems'
+    path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
+    # Select a dynamical system
+    mock_path = path_to_dyn_sys_data.pop()
+    # Obtain the training, testing and validation file paths containing distinct trajectories of motion.
+    train_data, test_data, val_data = get_train_test_val_file_paths(mock_path)
+    # Obtain hugging face Iterable datasets instances
+    train_dataset, test_dataset, val_dataset = get_markov_dynamics_dataset(train_shards=train_data,
+                                                                           test_shards=test_data,
+                                                                           val_shards=val_data,
+                                                                           n_frames_per_state=1)
+    train_dataset.map(map_state_next_state, batched=True)
 
-    files = list(path_to_data.glob('*.zip'))
-
-    dataset = get_markov_dynamics_dataset(train_shards=files, test_shards=files, val_shards=files, n_frames_per_state=1)
-    dataset.map(map_state_next_state, batched=True)
-
-
-    sample = next(iter(dataset))
+    sample = next(iter(train_dataset))
     print(sample)
 
 #

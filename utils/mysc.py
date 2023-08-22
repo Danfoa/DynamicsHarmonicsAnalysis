@@ -129,6 +129,9 @@ def compare_dictionaries(dict1: dict, dict2: dict):
                 inner_diff = compare_dictionaries(dict1[key], dict2[key])
                 if len(inner_diff) > 0:
                     diff[key] = inner_diff
+            elif isinstance(dict1[key], np.ndarray):
+                if not np.allclose(dict1[key] - dict2[key], 0, rtol=1e-6, atol=1e-6):
+                    diff[key] = (dict1[key], dict2[key])
             else:
                 if dict1[key] != dict2[key]:
                     diff[key] = (dict1[key], dict2[key])

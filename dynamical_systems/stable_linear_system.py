@@ -1,19 +1,30 @@
+from pathlib import Path
 from typing import Optional
 
-import chart_studio
 import escnn
 import numpy as np
 import scipy
 from escnn.group import Representation
 
-from data.dynamics_dataset import MarkovDynamicsRecording
+from data.dynamics_dataset import DynamicsRecording
 from utils.mysc import companion_matrix, matrix_average_trick, random_orthogonal_matrix
 from utils.plotting import plot_system_2D, plot_system_3D
 from utils.representation_theory import identify_isotypic_spaces
 
 
 def sample_initial_condition(state_dim, P=None, z=None):
-    x0 = np.random.uniform(-1, 1, size=state_dim)
+    """."""
+    MIN_DISTANCE_FROM_ORIGIN = 0.4
+
+    direction = points = np.random.randn(state_dim)
+    direction = direction / np.linalg.norm(points)
+    # We want to sample initial conditions away from the zero, as we want to capture the transient dynamics in our
+    # data. We use a Beta distribution to sample distance from the origin.
+    alpha, beta = 6, 1  #
+    distance_from_origin = np.random.beta(alpha, beta)  # P(x > 0.5) = 0.98 for alpha=6, beta=1
+    distance_from_origin = max(distance_from_origin, MIN_DISTANCE_FROM_ORIGIN)  # Truncate unlikely low values
+    x0 = distance_from_origin * direction
+
     if P is not None:
         violation = P @ x0 < z
         is_constraint_violated = np.any(violation)
@@ -30,23 +41,32 @@ def sample_initial_condition(state_dim, P=None, z=None):
 
             violation = P @ x0 < z
             is_constraint_violated = np.any(violation)
+        if np.linalg.norm(x0) < MIN_DISTANCE_FROM_ORIGIN:  # If sample is too close to zero ignore it.
+            x0 = sample_initial_condition(state_dim, P=P, z=z)
     return x0
 
 
-def stable_lin_dynamics(rep: Optional[Representation] = None, state_dim: int = -1,
-                        stable_eigval_prob: float = 0.2, time_constant=1, min_period=0.5, max_period=None):
-    """Args:
-    ----
-        state_dim: Dimension of the state of the linear system x[t+dt] = A x[t] + eta
-        rep: Representation of the group of linear transformations of the state space.
-        time_constant: Time constant of the slowest transient eigenvalue of A. Represents the decay rate of the
-            slowest transient mode in seconds. This value implies the slowest transient dynamics vanishes to 36.8%
-            of its maximum initial value after one time constant, and to 0.5% after 5 time constants.
-        min_period: Determines the minimum period of oscillation/rotation of the fastest transient mode in seconds.
-        max_period: Determines the maximum period of oscillation/rotation of the slowest transient mode in seconds.
+def stable_lin_dynamics(rep: Optional[Representation] = None,
+                        state_dim: int = -1,
+                        stable_eigval_prob: float = 0.2,
+                        time_constant=1,
+                        min_period=0.5,
+                        max_period=None):
+    """Generates a stable equivariant linear dynamical within a range of stable and transient dynamics.
 
-    Returns
+    Args:
+    ----
+    rep: Representation of the group of linear transformations of the state space.
+    state_dim: Dimension of the state of the linear system x[t+dt] = A x[t] + eta
+    stable_eigval_prob: Probability of an eigenspace of the system being a steady state mode (i.e. re(eigval)=0)
+    time_constant: Time constant of the slowest transient eigenvalue of A. Represents the decay rate of the
+        slowest transient mode in seconds. This value implies the slowest transient dynamics vanishes to 36.8%
+    min_period: Determines the minimum period of oscillation/rotation of the fastest transient mode in seconds.
+    max_period: Determines the maximum period of oscillation/rotation of the slowest transient mode in seconds.
+
+    Returns:
     -------
+        A (np.ndarray): System matrix of shape (state_dim, state_dim).
     """
     assert min_period > 0, f"Negative minimum period {min_period}"
     assert max_period is None or max_period > min_period, f"Negative maximum period {max_period}"
@@ -113,6 +133,7 @@ def stable_lin_dynamics(rep: Optional[Representation] = None, state_dim: int = -
 
 
 def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_period=0.5, max_period=None):
+    """ TODO """
     assert min_period > 0, f"Negative minimum period {min_period}"
     assert max_period is None or max_period > min_period, f"Negative maximum period {max_period}"
     if max_period is None:
@@ -152,48 +173,57 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
         assert np.allclose(rep_X(g) @ A_G, A_G @ rep_X(g)), f"G-equiv err:{np.max((rep_X(g) @ A_G) - (A_G @ rep_X(g)))}"
 
     # Ensure stability
-    np.linalg.eigvals(A_G)
-    # assert np.all(np.real(eigvals) < 0), f"Unstable eigenvalues: {eigvals}"
-    return A_G, rep_X
+    eigvals = np.linalg.eigvals(A_G)
+    # steady_state_eigvals = eigvals[np.isclose(eigvals, 0)]
+    transient_eigvals = eigvals[np.logical_not(np.isclose(eigvals, np.zeros_like(eigvals)))]
+    assert np.all(np.real(transient_eigvals) <= 0), f"Unstable eigenvalues: {eigvals}"
+    # Compute the empirical time constant of the system:
+    time_constants = [1 / np.abs(eigval) for eigval in transient_eigvals]
+    slowest_time_constant = np.max(time_constants) if len(transient_eigvals) > 0 else np.inf
+    print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
+    return A_G, rep_X, slowest_time_constant
 
 
-def evolve_linear_dynamics(A, x0, dt, T, sigma=0.1, P=None, constraint_offset=None):
-    """Evolve the stochastic `x[t+dt] = Ax[t] + eta` system using Euler-Maruyama. Cimplying with the linear
-    constraints `P @ x[t] >= z`. Equivalent to imposing some Hyperplanes in the state space that cannot be crossed.
+def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim_time: float, noise_std=0.1,
+                           constraint_matrix=None, constraint_offset=None):
+    """Evolve a stochastic linear system `dx/dt = A x[t] + eta` with linear inequality state constraints `Px[t] >=z`.
 
-    Parameters
-    ----------
-    - A: System matrix.
-    - z: RHS of the constraint.
-    - x0: Initial condition.
-    - dt: Time step.
-    - T: Total simulation time.
-    - sigma: Noise intensity.
+    Args:
+    ----
+    A (np.ndarray): System matrix of shape (state_dim, state_dim)
+    init_state (np.ndarray): Initial state of shape (state_dim, )
+    dt (float): Time step of the simulation
+    sim_time (float): Total simulation time
+    noise_std (float): Standard deviation of the additive Gaussian noise
+    constraint_matrix (np.ndarray): Matrix of shape (n_constraints, state_dim) defining the hyperplanes normal vects
+    constraint_offset (np.ndarray): of shape (n_constraints,) defining the hyperplanes offset from the origin
 
-    Returns
+    Returns:
     -------
-    - trajectory: List of state vectors over time.
+        t (np.ndarray): Time vector of shape (num_steps, )
+        trajectory (np.ndarray): Trajectory of the system of shape (num_steps, state_dim)
     """
-    x_dim = x0.shape[0]
+    x_dim = init_state.shape[0]
     assert A.shape == (x_dim, x_dim), f"System matrix A must be of shape ({x_dim}, {x_dim})"
-    assert P is None or P.shape[-1] == x_dim, f"Constraint matrix P: {P.shape} must be of shape (ANY, {x_dim})"
-    num_steps = int(T / dt) - 1
-    t = np.linspace(0, T, num_steps)
+    assert constraint_matrix is None or constraint_matrix.shape[
+        -1] == x_dim, f"Constraint matrix P: {constraint_matrix.shape} must be of shape (ANY, {x_dim})"
+    num_steps = int(sim_time / dt) - 1
+    t = np.linspace(0, sim_time, num_steps)
 
-    x = x0.copy()
-    trajectory = [x0]
+    x = init_state.copy()
+    trajectory = [init_state]
 
     for _ in range(num_steps):
-        dx = (A @ x) + (sigma * np.sqrt(dt) * np.random.normal(size=x.shape))
+        dx = (A @ x) + (noise_std * np.random.normal(size=x.shape))
         x_offset = (dx * dt)
         x_next = x + x_offset
-        if P is not None:
-            violation = P @ x_next < constraint_offset
+        if constraint_matrix is not None:
+            violation = constraint_matrix @ x_next < constraint_offset
             is_constraint_violated = np.any(violation)
             while is_constraint_violated:
                 # Take first violation and update the point.
                 dim_violated = np.argwhere(violation).flatten()[0]
-                normal_vect = P[dim_violated, :]
+                normal_vect = constraint_matrix[dim_violated, :]
                 # Get unitary normal plane to the constraint hyperplane
                 normal_vect /= np.linalg.norm(normal_vect)
                 # Project the gradient to the hyperplane surface
@@ -201,13 +231,15 @@ def evolve_linear_dynamics(A, x0, dt, T, sigma=0.1, P=None, constraint_offset=No
                 x_offset -= violation_grad
                 x_next = x + x_offset
                 # Check for more violations
-                violation = P @ x_next < constraint_offset
+                violation = constraint_matrix @ x_next < constraint_offset
                 is_constraint_violated = np.any(violation)
         x = x_next
         trajectory.append(x)
 
     return t, np.array(trajectory)
 
+# def gen_recordings_stable_equiv_lin_system():
+#     pass
 
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
@@ -233,74 +265,86 @@ if __name__ == '__main__':
 
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
-    time_constant = 5  # [s] Maximum time constant of the system.
-    A_G, rep_X = stable_equivariant_lin_dynamics(rep_X,
-                                                 time_constant=time_constant,
-                                                 min_period=time_constant / 3,
-                                                 max_period=time_constant * 2)
-
+    max_time_constant = 5  # [s] Maximum time constant of the system.
+    A_G, rep_X, time_constant = stable_equivariant_lin_dynamics(rep_X,
+                                                                time_constant=max_time_constant,
+                                                                min_period=max_time_constant / 3,
+                                                                max_period=max_time_constant * 2)
+    time_constant = max_time_constant * 2 if np.isinf(time_constant) else time_constant
     # Generate hyperplanes that constraint outer region of space
-    n_constraints = 3
-    normal_planes = np.random.rand(state_dim, n_constraints)
-    # Orthonormalize the column space of the constraint matrix, so hyperplanes are orthogonal to each other
-    normal_planes = scipy.linalg.orth(normal_planes).T
+    n_constraints = 2
     P_symm, offset = None, None
-    for normal_plane in normal_planes:
-        normal_orbit = np.vstack([np.linalg.det(rep_X(g)) * (rep_X(g) @ normal_plane) for g in G.elements])
-        offset_orbit = np.asarray([-np.random.uniform(0.3, 1.0)] * normal_orbit.shape[0])
-        P_symm = np.vstack((P_symm, normal_orbit)) if P_symm is not None else normal_orbit
-        offset = np.concatenate((offset, offset_orbit)) if offset is not None else offset_orbit
+    if n_constraints > 0:
+        normal_planes = np.random.rand(state_dim, n_constraints)
+        # Orthonormalize the column space of the constraint matrix, so hyperplanes are orthogonal to each other
+        normal_planes = scipy.linalg.orth(normal_planes).T
+        for normal_plane in normal_planes:
+            normal_orbit = np.vstack([np.linalg.det(rep_X(g)) * (rep_X(g) @ normal_plane) for g in G.elements])
+            offset_orbit = np.asarray([-np.random.uniform(0.0, 0.8)] * normal_orbit.shape[0])
+            P_symm = np.vstack((P_symm, normal_orbit)) if P_symm is not None else normal_orbit
+            offset = np.concatenate((offset, offset_orbit)) if offset is not None else offset_orbit
 
     # Generate trajectories of the system dynamics
     dt = 0.01
     T = 4 * time_constant
-    sigma = 5
-    n_trajs = 30
+    sigma = 0.5
+    n_trajs = 100
     state_trajs = []
     for _ in range(n_trajs):
         # Sample initial condition
         x0 = sample_initial_condition(state_dim, P_symm, offset)
-        t, state_traj = evolve_linear_dynamics(A_G, x0, dt, T, sigma, P=P_symm, constraint_offset=offset)
+        t, state_traj = evolve_linear_dynamics(A_G, x0, dt, T, sigma, constraint_matrix=P_symm,
+                                               constraint_offset=offset)
         state_trajs.append(state_traj)
 
     state_trajs = np.asarray(state_trajs)
-    # plot_system_2D(A, state_traj, P=P, z=z_val)
+
+    # Save the recordings to train test val splits
+    path_2_system = Path(__file__).parents[1] / 'data'
+    assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
+    path_2_system = (path_2_system / 'linear_systems' / f"{state_dim:d}-dim" / f"{G.name}" /
+                     f"{n_constraints:d}-constraints" /
+                     f"noise_std={sigma}_time-constant={max_time_constant:.1f}_T-dt={T:.1f}s-{dt:.3f}s")
+    if path_2_system.exists():
+        import shutil
+
+        shutil.rmtree(path_2_system)
+    path_2_system.mkdir(parents=True, exist_ok=True)
+
+    # Split the trajectories into train (70%) test (15%) and validation (15%) sets.
+    train_idx = range(0, int(0.7 * n_trajs))
+    val_idx = range(int(0.7 * n_trajs), int(0.85 * n_trajs))
+    test_idx = range(int(0.85 * n_trajs), n_trajs)
+
+    for partition, idx in zip(['train', 'val', 'test'], [train_idx, val_idx, test_idx]):
+        # Save DynamicsDataset
+        data = DynamicsRecording(
+            description="Stable linear system with stochastic additive noise",
+            dynamics_parameters=dict(
+                transition_matrix=A_G,
+                constraint_matrix=P_symm,
+                constraint_vector=offset,
+                noise_std=sigma,
+                dt=dt,
+                time_constant=max_time_constant,
+                ),
+            measurements=dict(state=state_trajs[0].shape[-1]),
+            state_measurements=['state'],
+            reps_irreps=dict(state=rep_X.irreps),  # Store the irreps composing the measurements representations
+            reps_change_of_basis=dict(state=rep_X.change_of_basis),  # Store the change of basis matrices
+            measurements_representations=dict(state='state'),
+            recordings=dict(state=state_trajs[idx]))
+
+        path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"
+
+        data.save_to_file(path_to_file)
+        # data2 = MarkovDynamicsRecording.load_from_file(path_to_file)
+
     if state_dim == 2:
-        fig = plot_system_2D(A_G, state_trajs, P=P_symm, z_constraint=offset)
+        fig = plot_system_2D(A_G, state_trajs[test_idx], P=P_symm, z_constraint=offset)
     elif state_dim == 3:
-        fig = plot_system_3D(A_G, state_trajs, P=P_symm, z_constraint=offset)
-    fig.show()
-    fig.write_html('test.html')
-    chart_studio.tools.set_credentials_file(username='danfoa', api_key='YOUR_API_KEY')
+        fig = plot_system_3D(A_G, state_trajs[test_idx], P=P_symm, z_constraint=offset)
 
-    # Save MarkovDataset
-    data = MarkovDynamicsRecording(
-        description="Stable linear system with stochastic additive noise",
-        dynamics_parameters=dict(
-            transition_matrix=A_G,
-            constraint_matrix=P_symm,
-            constraint_vector=offset,
-            noise_std=sigma,
-            dt=dt,
-            time_constant=time_constant,
-            ),
-        measurements=dict(
-            state=state_trajs[0].shape[-1]
-            ),
-        state_measurements=['state'],
-        group_representations=dict(state=rep_X),
-        measurements_representations=dict(state='state'),
-        recordings=dict(
-            state=state_trajs,
-            )
-        )
+    fig.write_html(path_2_system / 'test_trajectories.html')
 
-    # path_to_data = Path(__file__).parents[1] / 'data'
-    # assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
-    # path_to_data = path_to_data / 'linear_systems'
-    # path_to_data.mkdir(exist_ok=True)
-    #
-    # file_name = f"n_trajs={n_trajs}-noise_std={sigma}_time-constant={time_constant}_T-dt={T}s-{dt}s.zip"
-    # path_to_file = path_to_data / file_name
-    #
-    # data.save_to_file(path_to_file)
+    print(f"Recordings saved to {path_2_system}")
