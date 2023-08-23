@@ -11,22 +11,44 @@ class MarkovDynamicsModule(Module):
         self.state_dim = state_dim
         self.dt = dt
 
-    def forward(self, initial_state: torch.Tensor) -> torch.Tensor:
+    def forward(self, initial_state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+        """ Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
+        Args:
+            initial_state: Initial state if the system
+            n_steps: Number of steps to predict
+            **kwargs: Auxiliary arguments
+
+        Returns:
+            predictions (dict): A dictionary containing the predicted states under the key 'state' and
+            potentially other auxiliary measurements.
+        """
         # Apply any required pre-processing to the state
         initial_state_pre = self.pre_process_state(initial_state)
         # Evolve dynamics
-        state_pred = self.forcast(initial_state_pre)
+        predictions = self.forcast(initial_state=initial_state_pre, n_steps=n_steps)
         # Post-process predictions
-        state_pred_post = self.post_process_state(state_pred)
-        return state_pred_post
+        state_post = self.post_process_state(predictions['state'])
+        predictions['state'] = state_post
+        return predictions
 
-    def forcast(self, initial_state: torch.Tensor, n_steps: int = 1) -> torch.Tensor:
+    def forcast(self, initial_state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+        """ Forcasting of dynamics by `n_steps` from initial state `initial_state`.
+
+        Args:
+            initial_state: Initial state if the system
+            n_steps: Number of steps to predict
+            **kwargs: Auxiliary arguments
+
+        Returns:
+            predictions (dict): A dictionary containing the predicted states under the key 'state' and potentially
+            other auxiliary measurements.
+        """
         raise NotImplementedError("")
 
-    def pre_process_state(self, state: torch.Tensor) -> torch.Tensor:
+    def pre_process_state(self, state: torch.Tensor, **kwargs) -> torch.Tensor:
         return state
 
-    def post_process_state(self, state: torch.Tensor) -> torch.Tensor:
+    def post_process_state(self, state: torch.Tensor, **kwargs) -> torch.Tensor:
         return state
 
     def compute_loss_metrics(self, pred, gt):

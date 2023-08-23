@@ -20,6 +20,7 @@ class EMLP(EquivariantModule):
                  num_layers: int = 3,
                  with_bias: bool = True,
                  activation: Union[EquivariantModule, List[EquivariantModule]] = escnn.nn.ReLU,
+                 head_with_activation: bool = False,
                  init_mode="fan_in"):
         """Constructor of an Equivariant Multi-Layer Perceptron (EMLP) model.
 
@@ -42,6 +43,7 @@ class EMLP(EquivariantModule):
             activation (escnn.nn.EquivariantModule, list(escnn.nn.EquivariantModule)): If a single activation module is
             provided it will be used for all layers except the output layer. If a list of activation modules is provided
             then `num_layers` activation equivariant modules should be provided.
+            head_with_activation: Whether to include an activation module in the output layer.
             init_mode: Not used until now. Will be used to initialize the weights of the MLP.
         """
         super(EMLP, self).__init__()
@@ -67,9 +69,7 @@ class EMLP(EquivariantModule):
             activation = self.activations[n](layer_out_type)
 
             block = escnn.nn.SequentialModule()
-            block.add_module(f"linear_{n}", escnn.nn.Linear(layer_in_type, layer_out_type, bias=with_bias,
-                                                            # initialize=False  # TODO: Remove
-                                                            ))
+            block.add_module(f"linear_{n}", escnn.nn.Linear(layer_in_type, layer_out_type, bias=with_bias))
             block.add_module(f"batchnorm_{n}", escnn.nn.IIDBatchNorm1d(layer_out_type)),
             block.add_module(f"act_{n}", activation)
 
@@ -77,9 +77,13 @@ class EMLP(EquivariantModule):
             layer_in_type = layer_out_type
 
         # Add final layer
-        head_layer = escnn.nn.Linear(layer_in_type, out_type, bias=with_bias)
+        head_block = escnn.nn.SequentialModule()
+        head_block.add_module(f"linear_{num_layers - 1}", escnn.nn.Linear(layer_in_type, out_type, bias=with_bias))
+        if head_with_activation:
+            head_block.add_module(f"batchnorm_{num_layers - 1}", escnn.nn.IIDBatchNorm1d(out_type)),
+            head_block.add_module(f"act_{num_layers - 1}", activation)
         # head_layer.check_equivariance()
-        self.net.add_module("head", head_layer)
+        self.net.add_module("head", head_block)
         # Test the entire model is equivariant.
         self.net.check_equivariance()
 

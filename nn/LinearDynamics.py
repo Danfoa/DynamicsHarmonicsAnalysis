@@ -1,12 +1,12 @@
 import logging
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Union
 
 import escnn
 import numpy as np
 import torch
 from escnn.group import Representation
-from escnn.nn import FieldType
+from escnn.nn import FieldType, GeometricTensor
 from torch.nn import Module
 
 from nn.markov_dynamics import MarkovDynamicsModule
@@ -40,36 +40,43 @@ class EquivariantLinearDynamics(MarkovDynamicsModule):
                                                 out_type=in_type,
                                                 bias=False,
                                                 basisexpansion='blocks',  # TODO: Improve basis expansion
-                                                initialize=True,          # TODO: Modify initialization
+                                                initialize=True,  # TODO: Modify initialization
                                                 )
         # Initialize eigenvalues.
         # TODO: Init
+        self.rep_trivial_change_of_basis = True  # TODO: Apply by default isotypic decomposition
 
-    def forcast(self, initial_state: torch.Tensor, n_steps: int = 1):
+    def forcast(
+            self, initial_state: GeometricTensor, n_steps: int = 1, **kwargs
+            ) -> dict[str, Union[list[GeometricTensor], GeometricTensor]]:
 
-        state_trajectory = torch.unsqueeze(initial_state, 1)  # Add time dimension
+        state_trajectory = [initial_state]  # Add time dimension
 
         # Evolve dynamics
         for step in range(n_steps):
             # TODO: Push for numerical efficiency doing block-diagonal matrix multiplication
-            state_pred = self._equiv_lin_layer(state_trajectory[:, step, :])
+            state_pred = self._equiv_lin_layer(state_trajectory[step])
             # Append pred state to state trajectory
-            state_trajectory = torch.cat((state_trajectory, state_pred), dim=1)
+            state_trajectory.append(state_pred)
+        # Remove initial state
+        state_trajectory = state_trajectory[1:]
 
-        # If required prediction is only a single step, return only that step.
-        if state_trajectory.shape[1] == 1:
-            state_trajectory = state_trajectory.squeeze(1)
+        return dict(state=state_trajectory)
 
-        return state_trajectory
+    def pre_process_state(
+            self, state: Union[list[GeometricTensor], GeometricTensor], **kwargs
+            ) -> Union[list[GeometricTensor], GeometricTensor]:
 
-    def pre_process_state(self, state: torch.Tensor) -> torch.Tensor:
         if not self.rep_trivial_change_of_basis:
             # Change basis to the isotypic decomposition basis
             state_iso = torch.matmul(self.Q_iso, state)
             return state_iso
         return state
 
-    def post_process_state(self, state: torch.Tensor) -> torch.Tensor:
+    def post_process_state(
+            self, state: Union[list[GeometricTensor], GeometricTensor], **kwargs
+            ) -> Union[list[GeometricTensor], GeometricTensor]:
+
         if not self.rep_trivial_change_of_basis:
             # Change basis back to the original basis
             state_orig = torch.matmul(self.Q_iso.T, state)
@@ -77,9 +84,9 @@ class EquivariantLinearDynamics(MarkovDynamicsModule):
         return state
 
     def get_hparams(self):
-        return {'state_dim': self.state_dim,
-                'n_isotypic_spaces': len(self.isotypic_subspaces_reps),
-                'isotypic_spaces_dim': [rep.size for rep in self.iso_reps.values()],
+        return {'state_dim':                  self.state_dim,
+                'n_isotypic_spaces':          len(self.isotypic_subspaces_reps),
+                'isotypic_spaces_dim':        [rep.size for rep in self.iso_reps.values()],
                 'is_state_in_isotypic_basis': self.rep_trivial_change_of_basis,
                 }
 
@@ -214,11 +221,11 @@ class LinearDynamics(Module):
         return a_conj_a
 
     def get_hparams(self):
-        return {'n_cplx_eigval': self.dim // 2,
-                'eigval_init': self._eigval_init,
+        return {'n_cplx_eigval':     self.dim // 2,
+                'eigval_init':       self._eigval_init,
                 'eigval_constraint': self._eigval_constraint}
 
     def extra_repr(self):
-        return f"EigMatrix: n_cplx_eigval:{self.dim//2}" + \
+        return f"EigMatrix: n_cplx_eigval:{self.dim // 2}" + \
                "on unit circle" if self._eigval_constraint == "unit_circle" else "" + \
                                                                                  f" - init: {self._eigval_init}"

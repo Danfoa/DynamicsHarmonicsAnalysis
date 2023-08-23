@@ -41,6 +41,8 @@ class DynamicsDataModule(pl.LightningDataModule):
             self.pred_horizon = pred_horizon + 1
         self.batch_size = batch_size
         self.num_workers = num_workers
+        # Metadata and dynamics information
+        self.metadata, self.dt = None, None
         self.state_measurements = state_measurements
         self.action_measurements = action_measurements
         self._val_dataloader, self._test_dataloader, self._train_dataloader = None, None, None
@@ -66,6 +68,7 @@ class DynamicsDataModule(pl.LightningDataModule):
                                                   prediction_horizon=self.pred_horizon,
                                                   state_measurements=self.state_measurements,
                                                   action_measurements=self.action_measurements)
+        self.metadata = metadata
         self.dt = metadata.dynamics_parameters['dt']
         # In case no measurements are passed, we recover the ones from the DynamicsRecording
         self.state_measurements = metadata.state_measurements

@@ -2,7 +2,7 @@ from typing import Iterable
 
 import torch
 
-from data.dynamics_dataset import STATES, CTRLS
+from data.DynamicsRecording import STATES, CTRLS
 from nn.EquivariantLinearDynamics import EquivariantLinearDynamics
 from src.RobotEquivariantNN.nn.EMLP import MLP
 
