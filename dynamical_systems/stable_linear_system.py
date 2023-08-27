@@ -175,7 +175,7 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     # Ensure stability
     eigvals = np.linalg.eigvals(A_G)
     # steady_state_eigvals = eigvals[np.isclose(eigvals, 0)]
-    transient_eigvals = eigvals[np.logical_not(np.isclose(eigvals, np.zeros_like(eigvals)))]
+    transient_eigvals = eigvals[np.logical_not(np.isclose(np.real(eigvals), np.zeros_like(eigvals)))]
     assert np.all(np.real(transient_eigvals) <= 0), f"Unstable eigenvalues: {eigvals}"
     # Compute the empirical time constant of the system:
     time_constants = [1 / np.abs(eigval) for eigval in transient_eigvals]
@@ -287,8 +287,8 @@ if __name__ == '__main__':
     # Generate trajectories of the system dynamics
     dt = 0.01
     T = 4 * time_constant
-    sigma = 0.5
-    n_trajs = 100
+    sigma = 0.2
+    n_trajs = 30
     state_trajs = []
     for _ in range(n_trajs):
         # Sample initial condition
@@ -302,7 +302,7 @@ if __name__ == '__main__':
     # Save the recordings to train test val splits
     path_2_system = Path(__file__).parents[1] / 'data'
     assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
-    path_2_system = (path_2_system / 'linear_systems' / f"{state_dim:d}-dim" / f"{G.name}" /
+    path_2_system = (path_2_system / 'linear_system' / f"{state_dim:d}-dim" / f"{G.name}" /
                      f"{n_constraints:d}-constraints" /
                      f"noise_std={sigma}_time-constant={max_time_constant:.1f}_T-dt={T:.1f}s-{dt:.3f}s")
     if path_2_system.exists():
@@ -320,6 +320,8 @@ if __name__ == '__main__':
         # Save DynamicsDataset
         data = DynamicsRecording(
             description="Stable linear system with stochastic additive noise",
+            info=dict(num_traj=len(state_trajs[idx]),
+                      trajectory_length=state_trajs[idx].shape[1]),
             dynamics_parameters=dict(
                 transition_matrix=A_G,
                 constraint_matrix=P_symm,
@@ -327,14 +329,16 @@ if __name__ == '__main__':
                 noise_std=sigma,
                 dt=dt,
                 time_constant=max_time_constant,
-                group=dict(subgroup_id=G_id),
+                time_constant_dt_ratio=max_time_constant / dt,
+                n_constraints=n_constraints,
+                group=dict(subgroup_id=G_id, group_name=G.name, group_order=G.order()),
                 ),
             measurements=dict(state=state_trajs[0].shape[-1]),
             state_measurements=['state'],
             reps_irreps=dict(state=rep_X.irreps),  # Store the irreps composing the measurements representations
             reps_change_of_basis=dict(state=rep_X.change_of_basis),  # Store the change of basis matrices
             measurements_representations=dict(state='state'),
-            recordings=dict(state=state_trajs[idx]))
+            recordings=dict(state=np.asarray(state_trajs[idx], dtype=np.float32)))
 
         path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"
 
@@ -344,7 +348,7 @@ if __name__ == '__main__':
     if state_dim == 2:
         fig = plot_system_2D(A_G, state_trajs[test_idx], P=P_symm, z_constraint=offset)
     elif state_dim == 3:
-        fig = plot_system_3D(A_G, state_trajs[test_idx], P=P_symm, z_constraint=offset)
+        fig = plot_system_3D(A_G, state_trajs[train_idx], constraint_matrix=P_symm, constraint_offset=offset)
 
     fig.write_html(path_2_system / 'test_trajectories.html')
 

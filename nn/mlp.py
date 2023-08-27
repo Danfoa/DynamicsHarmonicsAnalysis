@@ -95,7 +95,6 @@ class EMLP(EquivariantModule):
         return {'num_layers': self.num_layers,
                 'hidden_ch':  self.num_hidden_regular_fields,
                 'activation': str(self.activations.__class__.__name__),
-                'init_mode':  str(self.init_mode),
                 }
 
     def reset_parameters(self, init_mode=None):

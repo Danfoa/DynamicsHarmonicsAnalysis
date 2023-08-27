@@ -1,5 +1,7 @@
-from typing import Iterable
+import math
+from typing import Iterable, Union
 
+import numpy as np
 import torch
 from torch.nn import Module
 
@@ -11,10 +13,10 @@ class MarkovDynamicsModule(Module):
         self.state_dim = state_dim
         self.dt = dt
 
-    def forward(self, initial_state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+    def forward(self, state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
         """ Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
         Args:
-            initial_state: Initial state if the system
+            state: Initial state of the system
             n_steps: Number of steps to predict
             **kwargs: Auxiliary arguments
 
@@ -23,35 +25,42 @@ class MarkovDynamicsModule(Module):
             potentially other auxiliary measurements.
         """
         # Apply any required pre-processing to the state
-        initial_state_pre = self.pre_process_state(initial_state)
+        input = self.pre_process_state(state, **kwargs)
         # Evolve dynamics
-        predictions = self.forcast(initial_state=initial_state_pre, n_steps=n_steps)
+        predictions = self.forcast(**input, n_steps=n_steps, )
         # Post-process predictions
-        state_post = self.post_process_state(predictions['state'])
-        predictions['state'] = state_post
+        predictions = self.post_process_pred(predictions)
         return predictions
 
-    def forcast(self, initial_state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+    def forcast(self, state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
         """ Forcasting of dynamics by `n_steps` from initial state `initial_state`.
 
         Args:
-            initial_state: Initial state if the system
+            state: Initial state if the system
             n_steps: Number of steps to predict
             **kwargs: Auxiliary arguments
 
         Returns:
-            predictions (dict): A dictionary containing the predicted states under the key 'state' and potentially
+            predictions (dict): A dictionary containing the predicted states under the key 'next_state' and potentially
             other auxiliary measurements.
         """
         raise NotImplementedError("")
 
-    def pre_process_state(self, state: torch.Tensor, **kwargs) -> torch.Tensor:
-        return state
+    def pre_process_state(self, state: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
+        """ Preprocess the state of the system before forcasting dynamics
+        Args:
+            state (torch.Tensor): [batch, state_dim,] Initial state of the system from which to forcast dynamics
+            **kwargs: Additional arguments
+        Returns:
+            Preprocessed dictionary containing the preprocess state under the `state` key and potentially additional
+            measurements.
+        """
+        return dict(state=state)
 
-    def post_process_state(self, state: torch.Tensor, **kwargs) -> torch.Tensor:
-        return state
+    def post_process_pred(self, predictions: dict) -> torch.Tensor:
+        return predictions
 
-    def compute_loss_metrics(self, pred, gt):
+    def compute_loss_metrics(self, predictions, ground_truth):
         """
         :param x: Batched sequence of consecutive states [x0, x1,..., xT], T=num_steps
         :param z: Batches embeddings/observations of `z = ø(x)` [z0, z1,..., zT]
@@ -60,10 +69,10 @@ class MarkovDynamicsModule(Module):
         :param z_pred: Batches embeddings/observations of `x_pred` [z0, Kz0,...,K^T•z0]
         :return:
         """
-        z_pred = pred['z_pred']
-        x_pred = pred['x_pred']
-        z = pred['z']
-        x_unscaled = gt
+        z_pred = predictions['z_pred']
+        x_pred = predictions['x_pred']
+        z = predictions['z']
+        x_unscaled = ground_truth
         # The output of the dynamics model is already unscaled so we have to unstandarize the dataset samples to compare
         # the results in the appropiate scale.
         # TODO: Make a more elegant solution here
@@ -109,3 +118,23 @@ class MarkovDynamicsModule(Module):
 
     def get_metric_labels(self) -> Iterable[str]:
         return ["rec_loss", "pred_loss", "lin_loss", "linf_loss", "rec_loss", "pred_loss", "lin_loss", "linf_loss"]
+
+    def loss_and_metrics(self,
+                         predictions: dict[str, torch.Tensor],
+                         ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
+        state_pred = predictions['next_state']
+        state_gt = ground_truth['next_state']
+        # Compute state squared error over time and the infinite norm of the state dimension over time.
+        l2_loss = torch.norm(state_gt - state_pred, p=2, dim=-1)
+        linf_loss = torch.norm(state_gt - state_pred, p=torch.inf, dim=-1)
+        time_steps = state_gt.shape[1]
+        metrics = {}
+        if time_steps > 4:
+            # Calculate the average prediction error in [25%,50%,75%] of the prediction horizon.
+            for quartile in [.25, .5, .75]:
+                stop_idx = int(quartile * time_steps)
+                l2_loss_quat = l2_loss[:, :stop_idx].mean(dim=-1)
+                metrics[f'l2_loss_{int(quartile*100):d}'] = l2_loss_quat.mean()
+        # pred_horizon = time_steps * self.dt
+        metrics.update(linf_loss=linf_loss.mean())
+        return l2_loss.mean(), metrics

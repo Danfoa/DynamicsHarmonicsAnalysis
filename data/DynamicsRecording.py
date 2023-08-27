@@ -4,7 +4,7 @@ import pickle
 from dataclasses import dataclass, field
 from math import floor
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Union
 
 import datasets
 import numpy as np
@@ -20,6 +20,7 @@ class DynamicsRecording:
     """Data structure to store recordings of a Markov Dynamics."""
 
     description: Optional[str] = None
+    info: Dict[str, object] = field(default_factory=dict)
     dynamics_parameters: Dict = field(default_factory=lambda: {'dt': None})
 
     # Dictionary providing the map between measurement name and measurement dimension
@@ -51,27 +52,28 @@ class DynamicsRecording:
         return data
 
 
-def load_data_generator(shards: list[Path],
-                        frames_per_state: int = 1,
-                        prediction_horizon: int = 1,
+def load_data_generator(recordings: list[DynamicsRecording],
+                        frames_per_step: int = 1,
+                        prediction_horizon: Union[int, float] = 1,
                         state_measurements: Optional[list[str]] = None,
                         action_measurements: Optional[list[str]] = None):
     """Generator that yields measurement samples of length `n_frames_per_state` from the Markov Dynamics recordings.
 
     Args:
-        shards (list[pathlib.Path]): List of Path files containing DynamicsRecordings.
-        frames_per_state: Number of frames to compose a single measurement sample at time `t`. E.g. if `f` is provided
+        recordings (list[DynamicsRecording]): List of DynamicsRecordings.
+        frames_per_step: Number of frames to compose a single measurement sample at time `t`. E.g. if `f` is provided
         the state samples will be of shape [f, measurement_dim].
-        prediction_horizon: Number of future time steps to include in the next time samples. E.g., if `n` is provided
-        the next_measurement samples will be of shape [n, frames_per_state, measurement_dim]
+        prediction_horizon (int, float): Number of future time steps to include in the next time samples.
+            E.g: if `n` is an integer the samples will be of shape [n, frames_per_state, measurement_dim]
+            If `n` is a float, then the samples will be of shape [int(n*traj_length), frames_per_state, measurement_dim]
         state_measurements: Ordered list of measurements names composing the state space.
         action_measurements: Ordered list of measurements names composing the action space.
 
     Returns:
         A dictionary containing the measurement samples at time `t` and `[t+1, t + pred_horizon]` for each measurement.
     """
-    for file_path in shards:
-        file_data = DynamicsRecording.load_from_file(file_path)
+    for file_data in recordings:
+        # file_data = DynamicsRecording.load_from_file(file_path)
         if state_measurements is not None:
             file_data.state_measurements = file_data.measurements
         if action_measurements is not None:
@@ -86,26 +88,34 @@ def load_data_generator(shards: list[Path],
         # and generate samples of length `n_frames_per_state` from each trajectory.
         for traj_id in range(n_trajs):
             traj_length = next(iter(recordings.values()))[traj_id].shape[0]
+            if isinstance(prediction_horizon, float):
+                steps_in_pred_horizon = floor((prediction_horizon * traj_length) // frames_per_step) - 1
+            else:
+                steps_in_pred_horizon = prediction_horizon - 1
 
+            remnant = traj_length % frames_per_step
+            frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step
             # Iterate over the frames of the trajectory
-            total_steps = math.floor(traj_length / frames_per_state)
-            for frame in range(traj_length - frames_per_state):
-                current_step = math.floor((frame + 1) / frames_per_state) + 1
-                remaining_steps = total_steps - current_step
+            for frame in range(traj_length - frames_per_step):
                 # Collect the next steps until the end of the trajectory. If the prediction horizon is larger than
                 # the remaining steps (prediction outside trajectory length), then we continue to the next traj.
                 # This is better computationally for avoiding copying while batch processing data later.
-                if remaining_steps - 1 <= prediction_horizon:
+                if frame + frames_per_step + frames_in_pred_horizon > (traj_length - remnant):
                     continue
                 sample = {}
                 for measurement, trajs in recordings.items():
-                    sample[measurement] = trajs[traj_id][frame:frame + frames_per_state]
+                    # Enforce Float 32
+                    trajs = np.asarray(trajs, dtype=np.float32)
+                    sample[measurement] = trajs[traj_id][frame:frame + frames_per_step]
                     horizon = []
-                    for h in range(1, min(prediction_horizon + 1, remaining_steps)):
-                        horizon.append(
-                            trajs[traj_id][frame + (frames_per_state * h):
-                                           frame + (frames_per_state * h) + frames_per_state])
+                    num_steps = frames_in_pred_horizon // frames_per_step
+                    for step_id in range(1, num_steps + 1):
+                        step = trajs[traj_id][frame + (frames_per_step * step_id):
+                                              frame + (frames_per_step * step_id) + frames_per_step]
+                        horizon.append(step)
                     sample[f"next_{measurement}"] = np.asarray(horizon)
+                if len(sample[f"next_{measurement}"]) != steps_in_pred_horizon:
+                    raise ValueError(f"Issue")
                 yield sample
 
 
@@ -139,8 +149,8 @@ def map_state_next_state(sample: dict, state_measurements: List[str]) -> dict:
     # Flatten measurements a_t = [a_f, a_f+1, af+2, ..., a_f+F] s.t. a_t in R^{F * dim(a)}, a_f in R^{dim(a)}
     flat_s, flat_next_s = [], []
     for m in state_measurements:
-        measurement = np.asarray(sample[m])                 # To avoid copying we must force all samples of equal shape
-        next_measurement = np.asarray(sample[f"next_{m}"])  # To avoid copying we must force all samples of equal shape
+        measurement = np.asarray(sample[m])
+        next_measurement = np.asarray(sample[f"next_{m}"])
         # Preserve the prediction horizon and batch dimensions and flatten the rest
         flat_s.append(np.reshape(measurement, newshape=measurement.shape[:-2] + (-1,)))
         flat_next_s.append(np.reshape(next_measurement, newshape=next_measurement.shape[:-2] + (-1,)))
@@ -150,12 +160,32 @@ def map_state_next_state(sample: dict, state_measurements: List[str]) -> dict:
     return dict(state=state, next_state=next_state)
 
 
+def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizon: Union[int, float] = 1,
+                          frames_per_step: int = 1):
+    num_trajs = 0
+    num_samples = 0
+    for r in recordings:
+        r_num_trajs = r.info['num_traj']
+        r_traj_length = r.info['trajectory_length']
+        if isinstance(prediction_horizon, float):
+            steps_in_pred_horizon = floor((prediction_horizon * r_traj_length) // frames_per_step)
+        else:
+            steps_in_pred_horizon = prediction_horizon
+        frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step
+        samples = r_traj_length - frames_in_pred_horizon - (r_traj_length % frames_per_step) + 1
+        num_samples += r_num_trajs * samples
+        num_trajs += r_num_trajs
+
+    return num_trajs, num_samples
+
+
 def get_dynamics_dataset(train_shards: list[Path],
                          test_shards: list[Path],
                          val_shards: List[Path],
                          num_proc: int = 1,
-                         frames_per_state: int = 1,
-                         prediction_horizon: int = 1,
+                         frames_per_step: int = 1,
+                         train_pred_horizon: Union[int, float] = 1,  # 1 step ahead
+                         eval_pred_horizon: Union[int, float] = 0.5,  # 50% of the trajectory
                          state_measurements: Optional[list[str]] = None,
                          action_measurements: Optional[list[str]] = None
                          ) -> tuple[list[IterableDataset], DynamicsRecording]:
@@ -177,21 +207,42 @@ def get_dynamics_dataset(train_shards: list[Path],
 
     features = {}
     for measurement, dim in metadata.measurements.items():
-        features[measurement] = datasets.Array2D(shape=(frames_per_state, dim), dtype='float32')
-        features[f"next_{measurement}"] = datasets.Array2D(shape=(frames_per_state, dim), dtype='float32')
+        features[measurement] = datasets.Array2D(shape=(frames_per_step, dim), dtype='float32')
+        features[f"next_{measurement}"] = datasets.Array2D(shape=(frames_per_step, dim), dtype='float32')
 
+    # Calculate the size of all train shard files in Mbs
+    train_data_size = sum([f.stat().st_size for f in train_shards]) / (1024 ** 2)
+    keep_in_memory = train_data_size < 100
     part_datasets = []
     for partition, partition_shards in zip(["train", "test", "val"], [train_shards, test_shards, val_shards]):
+        recordings = [DynamicsRecording.load_from_file(f) for f in partition_shards]
+        if partition == "train":
+            pred_horizon = train_pred_horizon
+        else:
+            pred_horizon = eval_pred_horizon
+
+        num_trajs, num_samples = estimate_dataset_size(recordings, pred_horizon, frames_per_step)
         dataset = IterableDataset.from_generator(load_data_generator,
+                                                 # keep_in_memory=keep_in_memory,
                                                  features=Features(features),
-                                                 gen_kwargs=dict(shards=partition_shards,
-                                                                 frames_per_state=frames_per_state,
-                                                                 prediction_horizon=prediction_horizon,
+                                                 gen_kwargs=dict(recordings=recordings,
+                                                                 frames_per_step=frames_per_step,
+                                                                 prediction_horizon=pred_horizon,
                                                                  state_measurements=state_measurements,
                                                                  action_measurements=action_measurements),
                                                  )
+
+        for sample in dataset:
+            print(f"[Dataset {partition} - Trajs:{num_trajs} - Samples: {num_samples}]-----------------------------")
+            print(
+                f"\tstate: num_frames_per_step={sample['state'].shape[0]}, dims_per_frame={sample['state'].shape[-1]}")
+            print(f"\tnext_state: steps in pred horizon={sample['next_state'].shape[0]}")
+            break
+
+        dataset.info.dataset_size = num_samples
         dataset.info.dataset_name = f"[{partition}] Linear dynamics"
         dataset.info.description = metadata.description
+        # dataset = partition
         part_datasets.append(dataset)
 
     return part_datasets, metadata
@@ -215,28 +266,32 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= 'linear_systems'
+    path_to_data /= 'linear_system'
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
     # Obtain the training, testing and validation file paths containing distinct trajectories of motion.
     train_data, test_data, val_data = get_train_test_val_file_paths(mock_path)
     # Obtain hugging face Iterable datasets instances
-    pred_horizon = 2
-    frames_per_state = 2
+    pred_horizon = .1
+    frames_per_state = 10
     (train_dataset, test_dataset, val_dataset), metadata = get_dynamics_dataset(train_shards=train_data,
                                                                                 test_shards=test_data,
                                                                                 val_shards=val_data,
-                                                                                frames_per_state=frames_per_state,
-                                                                                prediction_horizon=pred_horizon)
-    sample = next(iter(train_dataset))
-    # Test the flattening of the state and next_state
+                                                                                frames_per_step=frames_per_state,
+                                                                                train_pred_horizon=pred_horizon,
+                                                                                eval_pred_horizon=0.5)
+
     # test_flat = map_state_next_state(sample, metadata.state_measurements)
     # Test the map
-    torch_train = train_dataset.with_format("torch").shuffle()
-    torch_train = torch_train.map(map_state_next_state, batched=True, fn_kwargs={'state_measurements': ['state']})
+    torch_dataset = test_dataset.with_format("torch").shuffle()
+    torch_dataset = torch_dataset.map(map_state_next_state, batched=True, fn_kwargs={'state_measurements': ['state']})
 
     # Test errors while looping.
-    for i, s in enumerate(torch_train):
-        if i > 10000:
-            break
+    for i, s in enumerate(torch_dataset):
+        pass
+        # print(s)
+        # if i > 1000:
+        #     break
+
+    print(i)

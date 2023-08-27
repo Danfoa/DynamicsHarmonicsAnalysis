@@ -6,12 +6,14 @@ import escnn.group
 import numpy as np
 import pytorch_lightning as pl
 import torch
+from datasets.distributed import split_dataset_by_node
 from escnn.group import Representation
 from escnn.nn import FieldType
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.DynamicsRecording import get_dynamics_dataset, get_train_test_val_file_paths, map_state_next_state
+from utils.plotting import plot_system_3D
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +22,8 @@ class DynamicsDataModule(pl.LightningDataModule):
 
     def __init__(self,
                  data_path: Path,
-                 pred_horizon: Union[int, float] = 0.5,
+                 pred_horizon: Union[int, float] = 0.25,
+                 eval_pred_horizon: Union[int, float] = 0.5,
                  batch_size: int = 256,
                  frames_per_step: int = 1,
                  num_workers: int = 0,
@@ -39,6 +42,7 @@ class DynamicsDataModule(pl.LightningDataModule):
         elif isinstance(pred_horizon, int):
             assert pred_horizon >= 1, "At least we need to forecast a single dynamics step"
             self.pred_horizon = pred_horizon + 1
+        self.eval_pred_horizon = eval_pred_horizon
         self.batch_size = batch_size
         self.num_workers = num_workers
         # Metadata and dynamics information
@@ -59,13 +63,17 @@ class DynamicsDataModule(pl.LightningDataModule):
         path_to_dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
         # TODO: Handle multiple files from
         system_data_path = path_to_dyn_sys_data.pop()
+        if len(path_to_dyn_sys_data) > 1:
+            raise NotImplementedError("Multiple dynamical systems not supported yet")
+
         train_data, test_data, val_data = get_train_test_val_file_paths(system_data_path)
         # Obtain hugging face Iterable datasets instances
         datasets, metadata = get_dynamics_dataset(train_shards=train_data,
                                                   test_shards=test_data,
                                                   val_shards=val_data,
-                                                  frames_per_state=self.frames_per_step,
-                                                  prediction_horizon=self.pred_horizon,
+                                                  train_pred_horizon=self.pred_horizon,
+                                                  eval_pred_horizon=self.eval_pred_horizon,
+                                                  frames_per_step=self.frames_per_step,
                                                   state_measurements=self.state_measurements,
                                                   action_measurements=self.action_measurements)
         self.metadata = metadata
@@ -77,7 +85,11 @@ class DynamicsDataModule(pl.LightningDataModule):
         # Ensure samples contain torch.Tensors and not numpy arrays.
         # Apply map to obtain flat state/next_state action/next_action values
         train_dataset, test_dataset, val_dataset = datasets
-        train_dataset = train_dataset.map(
+
+        # Ensure what we shuffle the train dataset:
+        train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size/2)
+        # Convert to torch. Apply map to get samples containing state and next state
+        train_dataset = train_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements}).shuffle()
         test_dataset = test_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
@@ -114,16 +126,22 @@ class DynamicsDataModule(pl.LightningDataModule):
             action_reps = [rep for frame_reps in action_reps for rep in frame_reps]  # flatten list of reps
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
-        # if self.augment:  # Apply data augmentation to the state and state trajectories
-        #     train_dataset = train_dataset.map(self.augment_data_map, batched=True)
-
-        self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size, shuffle=False,
+        self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size,
                                             num_workers=self.num_workers,
                                             collate_fn=self.data_augmentation_collate_fn if self.augment else None)
         self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=self.batch_size, shuffle=False,
                                            num_workers=self.num_workers)
         self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=self.batch_size, shuffle=False,
                                           num_workers=self.num_workers)
+
+    def compute_loss_metrics(self, predictions: dict, inputs: dict) -> (torch.Tensor, dict):
+        """
+        Compute the loss and metrics from the predictions and inputs
+        :param predictions: dict of tensors with the predictions
+        :param inputs: dict of tensors with the inputs
+        :return: loss: torch.Tensor, metrics: dict
+        """
+        raise NotImplementedError("Implement this function in the derived class")
 
     def train_dataloader(self):
         return self._train_dataloader
@@ -251,14 +269,15 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= 'linear_systems'
+    path_to_data /= 'linear_system'
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
 
     data_module = DynamicsDataModule(data_path=mock_path,
-                                     pred_horizon=2,
-                                     frames_per_step=5,
+                                     pred_horizon=.1,
+                                     eval_pred_horizon=.5,
+                                     frames_per_step=1,
                                      num_workers=2,
                                      batch_size=500,
                                      augment=True
@@ -267,6 +286,29 @@ if __name__ == "__main__":
     # Test loading of the DynamicsRecording
     data_module.prepare_data()
 
-    for i, batch in tqdm(enumerate(data_module.train_dataloader())):
-        if i > 5000:
+    # Get the dynamical system dynamics parameters
+    A_G = data_module.metadata.dynamics_parameters['transition_matrix']
+    P_symm = data_module.metadata.dynamics_parameters['constraint_matrix']
+    offset = data_module.metadata.dynamics_parameters['constraint_vector']
+    state_dim = A_G.shape[0]
+
+    states, state_trajs = None, None
+    fig = None
+
+    for color, dataloader in zip(['Gray', 'Viridis'], [data_module.test_dataloader(), data_module.train_dataloader()]):
+        for i, batch in enumerate(dataloader):
+            states = batch['state'][:5].detach().numpy()
+            next_states = batch['next_state'][:5].detach().numpy()
+
+            for state, next_state in zip(states, next_states):
+                print(f"Initial confition {state}")
+                traj = np.concatenate([np.expand_dims(state, 0), next_state], axis=0)
+                if state_dim == 2:
+                    pass
+                elif state_dim == 3:
+                    fig = plot_system_3D(A_G, traj, constraint_matrix=P_symm, constraint_offset=offset, fig=fig,
+                                         traj_colorscale=color)
+                else:
+                    pass
             break
+    fig.show()

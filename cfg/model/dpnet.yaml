@@ -1,9 +1,8 @@
 defaults:
   - base_model
 
-name: DAE
+name: DPNet
 # Model hyperparameters
-loss_pred_w: 0.01    # Cost function weight for prediction in observation space Z
 equivariant: True
 activation: ReLU
 n_layers: 4             # Number MLPs' layers (including input and output layers)

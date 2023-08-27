@@ -171,7 +171,8 @@ def plotNdimTraj(traj=None, traj_des=None, fig: Figure = None, show=True, figTit
         assert len(eigvals) == nx, "Number of unique eigenvalues (no conj) should be the number of obs"
 
     if traj_des is not None:
-        assert traj_des.shape == traj.shape, f"Real and desired state trajs differ in size {traj_des.shape} != {traj.shape}"
+        assert traj_des.shape == traj.shape, (f"Real and desired state trajs differ in size {traj_des.shape} != "
+                                              f"{traj.shape}")
 
     t = np.arange(traj.shape[0])
     if dt is not None:
@@ -420,7 +421,6 @@ def plot_system_2D(A, trajectories: Union[list, np.ndarray], P=None, z_constrain
                            opacity=0.3,
                            line_width=1)
 
-
     # Hyperplanes
     # Constraint hyperplanes
     if P is not None:
@@ -460,75 +460,80 @@ def plot_system_2D(A, trajectories: Union[list, np.ndarray], P=None, z_constrain
     return fig
 
 
-def plot_system_3D(A, trajectories, P=None, z_constraint=None):
+def plot_system_3D(A, trajectories, constraint_matrix=None, constraint_offset=None, fig=None, initial_call=False,
+                   flow_field_colorscale='Blues', traj_colorscale='Viridis',
+                   init_state_color='red', initial_point_radius=5):
     trajs = np.asarray(trajectories)
-    if trajs.ndim == 2:
+    assert trajs.shape[-1] == 3, "Trajectories must be 3D"
+    if trajs.ndim == 2:  # Add a trajectory index dimension if it is missing
         trajs = np.expand_dims(trajs, axis=0)
 
+    # Compute bounds of the plot
     assert trajs.shape[-1] == A.shape[0]
-    x_min, x_max = np.min(trajs[:,:, 0]), np.max(trajs[:,:, 0])
-    y_min, y_max = np.min(trajs[:,:, 1]), np.max(trajs[:,:, 1])
-    z_min, z_max = np.min(trajs[:,:, 2]), np.max(trajs[:,:, 2])
+    x_min, x_max = np.min(trajs[:, :, 0]), np.max(trajs[:, :, 0])
+    y_min, y_max = np.min(trajs[:, :, 1]), np.max(trajs[:, :, 1])
+    z_min, z_max = np.min(trajs[:, :, 2]), np.max(trajs[:, :, 2])
     bound = max(abs(x_max), abs(x_min), abs(y_max), abs(y_min), abs(z_max), abs(z_min))
     traj_len = trajs.shape[1]
 
-    x = np.linspace(-bound, bound, 10)
-    y = np.linspace(-bound, bound, 10)
-    z = np.linspace(-bound, bound, 10)
+    if fig is None:
+        initial_call = True
+        fig = go.Figure()
 
-    X, Y, Z = np.meshgrid(x, y, z)
-    UVW = np.array([A @ np.array([xi, yi, zi]) for xi, yi, zi in zip(X.ravel(), Y.ravel(), Z.ravel())])
-    U = UVW[:, 0].reshape(X.shape)
-    V = UVW[:, 1].reshape(Y.shape)
-    W = UVW[:, 2].reshape(Z.shape)
-    scale_factor = 0.5 * bound / np.max(np.sqrt(U**2 + V**2 + W**2))
-    U *= scale_factor
-    V *= scale_factor
-    W *= scale_factor
+    if initial_call:
+        x = np.linspace(-bound, bound, 10)
+        y = np.linspace(-bound, bound, 10)
+        z = np.linspace(-bound, bound, 10)
 
-    fig = go.Figure()
+        X, Y, Z = np.meshgrid(x, y, z)
+        UVW = np.array([A @ np.array([xi, yi, zi]) for xi, yi, zi in zip(X.ravel(), Y.ravel(), Z.ravel())])
+        U = UVW[:, 0].reshape(X.shape)
+        V = UVW[:, 1].reshape(Y.shape)
+        W = UVW[:, 2].reshape(Z.shape)
+        scale_factor = 0.5 * bound / np.max(np.sqrt(U ** 2 + V ** 2 + W ** 2))
+        U *= scale_factor
+        V *= scale_factor
+        W *= scale_factor
+        # Gradient field (quiver)
+        fig.add_trace(go.Cone(x=X.ravel(), y=Y.ravel(), z=Z.ravel(),
+                              u=U.ravel(), v=V.ravel(), w=W.ravel(), opacity=0.2,
+                              sizemode="absolute", colorscale=flow_field_colorscale, showscale=False))
+        # Constraint hyperplanes
+        if constraint_matrix is not None:
+            for i, row in enumerate(constraint_matrix):
+                if row[2] != 0:  # Ensure z-coefficient isn't zero
+                    z_coord = lambda x, y: (-row[0] * x - row[1] * y + constraint_offset[i]) / row[2] if row[
+                                                                                                             2] != 0 \
+                        else 0
+                    lower_left_coord = [-bound, -bound, z_coord(-bound, -bound)]
+                    lower_right_coord = [bound, -bound, z_coord(bound, -bound)]
+                    upper_left_coord = [-bound, bound, z_coord(-bound, bound)]
+                    upper_right_coord = [bound, bound, z_coord(bound, bound)]
+                    plane_corners = np.array([lower_left_coord, lower_right_coord, upper_right_coord, upper_left_coord])
+                    fig.add_trace(go.Mesh3d(x=plane_corners[:, 0], y=plane_corners[:, 1],
+                                            z=plane_corners[:, 2], opacity=0.2))
 
-    # Gradient field (quiver)
-    fig.add_trace(go.Cone(x=X.ravel(), y=Y.ravel(), z=Z.ravel(),
-                          u=U.ravel(), v=V.ravel(), w=W.ravel(), opacity=0.2,
-                          sizemode="absolute", colorscale='Blues', showscale=False))
-
-    # Generate grid of points
-    x = np.linspace(-10, 10, 100)
-    y = np.linspace(-10, 10, 100)
-    X, Y = np.meshgrid(x, y)
-
-    # Constraint hyperplanes
-    if P is not None:
-        for i, row in enumerate(P):
-            if row[2] != 0:  # Ensure z-coefficient isn't zero
-                z_coord = lambda x, y: (-row[0] * x - row[1] * y + z_constraint[i]) / row[2] if row[2] != 0 else 0
-                lower_left_coord = [-bound, -bound, z_coord(-bound, -bound)]
-                lower_right_coord = [bound, -bound, z_coord(bound, -bound)]
-                upper_left_coord = [-bound, bound, z_coord(-bound, bound)]
-                upper_right_coord = [bound, bound, z_coord(bound, bound)]
-                plane_corners = np.array([lower_left_coord, lower_right_coord, upper_right_coord, upper_left_coord])
-                fig.add_trace(go.Mesh3d(x=plane_corners[:, 0], y=plane_corners[:, 1],
-                                        z=plane_corners[:, 2], opacity=0.2))
-
-    # Trajectory
+    # Trajectory plotting (for both initial and subsequent calls)
     for traj in trajs:
-        # Create a gradient based on the progression of time
-        alpha_scale = np.linspace(0.3, 1, traj_len)  # Values from 0.1 (10% opacity) to 1 (100% opacity)
-        # Define the colormap with a gradient in alpha
-        colors = [f'rgba(0, 102, 102, {1 - alpha})' for alpha in alpha_scale]
+        alpha_scale = np.linspace(0.3, 1, traj_len)
         fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines', opacity=0.5,
-                                   showlegend=False, line=dict(color=alpha_scale, colorscale='Viridis', width=6,)))
+                                   showlegend=False,
+                                   line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6, )))
+
+        # Initial point with customizable color and radius
+        fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers', showlegend=False,
+                                   marker=dict(size=initial_point_radius, color=init_state_color)))
 
     # Layout
-    fig.update_layout(
-        scene=dict(
-            xaxis=dict(range=[-bound*1.1, bound*1.1]),
-            yaxis=dict(range=[-bound*1.1, bound*1.1]),
-            zaxis=dict(range=[-bound*1.1, bound*1.1]),
-            aspectratio=dict(x=1, y=1, z=1)
-            ),
-        plot_bgcolor='rgba(245, 245, 245, 1)',
-        paper_bgcolor='rgba(245, 245, 245, 1)'
-        )
+    # current_bound = fig.layout.scene.xaxis.range[1]
+    if initial_call or (bound * 1.1 > fig.layout.scene.xaxis.range[1]):
+        # Update layout only if the new bound is larger than the current bound
+        fig.update_layout(
+            scene=dict(
+                xaxis=dict(range=[-bound * 1.1, bound * 1.1]),
+                yaxis=dict(range=[-bound * 1.1, bound * 1.1]),
+                zaxis=dict(range=[-bound * 1.1, bound * 1.1]),
+                aspectratio=dict(x=1, y=1, z=1)
+                )
+            )
     return fig

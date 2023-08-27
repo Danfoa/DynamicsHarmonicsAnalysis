@@ -1,28 +1,33 @@
 defaults:
   - _self_
   - model: dae
+  - system: linear_system
+  - override hydra/launcher: joblib
 
 # Running hyperparameters
-exp_name: 'tests'
+exp_name: test
 seed: 0
 device: 0
 num_workers: 0       # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 800
-system: "pendulum"
-dynamic_regime: unstable_fix_point
+max_epochs: 200
+
+model: dae
+# Dynamical system
+system: linear_system
+
 
 # Hydra configuration _________
 hydra:
   verbose: ${debug}
   launcher:
-    n_jobs: 1
+    n_jobs: -1
   run:
-    dir: ./experiments/${hydra.job.name}/${dynamic_regime}/${hydra.job.override_dirname}
+    dir: ./experiments/${hydra.job.name}/${system.name}-${model.name}/
   job:
     # TODO: Reorganize output dir
-    name: ${exp_name}_${robot}
+    name: ${exp_name}_${system.name}
     num: ${seed}
     chdir: True
     env_set:
@@ -45,7 +50,7 @@ hydra:
           - max_epochs
 
   sweep:
-    dir: ./experiments/${hydra.job.name}/${dynamic_regime}/
+    dir: ./experiments/${hydra.job.name}/
     subdir: ${hydra.job.override_dirname}
 
   job_logging:

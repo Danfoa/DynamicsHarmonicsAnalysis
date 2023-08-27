@@ -1,6 +1,0 @@
-defaults:
-  - base_model
-
-name: VAMP
-# Model hyperparameters
-reg_w: 5    # Weight of the regularization term encouraging observation independe/orthogonality

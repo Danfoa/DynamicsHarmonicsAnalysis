@@ -36,58 +36,57 @@ class EquivariantLinearDynamics(MarkovDynamicsModule):
         # Use ESCNN to create a G-equivariant linear layer.
         # TODO: Modify initialization to account not for information flow but rather for different dynamical properties
         #  such as stability, etc.
-        self._equiv_lin_layer = escnn.nn.Linear(in_type=in_type,
-                                                out_type=in_type,
-                                                bias=False,
-                                                basisexpansion='blocks',  # TODO: Improve basis expansion
-                                                initialize=True,  # TODO: Modify initialization
-                                                )
+        self.equiv_lin_map = escnn.nn.Linear(in_type=in_type,
+                                             out_type=in_type,
+                                             bias=False,
+                                             basisexpansion='blocks',  # TODO: Improve basis expansion
+                                             )
+
+        a = self.equiv_lin_map.space.build_fiber_intertwiner_basis(in_type.representation, in_type.representation)
         # Initialize eigenvalues.
         # TODO: Init
         self.rep_trivial_change_of_basis = True  # TODO: Apply by default isotypic decomposition
 
     def forcast(
-            self, initial_state: GeometricTensor, n_steps: int = 1, **kwargs
+            self, state: GeometricTensor, n_steps: int = 1, equiv_map_params: torch.Tensor = None, **kwargs
             ) -> dict[str, Union[list[GeometricTensor], GeometricTensor]]:
 
-        state_trajectory = [initial_state]  # Add time dimension
+        state_trajectory = [state]  # Add time dimension
 
         # Evolve dynamics
         for step in range(n_steps):
             # TODO: Push for numerical efficiency doing block-diagonal matrix multiplication
-            state_pred = self._equiv_lin_layer(state_trajectory[step])
+            # retrieve the matrix and the bias
+            equiv_lin_matrix, equiv_bias = self.equiv_lin_map.expand_parameters()
+            state_pred = torch.nn.functional.linear(state_trajectory[step].tensor,
+                                                    weight=equiv_lin_matrix,
+                                                    bias=equiv_bias)
+            state_pred = self.equiv_lin_map(state_trajectory[step])
             # Append pred state to state trajectory
             state_trajectory.append(state_pred)
         # Remove initial state
         state_trajectory = state_trajectory[1:]
 
-        return dict(state=state_trajectory)
+        return dict(next_state=state_trajectory)
 
-    def pre_process_state(
-            self, state: Union[list[GeometricTensor], GeometricTensor], **kwargs
-            ) -> Union[list[GeometricTensor], GeometricTensor]:
+    def pre_process_state(self, state: torch.Tensor, **kwargs) -> dict[str, GeometricTensor]:
+        if isinstance(state, torch.Tensor):
+            return dict(state=self.state_type(state))
+        elif isinstance(state, GeometricTensor):
+            return dict(state=state)
+        else:
+            raise NotImplementedError("")
 
-        if not self.rep_trivial_change_of_basis:
-            # Change basis to the isotypic decomposition basis
-            state_iso = torch.matmul(self.Q_iso, state)
-            return state_iso
-        return state
-
-    def post_process_state(
-            self, state: Union[list[GeometricTensor], GeometricTensor], **kwargs
-            ) -> Union[list[GeometricTensor], GeometricTensor]:
-
-        if not self.rep_trivial_change_of_basis:
-            # Change basis back to the original basis
-            state_orig = torch.matmul(self.Q_iso.T, state)
-            return state_orig
-        return state
+    def post_process_pred(self, predictions: dict) -> dict[str, torch.Tensor]:
+        TIME_DIM = 1
+        for measurement, value in predictions.items():
+            if isinstance(value, list) and isinstance(value[0], GeometricTensor):
+                predictions[measurement] = torch.stack([v.tensor for v in value], dim=TIME_DIM)
+        return predictions
 
     def get_hparams(self):
         return {'state_dim':                  self.state_dim,
-                'n_isotypic_spaces':          len(self.isotypic_subspaces_reps),
-                'isotypic_spaces_dim':        [rep.size for rep in self.iso_reps.values()],
-                'is_state_in_isotypic_basis': self.rep_trivial_change_of_basis,
+                'group':                      self.symm_group.name,
                 }
 
     def num_parameters(self):
