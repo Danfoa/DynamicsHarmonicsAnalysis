@@ -119,6 +119,13 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
 
         obs_state = self.encoder(state)
 
+        if self.eigval_net:
+            inv_features = compute_invariant_features(obs_state.tensor, self.obs_state_type)
+            # Compute G-invariant estimation of the basis coefficients of the equivariant linear map determining the
+            # linear dynamics of the observable state.
+            coefficients = self.eigval_net(inv_features)
+            # TODO: Handle the basis expansion
+
         if self.obs_state_dynamics is None or n_steps < 1:
             obs_state_traj = obs_state
             state_pred = self.decoder(obs_state_traj)
