@@ -22,7 +22,7 @@ def compute_projection_score(cov_x, cov_y, cov_xy):
     """
     score = torch.linalg.lstsq(cov_x, cov_xy).solution  # cov_x_inv @ cov_xy
     score = score @ torch.linalg.pinv(cov_y, hermitian=True)  # cov_x_inv @ cov_xy @ cov_y_inv
-    score = torch.linalg.matrix_norm(score, ord='fro')  # ||cov_x_inv @ cov_xy @ cov_y_inv||_HS^2
+    score = torch.linalg.matrix_norm(score, ord='fro') ** 2  # ||cov_x_inv @ cov_xy @ cov_y_inv||_HS^2
     return score
 
 
@@ -40,7 +40,7 @@ def compute_spectral_score(cov_x, cov_y, cov_xy):
     Returns:
         Score value: (time, 1) or (1,) depending on the input shape.
     """
-    score = torch.linalg.matrix_norm(cov_xy, ord='fro')  # == ||cov_xy|| 2, HS
+    score = torch.linalg.matrix_norm(cov_xy, ord='fro') ** 2  # == ||cov_xy|| 2, HS
     score = score / torch.linalg.matrix_norm(cov_x, ord=2, dim=(-2, -1))  # ||cov_xy|| 2, HS / ||cov_x||
     score = score / torch.linalg.matrix_norm(cov_y, ord=2, dim=(-2, -1))  # ||cov_xy|| 2, HS / (||cov_x|| * ||cov_y||)
     return score
@@ -84,8 +84,7 @@ def covariance(X: torch.Tensor, Y: torch.Tensor):
 def empirical_cov_cross_cov(state_0: torch.Tensor,
                             next_states: torch.Tensor,
                             representation: Optional[Representation] = None,
-                            cross_cov_only: bool = False,
-                            check_equivariance: bool = False) -> (torch.Tensor, torch.Tensor):
+                            debug: bool = False) -> (torch.Tensor, torch.Tensor):
     """ Compute empirical approximation of the covariance and cross-covariance operators for a trajectory of states.
     This function computes the empirical approximation of the covariance and cross-covariance operators in batched
     matrix operations for efficiency.
@@ -96,73 +95,84 @@ def empirical_cov_cross_cov(state_0: torch.Tensor,
          covariance and cross-covariance operators will be improved using the group average trick:
          Cov_t0_ti = 1/|G| Σ_g ∈ G (ρ(g) Cov(X_0, X_i) ρ(g)^T), ensuring that the empirical operators are equivariant:
          Cov_t0_ti ρ(g) = ρ(g) Cov_t0_ti <==> Cov(ρ(g)X_0, ρ(g)X_i) = ρ(g) Cov_t0_ti ρ(g)^* = Cov_t0_ti
-        cross_cov_only: (bool) If True, only the cross-covariance operator is computed. Defaults to False.
-        check_equivariance: (bool) If True, check that the empirical operators are equivariant. Defaults to False. 
+        debug: (bool) If True, check that the empirical operators are equivariant. Defaults to False.
     Returns:
-        Cov_t: (batch, pred_horizon + 1, state_dim, state_dim) Empirical approximation of the covariance operator.
-         Cov_t[t] = E[(X_t - E[X_t])(X_t - E[X_t])^T], being t in [0, pred_horizon + 1]
-        Cov_t0_ti: (batch, pred_horizon, state_dim, state_dim) Empirical approximation of the cross-covariance operator.
-         Cov_t0_ti[t] := Cov(X_0, X_t+1) = E[(X_0 - E[X_0])(X_t+1 - E[X_t+1])^T], being t in [0, pred_horizon]
+        Cov_t_tdt: (pred_horizon + 1, pred_horizon + 1, state_dim, state_dim) Tensor containing all the Covariance
+         and Cross-Covariance empirical operators between the states in the trajectory. Each entry of the tensor is a
+         (state_dim, state_dim) covariance estimate.
+         Such that Cov_t_tdt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, pred_horizon + 1], j >= i.
     """
-    obs_state_0 = state_0[:, None, :]  # Expand the time dimension
+    assert len(state_0.shape) == 2, f"state_0 should be of shape (batch, state_dim) but is {state_0.shape}"
+    num_samples, state_dim = state_0.shape
+    dtype, device = state_0.dtype, state_0.device
     pred_horizon = next_states.shape[1]
     # Apply batch operations to the entire trajectory of observations
-    obs_state_traj = torch.cat([obs_state_0, next_states], dim=1)
+    state_traj = torch.cat([state_0.unsqueeze(1), next_states], dim=1)
 
-    if not cross_cov_only:
-        # Compute all the covariance matrix at each time step in a single batched operation
-        # Cov_t[i] = E[(X_i - E[X_i])(X_i - E[X_i])^T] | t in [0, pred_horizon + 1]
-        Cov_t = covariance(X=obs_state_traj, Y=obs_state_traj)
-        # assert torch.allclose(Cov_t[0], obs_state_init.T @ obs_state_init, atol=1e-6)          # TODO: Test suit
+    # This tensor will hold all the Covariance operators between time steps of the trajectory. Meaning that at the
+    # location Cov_t[i, j] := Cov(X_i, X_j) will have the covariance operator between the states at time i and j.
+    # This matrix will be upper triangular with all lower entries set to nan.
+    Cov_t_tdt = torch.zeros((pred_horizon + 1, pred_horizon + 1, state_dim, state_dim), dtype=dtype, device=device)
 
-    # Compute all the cross-covariance matrices between the initial state and all other states in batched ops.
-    # To do this we duplicate the initial state `pred_horizon` times and do the batched operation
-    obs_state_0d = obs_state_0.expand(-1, pred_horizon, -1)
-    # Cov_t0_ti[i] := Cov(X_0, X_t+1) = E[(X_0 - E[X_0])(X_t+1 - E[X_t+1])^T] | t in [0, pred_horizon]
-    Cov_t0_ti = covariance(X=obs_state_0d, Y=next_states)
+    # Compute all the Cov Operators on the diagonal, that is all Cov ops between the same time step:
+    # Cov_t[i] = E[(X_i - E[X_i])(X_i - E[X_i])^T] | t in [0, pred_horizon + 1]
+    Cov_t = covariance(X=state_traj, Y=state_traj)
+    # Store the results on the diagonal of the Cov_t_tdt matrix
+    Cov_t_tdt[torch.arange(pred_horizon + 1), torch.arange(pred_horizon + 1)] = Cov_t
+
+    # Compute all the Cross-Covariance operators between distinct time steps.
+    # Cov_t_ti[i] := Cov(X_t, X_t+1), ... Cov(X_t, X_H) | t in [0, pred_horizon]
+    for t in range(pred_horizon):
+        # To do this we "duplicate" the state at time t for the next `pred_horizon - t` times compute in batch ops.
+        obs_state_t = state_traj[:, t, :].unsqueeze(1).expand(-1, pred_horizon - t, -1)
+        next_states_t = state_traj[:, t + 1:, :]
+        assert obs_state_t.shape == next_states_t.shape, f"{obs_state_t.shape} != {next_states_t.shape}"
+        Cov_t_ti = covariance(X=obs_state_t, Y=next_states_t)
+        # Store the results in the Cov_t_tdt matrix
+        Cov_t_tdt[t, t + 1:] = Cov_t_ti
+
+    if debug:  # Sanity checks. These should be true by construction
+        # Check Covariance Operator at initial timestep
+        assert torch.allclose(Cov_t_tdt[0, 0], state_0.T @ state_0 / num_samples, atol=1e-6)
+        # Check Cross-Covariance operator ...
+        assert torch.allclose(Cov_t_tdt[0, pred_horizon],
+                              state_0.T @ state_traj[:, pred_horizon, ...] / num_samples, atol=1e-6)
 
     if representation is not None:
-        # We can improve the empirical estimates by understanding that the TRUE operators are equivariant operators
+        # We can improve the empirical estimates by understanding that the theoretical operators are equivariant:
         # ρ(g) Cov(X,Y) ρ(g)^T = Cov(ρ(g)X, ρ(g)Y) = Cov(X, Y) = CovXY
-        # Thus we can apply the "group-average" trick to improve the estimate
-        # CovXY = 1/|G| Σ_g ∈ G (ρ(g) Cov(X,Y) ρ(g)^T).
-        # This is a costly op, but we do it in batched form and only for the group generators
-        gens = representation.group.generators  # Generators of the symmetry group
-        # Its more efficient if we apply this to Cov_t and CovXY at the same time
-        tmp_equiv_op = torch.cat([Cov_t, Cov_t0_ti], dim=0) if not cross_cov_only else Cov_t0_ti
-        # Compute each:      ρ(g) Cov(X,Y) ρ(g)^T   | ρ(g)^T = ρ(~g) = ρ(g^-1)
-        Gtmp_equiv_op = [torch.einsum('na,tao,om->tnm',  # t=time, n,m,a,o=state_dim
-                                      torch.tensor(representation(h), dtype=Cov_t0_ti.dtype, device=Cov_t0_ti.device),
-                                      tmp_equiv_op,
-                                      torch.tensor(representation(~h), dtype=Cov_t0_ti.dtype, device=Cov_t0_ti.device))
-                         for h in gens]
+        # Thus we can apply the "group-average" trick to improve the estimate:
+        # CovXY = 1/|G| Σ_g ∈ G (ρ(g) Cov(X,Y) ρ(g)^T) (see https://arxiv.org/abs/1111.7061)
+        # This is a costly operation but is equivalent to doing data augmentation of the state space samples,
+        # with all group elements, and then computing the empirical covariance operators.
+        # Furthermore, we can apply this operation in parallel to all Cov Ops for numerical efficiency in GPU.
+        orbit_Cov_t_tdt = [Cov_t_tdt]
+        for h in representation.group.generators:  # Generators of the symmetry group. We only need these.
+            # Compute each:      ρ(g) Cov(X,Y) ρ(g)^T   | ρ(g)^T = ρ(~g) = ρ(g^-1)
+            orbit_Cov_t_tdt.append(torch.einsum('na,ltao,om->ltnm',  # t,l=time, n,m,a,o=state_dim
+                                                torch.tensor(representation(h), dtype=dtype, device=device),
+                                                Cov_t_tdt,
+                                                torch.tensor(representation(~h), dtype=dtype, device=device)))
+
         # Compute group average:  1/|G| Σ_g ∈ G (ρ(g) Cov(X,Y) ρ(g)^T).
-        equiv_op_avg = torch.mean(torch.stack([tmp_equiv_op] + Gtmp_equiv_op, dim=0), dim=0)
+        Cov_t_tdt = torch.mean(torch.stack(orbit_Cov_t_tdt, dim=0), dim=0)
 
-        if not cross_cov_only:
-            # Split back the covariance and cross-covariance operators
-            Cov_t, Cov_t0_ti = torch.split(equiv_op_avg, [Cov_t.shape[0], Cov_t0_ti.shape[0]], dim=0)
-        else:
-            Cov_t0_ti = equiv_op_avg
-
-        if check_equivariance:  # Check commutativity/equivariance
+        if debug:  # Check commutativity/equivariance of the empirical estimates of all Covariance operators
             for g in representation.group.elements:
-                rep_h = torch.tensor(representation(g), dtype=Cov_t.dtype, device=Cov_t.device)
-                for t in range(pred_horizon):
-                    assert torch.allclose(rep_h @ Cov_t0_ti[t], Cov_t0_ti[t] @ rep_h, atol=1e-5), \
-                        f"Max error {torch.max(torch.abs(rep_h @ Cov_t0_ti[t] - Cov_t0_ti[t] @ rep_h))}"
-    if cross_cov_only:
-        return Cov_t0_ti
+                rep_h = torch.tensor(representation(g), dtype=dtype, device=device)
+                cov_rep = torch.einsum('na,ltao->ltno', rep_h, Cov_t_tdt)  # t,l=time, n,m,a,o=state_dim
+                rep_cov = torch.einsum('ltao,om->ltam', Cov_t_tdt, rep_h)
+                assert torch.allclose(cov_rep[0, :], rep_cov[0, :], atol=1e-5), \
+                    f"Max equivariance error {torch.max(torch.abs(cov_rep[0, :] - rep_cov[0, :]))}"
 
-    return Cov_t, Cov_t0_ti
+    return Cov_t_tdt
 
 
-def chapman_kolmogorov_regularization(state_0: torch.Tensor,
-                                      next_states: torch.Tensor,
+def chapman_kolmogorov_regularization(Cov_t_dt: torch.Tensor,
                                       ck_window_length: int = 2,
                                       representation: Optional[Representation] = None,
                                       cov_t0_ti: Optional[torch.Tensor] = None,
-                                      verbose: bool = False):
+                                      debug: bool = False):
     """ Compute the Chapman-Kolmogorov regularization using the cross-covariance operators between distinct time steps.
 
     This regularization aims at exploitation Markov Assumption of a linear dynamical system. Specifically it computes:
@@ -178,72 +188,136 @@ def chapman_kolmogorov_regularization(state_0: torch.Tensor,
     2023. https://doi.org/10.48550/arXiv.2307.09912.
 
     Args:
-        state_0: (batch, state_dim) Initial state
-        next_states: (batch, pred_horizon, state_dim) future trajectory of states of length `pred_horizon`
+        Cov_t_dt: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
+         operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
+            Cov_t_dt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, time_horizon], j >= i.
         ck_window_length: (int) Maximum window length to compute the regularization term. Defaults to 2.
         representation (optional Representation): Group representation on the state space. If provided, the empirical
             covariance and cross-covariance operators will be improved using the group average trick.
         cov_t0_ti: (pred_horizon, state_dim, state_dim) Cross-covariance operators between the initial state and the
          next states in the trajectory. Defaults to None, in which case these operators are computed.
-        verbose: (bool) Whether to print debug information on the CK scores computed. Defaults to False.
+        debug: (bool) Whether to print debug information on the CK scores computed. Defaults to False.
     Returns:
 
     """
+    assert (len(Cov_t_dt.shape) == 4 and Cov_t_dt.shape[0] == Cov_t_dt.shape[1]
+            and Cov_t_dt.shape[2] == Cov_t_dt.shape[3]), f"Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
+    time_horizon = Cov_t_dt.shape[0]
+    dtype, device = Cov_t_dt.dtype, Cov_t_dt.device
 
-    assert len(next_states.shape) == 3 and len(state_0.shape) == 2
-    state_dim = state_0.shape[-1]
-    pred_horizon = next_states.shape[1]
+    # Generate upper triangular matrix that will contain the CK error values at each position, such that:
+    # ck_errors[i, j] = || Cov(X_i, X_j) - Cov(X_i, X_i+1) Cov(X_i+1, X_i+2) ... Cov(X_j-1, X_j) || | j >= i+2
+    ck_errors = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
 
-    # All CK terms can be computed by constructing a matrix of size (pred_horizon + 1) x (pred_horizon + 1) in which
-    # each entry in the position i, j = Cov(X_i, X_j) for i < j. Then the transition chain of cross covariances
-    # Cov(X_i, X_i+1) Cov(X_i+1, X_i+2) ... Cov(X_i+d-1, X_i+d) is the diagonal of the matrix starting at position
-    # (i, i+1) and ending at position (i+d-1, i+d).
-    cross_cov_ops = np.empty((pred_horizon + 1, pred_horizon + 1), dtype=object)
-    for t in range(0, pred_horizon - 1):
-        if t == 0:  # Initial condition
-            cov_t_ti = cov_t0_ti if cov_t0_ti is not None else empirical_cov_cross_cov(state_0=state_0,
-                                                                                       next_states=next_states,
-                                                                                       representation=representation,
-                                                                                       cross_cov_only=True)
-        else:
-            cov_t_ti = empirical_cov_cross_cov(state_0=next_states[:, t - 1, :],
-                                               next_states=next_states[:, t:, :],
-                                               representation=representation,
-                                               cross_cov_only=True)
-        cross_cov_ops[t, t + 1:] = [(c,) for c in cov_t_ti]
-    assert np.all([a is None for a in np.diag(cross_cov_ops)]), "Diagonal (Cov(X_t,X_t) ∀ t) should be empty"
-
-    if verbose:
+    if debug:
         print("\t\t Chapman-Kolmogorov Scores")
-        # index_matrix = np.empty((pred_horizon + 1, pred_horizon + 1), dtype=object)
-        # for i, j in np.ndindex(index_matrix.shape):
-        #     index_matrix[i, j] = (i, j)
 
-    ck_scores = []
+    # Minimum number of steps to compute the CK regularization term
+    # ck_errors[t, t+2] = || Cov(X_t, X_t+2) - Cov(X_t, X_t+1) Cov(X_t+1, X_t+2) ||
     min_steps = 2
-    for t_start in range(0, pred_horizon - min_steps):
+    for ts in range(0, time_horizon - 2):  # ts ∈ [0, time_horizon - 2]
         chain_cov = None
-        chain_test = []
-        for t_end in range(t_start + min_steps, min(pred_horizon - 1, t_start + ck_window_length + 1)):
-            r_min, r_max = t_start, t_end - 1
-            c_min, c_max = t_start + 1, t_end
+        chain_test = []  # te ∈ [ts + 2, min(pred_horizon, ck_window)]
+        max_dt = min(ck_window_length, time_horizon - ts)
+        for dt in range(min_steps, max_dt):
+            te = ts + dt  # te ∈ [ts + 2, min(pred_horizon, ts + ck_window)]
             # Compute the covariance chain using Dynamic Programming (i.e., do not repeat computations)
-            # Cov(X_t, X_t+1), Cov(X_t+1, X_t+2), ... Cov(X_te-1, X_te)
-            if chain_cov is None:
-                chain_cov = cross_cov_ops[r_min, c_min][0] @ cross_cov_ops[r_max, c_max][0]
-                chain_test.extend([(r_min, c_min), (r_max, c_max)])
-            else:
-                chain_cov = chain_cov @ cross_cov_ops[r_max, c_max][0]
-                chain_test.append((r_max, c_max))
-            # Select the target covariance as the operator in the upper right
-            target_cov = cross_cov_ops[t_start, t_end][0]  # Cov(X_ts, X_te)
-            # || Cov(X_ts, X_te) - Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2), ... Cov(X_te-1, X_te) ||_2
-            ck_scores += [torch.linalg.matrix_norm(chain_cov - target_cov, ord='fro')]
+            # Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2), ... Cov(X_te-1, X_te)
+            if chain_cov is None:  # chain_cov = Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2)
+                chain_cov = Cov_t_dt[ts, ts + 1] @ Cov_t_dt[ts + 1, ts + 2]
+                chain_test.extend([(ts, ts + 1), (ts + 1, ts + 2)])
+            else:  # chain_cov *= Cov(X_te-1, X_te)
+                chain_cov = chain_cov @ Cov_t_dt[te - 1, te]
+                chain_test.append((te - 1, te))
+            # Select the target covariance as the operator in the upper right if the [ts : te, ts : te] block.
+            target_cov = Cov_t_dt[ts, te]  # Cov(X_ts, X_te)
 
-            if verbose:
+            # || Cov(X_ts, X_te) - Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2), ... Cov(X_te-1, X_te) ||_2
+            ck_errors[ts, te] = torch.linalg.matrix_norm(chain_cov - target_cov, ord='fro')
+
+            if debug:
                 # chain_test = np.diag(index_matrix[r_min:r_max, c_min:c_max])
-                target_test = (t_start, t_end)
-                print(f"{ck_scores[-1]:.3f} \t = || " + '·'.join([f"Cov{c}" for c in chain_test]) +
+                target_test = (ts, te)
+                print(f"{ck_errors[ts, te]:.3f} \t = || " + '·'.join([f"Cov{c}" for c in chain_test]) +
                       f" \t-\t Cov{target_test} ||")
 
-    return ck_scores
+    return ck_errors
+
+
+def compute_chain_spectral_scores(Cov_t_dt: torch.Tensor, debug: bool = False):
+    """ Compute the spectral scores using the cross-covariance operators between distinct time steps.
+
+    Args:
+        Cov_t_dt: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
+         operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
+         Cov_t_dt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, time_horizon], j >= i.
+        debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
+    Returns:
+        spectral_scores: (time_horizon, time_horizon) Tensor containing the spectral scores between all pairs of states
+            i, j in [0, time_horizon], j >= i.
+    """
+    assert (len(Cov_t_dt.shape) == 4 and Cov_t_dt.shape[0] == Cov_t_dt.shape[1]
+            and Cov_t_dt.shape[2] == Cov_t_dt.shape[3]), f"Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
+    time_horizon = Cov_t_dt.shape[0]
+    dtype, device = Cov_t_dt.dtype, Cov_t_dt.device
+
+    spectral_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+    # Compute the norm of the diagonal of the covariance matrices is a single parallel operation.
+    Cov_t = Cov_t_dt[range(time_horizon), range(time_horizon)]
+    norm_Cov_t = torch.linalg.matrix_norm(Cov_t, ord=2, dim=(-2, -1))  # norm_Cov_t[i] = ||Cov(X_i, X_i)||_2
+
+    # Compute the HS norm of the Cross-Covariance operators in a single parallel operation.
+    # norm_Cov_t_dt[i, j] = ||Cov(X_i, X_j)||_HS
+    norm_Cov_t_dt = torch.linalg.matrix_norm(Cov_t_dt, ord='fro', dim=(-2, -1))
+
+    for ts in range(time_horizon):
+        for te in range(ts + 1, time_horizon):
+            norm_CovX, norm_CovY, = norm_Cov_t[ts], norm_Cov_t[te]
+            spectral_scores[ts, te] = norm_Cov_t_dt[ts, te] ** 2 / (norm_CovX * norm_CovY)
+            # TODO: # Shall we scale ( / state_dim)?
+
+    if debug:
+        for ts in range(time_horizon):
+            for te in range(ts + 1, time_horizon):
+                exp = spectral_scores[ts, te]
+                real = compute_spectral_score(cov_x=Cov_t[ts], cov_y=Cov_t[te], cov_xy=Cov_t_dt[ts, te])
+                assert torch.allclose(exp, real, atol=1e-5), f"Spectral scores do not match {exp}!={real}"
+
+    return spectral_scores
+
+
+def compute_chain_projection_scores(Cov_t_dt: torch.Tensor, debug: bool = False):
+    """ Compute the projection scores using the cross-covariance operators between distinct time steps.
+
+    Args:
+        Cov_t_dt: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
+         operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
+         Cov_t_dt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, time_horizon], j >= i.
+        debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
+    Returns:
+        projection_scores: (time_horizon, time_horizon) Tensor containing the projection scores between all pairs of
+            states i, j in [0, time_horizon], j >= i.
+    """
+    assert (len(Cov_t_dt.shape) == 4 and Cov_t_dt.shape[0] == Cov_t_dt.shape[1]
+            and Cov_t_dt.shape[2] == Cov_t_dt.shape[3]), f"Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
+    time_horizon = Cov_t_dt.shape[0]
+    dtype, device = Cov_t_dt.dtype, Cov_t_dt.device
+
+    projection_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+    # Compute the norm of the diagonal of the covariance matrices is a single parallel operation.
+    Cov_t = Cov_t_dt[range(time_horizon), range(time_horizon)]
+    Cov_t_inv = torch.linalg.pinv(Cov_t, hermitian=True)
+
+    for ts in range(time_horizon):
+        for te in range(ts + 1, time_horizon):
+            projection_scores[ts, te] = torch.linalg.matrix_norm(
+                Cov_t_inv[ts] @ Cov_t_dt[ts, te] @ Cov_t_inv[te], ord='fro') ** 2
+
+    if debug:
+        for ts in range(time_horizon):
+            for te in range(ts + 1, time_horizon):
+                exp = projection_scores[ts, te]
+                real = compute_projection_score(cov_x=Cov_t[ts], cov_y=Cov_t[te], cov_xy=Cov_t_dt[ts, te])
+                # assert torch.abs((exp - real) / real) < 0.1, f"Projection scores do not match {exp}!={real}"
+
+    return projection_scores
