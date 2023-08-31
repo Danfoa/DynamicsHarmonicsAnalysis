@@ -119,9 +119,9 @@ class MarkovDynamicsModule(Module):
     def get_metric_labels(self) -> Iterable[str]:
         return ["rec_loss", "pred_loss", "lin_loss", "linf_loss", "rec_loss", "pred_loss", "lin_loss", "linf_loss"]
 
-    def loss_and_metrics(self,
-                         predictions: dict[str, torch.Tensor],
-                         ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
+    def compute_loss_and_metrics(self,
+                                 predictions: dict[str, torch.Tensor],
+                                 ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
         state_pred = predictions['next_state']
         state_gt = ground_truth['next_state']
         # Compute state squared error over time and the infinite norm of the state dimension over time.
@@ -134,7 +134,7 @@ class MarkovDynamicsModule(Module):
             for quartile in [.25, .5, .75]:
                 stop_idx = int(quartile * time_steps)
                 l2_loss_quat = l2_loss[:, :stop_idx].mean(dim=-1)
-                metrics[f'l2_loss_{int(quartile*100):d}'] = l2_loss_quat.mean()
+                metrics[f'l2_loss_{int(quartile * 100):d}'] = l2_loss_quat.mean()
         # pred_horizon = time_steps * self.dt
         metrics.update(linf_loss=linf_loss.mean())
         return l2_loss.mean(), metrics

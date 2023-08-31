@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - model: dae
+  - model: dpnet
   - system: linear_system
   - override hydra/launcher: joblib
 
@@ -8,10 +8,10 @@ defaults:
 exp_name: test
 seed: 0
 device: 0
-num_workers: 0       # Dataloader workers
+num_workers: 0           # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 200
+max_epochs: 500
 
 model: dae
 # Dynamical system

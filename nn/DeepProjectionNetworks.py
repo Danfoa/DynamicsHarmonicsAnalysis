@@ -1,4 +1,7 @@
+import cProfile
 import logging
+import pstats
+import time
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -7,14 +10,13 @@ import numpy as np
 import torch
 from escnn.nn import FieldType, GeometricTensor
 from escnn.nn.modules.basismanager import BlocksBasisExpansion
+from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
 from nn.EquivDynamicsAutoencoder import isotypic_basis
 from nn.mlp import EMLP
 from utils.losses_and_metrics import (chapman_kolmogorov_regularization, compute_chain_projection_scores,
-                                      compute_chain_spectral_scores,
-                                      compute_projection_score,
-                                      compute_spectral_score, empirical_cov_cross_cov,
+                                      compute_chain_spectral_scores, empirical_cov_cross_cov,
                                       regularization_orthonormality)
 
 log = logging.getLogger(__name__)
@@ -95,6 +97,10 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         # Private variables
         self._batch_dim = None  # Used to convert back and forward between Tensor and GeometricTensor.
 
+        num_params = sum([param.nelement() for param in self.parameters()])
+        num_train_params = sum([param.nelement() for param in self.parameters() if param.requires_grad])
+        log.info(f"Equiv-DPnet Num. Parameters: {num_params} ({num_train_params} trainable)\n")
+
     def project(self, state_trajectory: GeometricTensor, **kwargs) -> [dict[str, GeometricTensor]]:
 
         obs_trajectory = self.projection(state_trajectory)
@@ -150,13 +156,19 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         predictions = self.post_process_pred(**predictions)
         return predictions
 
-    def loss_and_metrics(self,
-                         predictions: dict[str, torch.Tensor],
-                         ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
+    def compute_loss_and_metrics(self,
+                                 predictions: dict[str, torch.Tensor],
+                                 ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
+
 
         # Decompose batched observations in their isotypic spaces.
         obs_state = predictions['obs_state']
         next_obs_state = predictions['next_obs_state']
+        time_horizon = obs_state.shape[1]
+
+        device = obs_state.device
+        start_time = time.time()
+        log.debug(f"Computing Loss and Metrics for {predictions['obs_state'].shape[0]} samples. Device {device}")
 
         # Computing the cov and cross-covariance operator with the entire obs state dimension and the average trick
         # results in large equivariance error. Might be faster to compute on GPU but not accurate.
@@ -178,7 +190,8 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
             # Compute the empirical covariance and cross-covariance operators, ensuring that operators are equivariant.
             # Cov_t_tdt[i, j] := Cov(X_i, X_j)  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
             Cov_t_dt = empirical_cov_cross_cov(state_0=obs_state_iso, next_states=next_obs_state_iso,
-                                               representation=rep, debug=log.level == logging.DEBUG)
+                                               representation=rep, cov_window_size=self.max_ck_window_length,
+                                               debug=False)  # log.level == logging.DEBUG)
             # Orthonormality regularization terms for ALL time steps in horizon
             # reg_orthonormal[t] = || Cov_t[i] - I || | t in [0, pred_horizon]
             Cov_t = Cov_t_dt[range(pred_horizon + 1), range(pred_horizon + 1)]
@@ -187,10 +200,12 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
             # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
             # spectral_scores[t, t+d] := ||Cov(X_t, X_t+d)||^2_HS / (||CovX_t|| ||CovX_t+d||)   |
             #   t in [0, pred_horizon], d in [0, pred_horizon - t]
-            spectral_scores = compute_chain_spectral_scores(Cov_t_dt=Cov_t_dt,
-                                                            debug=log.level == logging.DEBUG)
-            projection_scores = compute_chain_projection_scores(Cov_t_dt=Cov_t_dt,
-                                                                debug=log.level == logging.DEBUG)
+            spectral_scores = compute_chain_spectral_scores(Cov=Cov_t_dt,
+                                                            window_size=self.max_ck_window_length,
+                                                            debug=False)  # log.level == logging.DEBUG)
+            projection_scores = compute_chain_projection_scores(Cov=Cov_t_dt,
+                                                                window_size=self.max_ck_window_length,
+                                                                debug=False)  # log.level == logging.DEBUG)
             # Apply the Orthonormal regularization term to the spectral scores
             spectral_scores_reg = torch.clone(spectral_scores)
             time_horizon = pred_horizon + 1
@@ -201,10 +216,9 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
 
             # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
             # ck_scores[i,j] = || Cov(X_i, X_j) - ( Cov(X_i, X_i+1), ... Cov(X_j-1, X_j) ) ||_2  | j >= i + 2
-            ck_regularization = chapman_kolmogorov_regularization(Cov_t_dt=Cov_t_dt,
+            ck_regularization = chapman_kolmogorov_regularization(Cov=Cov_t_dt,
                                                                   ck_window_length=self.max_ck_window_length,
-                                                                  representation=rep,
-                                                                  debug=log.level == logging.DEBUG)
+                                                                  debug=False)  # log.level == logging.DEBUG)
 
             # Minimum number of steps to compute the CK regularization term
             # s_ck_scores[t, t+d] = mean(Σ_i=t^t+d s_scores[t, t+i]) - ck_scores[t, t+d]
@@ -219,18 +233,18 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
                 for dt in range(min_steps, max_dt):
                     td = t + dt
                     s_ck_scores[t, td] = torch.mean(spectral_scores_reg[t, t+1:td])
-                    iso_loss[t, td] = s_ck_scores[t, td] - self.ck_w * ck_regularization[t, td]
+                    iso_loss[t, td] = -((s_ck_scores[t, td] - self.ck_w * ck_regularization[t, td]))
 
             non_nans = lambda x: torch.logical_not(torch.isnan(x))
             # Store the loss results.
             iso_losses.append(iso_loss[non_nans(iso_loss)])
 
             # Useful to debug the expected sparsity pattern of the matrix.
-            # spectral_score_np = spectral_scores.detach().numpy()
-            # spectral_score_reg_np = spectral_scores_reg.detach().numpy()
-            # ck_reg_np = ck_regularization.detach().numpy()
-            # s_ck_scores_np = s_ck_scores.detach().numpy()
-            # loss_np = iso_loss.detach().numpy()
+            # spectral_score_np = spectral_scores.detach().cpu().numpy()
+            # spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
+            # ck_reg_np = ck_regularization.detach().cpu().numpy()
+            # s_ck_scores_np = s_ck_scores.detach().cpu().numpy()
+            # loss_np = iso_loss.detach().cpu().numpy()
 
             iso_metrics[irrep_id]['reg_orthonormal'] = reg_orthonormal[non_nans(reg_orthonormal)]
             iso_metrics[irrep_id]['reg_orthonormal_scaled'] = (reg_orthonormal[non_nans(reg_orthonormal)]
@@ -240,22 +254,26 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
             iso_metrics[irrep_id]['P_score'] = projection_scores[non_nans(projection_scores)]
             iso_metrics[irrep_id]['CK_score'] = ck_regularization[non_nans(ck_regularization)]
             iso_metrics[irrep_id]['CK_score_scaled'] = ck_regularization[non_nans(ck_regularization)] / iso_state_dim**2
-            iso_metrics[irrep_id]['loss'] = iso_loss[non_nans(iso_loss)]
-            iso_metrics[irrep_id]['loss_scaled'] = iso_loss[non_nans(iso_loss)] / iso_state_dim**2
+            # iso_metrics[irrep_id]['loss'] = iso_loss[non_nans(iso_loss)]
+            # iso_metrics[irrep_id]['loss_scaled'] = iso_loss[non_nans(iso_loss)] / iso_state_dim**2
+            log.debug(f"Isotypic Space {irrep_id} of dim {iso_state_dim} took {time.time() - start_time:.2f}[s]")
 
         metrics = dict(
             reg_orthonormal=torch.cat([iso_metrics[iso_id]['reg_orthonormal'] for iso_id in iso_metrics.keys()]),
-            reg_orthonormal_s=torch.cat([iso_metrics[iso_id]['reg_orthonormal_scaled'] for iso_id in iso_metrics.keys()]),
+            # reg_orthonormal_s=torch.cat([iso_metrics[iso_id]['reg_orthonormal_scaled'] for iso_id in iso_metrics.keys()]),
             S_score=torch.cat([iso_metrics[iso_id]['S_score'] for iso_id in iso_metrics.keys()]),
             S_score_reg=torch.cat([iso_metrics[iso_id]['S_score_reg'] for iso_id in iso_metrics.keys()]),
             P_score=torch.cat([iso_metrics[iso_id]['P_score'] for iso_id in iso_metrics.keys()]),
             ck_score=torch.cat([iso_metrics[iso_id]['CK_score'] for iso_id in iso_metrics.keys()]),
-            ck_score_s=torch.cat([iso_metrics[iso_id]['CK_score_scaled'] for iso_id in iso_metrics.keys()]),
-            loss_s=torch.cat([iso_metrics[iso_id]['loss_scaled'] for iso_id in iso_metrics.keys()]),
-            loss=torch.cat([iso_metrics[iso_id]['loss'] for iso_id in iso_metrics.keys()]),
+            # ck_score_s=torch.cat([iso_metrics[iso_id]['CK_score_scaled'] for iso_id in iso_metrics.keys()]),
+            # loss_s=torch.cat([iso_metrics[iso_id]['loss_scaled'] for iso_id in iso_metrics.keys()]),
+            # loss=torch.cat([iso_metrics[iso_id]['loss'] for iso_id in iso_metrics.keys()]),
             )
 
         loss = torch.mean(torch.cat(iso_losses))
+
+        assert not torch.isnan(loss), f"Loss is NaN. Metrics: {metrics}"
+        log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
         return loss, metrics
 
     def get_hparams(self):
@@ -269,6 +287,7 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
 
 
 if __name__ == "__main__":
+    torch.set_printoptions(precision=5)
     path_to_data = Path('data')
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
@@ -279,42 +298,68 @@ if __name__ == "__main__":
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
 
+    pred_horizon = 25
+    device = torch.device('cuda:0')
     data_module = DynamicsDataModule(data_path=mock_path,
-                                     pred_horizon=10,
-                                     eval_pred_horizon=.5,
+                                     pred_horizon=pred_horizon,
+                                     eval_pred_horizon=100,
                                      frames_per_step=1,
-                                     num_workers=2,
-                                     batch_size=1000,
-                                     augment=True
+                                     num_workers=0,
+                                     batch_size=1024,
+                                     augment=True,
+                                     device=device,
                                      )
     data_module.prepare_data()
 
-    obs_state_dimension = 12
-    dt = 0.1
+    dt = data_module.dt
     num_encoder_layers = 4
-    num_encoder_hidden_neurons = obs_state_dimension * 2
     activation = torch.nn.Tanh
     equivariant = True
     #
-    G = escnn.group.DihedralGroup(3)
-    rep_state = G.regular_representation
-    obs_state_dimension = rep_state.size * 3
+    G = data_module.symm_group
+    state_type = data_module.state_field_type
+    obs_state_dimension = state_type.size * 20
+    num_encoder_hidden_neurons = obs_state_dimension * 2
     gspace = escnn.gspaces.no_base_space(G)
 
-    state_type = FieldType(gspace, [rep_state])
     #
     dp_net = EquivDeepProjectionNet(state_type=data_module.state_field_type,
                                     obs_state_dimension=obs_state_dimension,
                                     num_encoder_layers=num_encoder_layers,
                                     num_encoder_hidden_neurons=num_encoder_hidden_neurons,
+                                    max_ck_window_length=6,
                                     activation=escnn.nn.ReLU,
                                     eigval_network=False,
                                     equivariant=equivariant, )
-    dp_net.eval()
+    dp_net.to(device)
 
-    for batch in data_module.train_dataloader():
+    start_time = time.time()
+    profiler = cProfile.Profile()
+    profiler.enable()
+    for i, batch in tqdm(enumerate(data_module.train_dataloader())):
+        for k, v in batch.items():
+            batch[k] = v.to(device)
         obs = dp_net(**batch)
-        dp_net.loss_and_metrics(predictions=obs, ground_truth=batch)
-        break
+        dp_net.compute_loss_and_metrics(predictions=obs, ground_truth=batch)
+        if i > 100:
+            break
+    profiler.disable()
 
-    print(f"Done here it is your Equivariant Dynamics Autoencoder :)")
+    print(f"Computing forward pass and loss/metrics for {i} batches took {time.time() - start_time:.2f}[s]"
+          f"({(time.time() - start_time) / i:.2f} seconds per batch for {pred_horizon} steps in pred horizon)")
+
+    print(f"\nDone here it is your Equivariant Dynamics Autoencoder :)")
+
+    # Create a pstats object
+    stats = pstats.Stats(profiler)
+
+    # Sort stats by the cumulative time spent in the function
+    stats.sort_stats('cumulative')
+
+    # Print only the info for the functions defined in your script
+    # Assuming your script's name is 'your_script.py'
+    stats.print_stats('koopman_robotics')
+
+    # TODO: Have to parallelize compute_chain_spectral_scores.
+    # Print only the top 50 functions sorted by time
+    stats.print_stats(50)

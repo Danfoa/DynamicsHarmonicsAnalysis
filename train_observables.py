@@ -1,18 +1,19 @@
+import cProfile
 import logging
 import math
 import os
+import pstats
 from pathlib import Path
 
 import hydra
 import numpy as np
 import torch
 from hydra.utils import get_original_cwd
+from lightning import Trainer
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning_fabric import seed_everything
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning import Trainer
-
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from data.DynamicsDataModule import DynamicsDataModule
 from nn.DeepProjectionNetworks import EquivDeepProjectionNet
@@ -48,12 +49,14 @@ def main(cfg: DictConfig):
     if not training_done:
         # Load the dynamics dataset.
         data_path = root_path / "data" / cfg.system.data_path
+        device = torch.device("cuda" if torch.cuda.is_available() and cfg.device != "cpu" else "cpu")
         datamodule = DynamicsDataModule(data_path,
                                         batch_size=cfg.model.batch_size,
                                         frames_per_step=cfg.system.frames_per_state,
                                         pred_horizon=cfg.system.pred_horizon,
                                         eval_pred_horizon=cfg.system.eval_pred_horizon,
                                         num_workers=cfg.num_workers,
+                                        device=device,
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
         group = datamodule.symm_group
@@ -67,17 +70,21 @@ def main(cfg: DictConfig):
                                      num_encoder_layers=cfg.model.n_layers,
                                      num_encoder_hidden_neurons=num_hidden_neurons,
                                      activation=activation)
-        if cfg.model.name == "DAE":
+        if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
                 model = EquivDynamicsAutoEncoder(**model_agnostic_params,
                                                  dt=datamodule.dt)
+                assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
         elif cfg.model.name.lower() == "dpnet":
             if cfg.model.equivariant:
-                model = EquivDeepProjectionNet(**model_agnostic_params)
+                model = EquivDeepProjectionNet(**model_agnostic_params,
+                                               max_ck_window_length=cfg.model.max_ck_window_length,
+                                               ck_w=cfg.model.ck_w,
+                                               orthonormal_w=cfg.model.orthonormal_w)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
-        stop_call = EarlyStopping(monitor='val/loss', patience=max(10, int(cfg.max_epochs * 0.1)), mode='min')
+        stop_call = EarlyStopping(monitor='val/loss', patience=max(3, int(cfg.max_epochs * 0.1)), mode='min')
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
@@ -88,12 +95,12 @@ def main(cfg: DictConfig):
                                    save_dir=seed_path.absolute(),
                                    config=run_hps,
                                    group=run_name,
-                                   offline=True,
+                                   # offline=True,
                                    job_type='debug' if cfg.debug else None)
 
         log.info("Training Started\n")
         # Configure Lightning trainer
-        trainer = Trainer(accelerator='gpu' if torch.cuda.is_available() and device != 'cpu' else 0,
+        trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
                           devices=1 if torch.cuda.is_available() and device != 'cpu' else None,
                           logger=wandb_logger,
                           log_every_n_steps=50,
@@ -102,13 +109,11 @@ def main(cfg: DictConfig):
                           benchmark=True,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
-                          detect_anomaly=cfg.debug,
-                          enable_progress_bar=True, # cfg.debug_loops or cfg.debug,
-                          limit_train_batches=10 if cfg.debug_loops else 1.0,
+                          # detect_anomaly=cfg.debug, # This shit slows down to the point of gen existential dread.
+                          enable_progress_bar=cfg.debug_loops or cfg.debug,
+                          limit_train_batches=5 if cfg.debug_loops else 1.0,
                           limit_test_batches=10 if cfg.debug_loops else 1.0,
                           limit_val_batches=10 if cfg.debug_loops else 1.0,
-                          resume_from_checkpoint=ckpt_path if ckpt_path.exists() else None,
-                          profiler="simple" if cfg.debug else None,
                           )
 
         # Load lightning module handling the operations of all model variants
@@ -120,10 +125,22 @@ def main(cfg: DictConfig):
                                   test_epoch_metrics_fn=epoch_metrics_fn,
                                   val_epoch_metrics_fn=epoch_metrics_fn)
         pl_model.set_model(model)
-        wandb_logger.watch(model, log_graph=False, log='all')
+        wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)
+
+        # profiler = cProfile.Profile()
+        # profiler.enable()
 
         trainer.fit(model=pl_model, datamodule=datamodule)
 
+        # profiler.disable()
+
+        # # Create a pstats object
+        # stats = pstats.Stats(profiler)
+        # # Sort stats by the cumulative time spent in the function
+        # stats.sort_stats('cumulative')
+        # # Print only the info for the functions defined in your script
+        # # Assuming your script's name is 'your_script.py'
+        # stats.print_stats('koopman_robotics')
         # Plot performance of best model
         if not cfg.debug:
             log.info("Loading best model and testing")
@@ -143,13 +160,10 @@ def main(cfg: DictConfig):
         #     datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
         #                                      eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach(
         #                                      ).numpy())
-
+        wandb_logger.experiment.unwatch(model)
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
-
-    wandb_logger.experiment.unwatch(pl_model)
 
 
 if __name__ == '__main__':
     main()
-    # Dan5491355

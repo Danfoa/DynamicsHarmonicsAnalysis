@@ -1,15 +1,16 @@
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Union
 
 import escnn.group
 import numpy as np
-import pytorch_lightning as pl
 import torch
 from datasets.distributed import split_dataset_by_node
 from escnn.group import Representation
 from escnn.nn import FieldType
-from torch.utils.data import DataLoader
+from lightning import LightningDataModule
+from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
 from data.DynamicsRecording import get_dynamics_dataset, get_train_test_val_file_paths, map_state_next_state
@@ -18,7 +19,7 @@ from utils.plotting import plot_system_3D
 log = logging.getLogger(__name__)
 
 
-class DynamicsDataModule(pl.LightningDataModule):
+class DynamicsDataModule(LightningDataModule):
 
     def __init__(self,
                  data_path: Path,
@@ -28,6 +29,7 @@ class DynamicsDataModule(pl.LightningDataModule):
                  frames_per_step: int = 1,
                  num_workers: int = 0,
                  augment: bool = False,
+                 device='cpu',
                  state_measurements: Optional[list[str]] = None,
                  action_measurements: Optional[list[str]] = None,
                  ):
@@ -55,10 +57,15 @@ class DynamicsDataModule(pl.LightningDataModule):
         self.measurements_reps = {}
         self.gspace = None
         self.state_field_type, self.action_field_type = None, None
+        self.device = device
 
     def prepare_data(self):
+
         if self.prepared:
+            log.warning("Data preparation called again. Skipping...")
             return
+        start_time = time.time()
+        log.info(f"Preparing datasets {self._data_path}")
 
         path_to_dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
         # TODO: Handle multiple files from
@@ -87,10 +94,10 @@ class DynamicsDataModule(pl.LightningDataModule):
         train_dataset, test_dataset, val_dataset = datasets
 
         # Ensure what we shuffle the train dataset:
-        train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size/2)
+        train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size / 2)
         # Convert to torch. Apply map to get samples containing state and next state
         train_dataset = train_dataset.with_format("torch").map(
-            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements}).shuffle()
+            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
         test_dataset = test_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
         val_dataset = val_dataset.with_format("torch").map(
@@ -127,12 +134,20 @@ class DynamicsDataModule(pl.LightningDataModule):
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
         self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size,
-                                            num_workers=self.num_workers,
-                                            collate_fn=self.data_augmentation_collate_fn if self.augment else None)
-        self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=self.num_workers)
-        self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=self.batch_size, shuffle=False,
-                                          num_workers=self.num_workers)
+                                            num_workers=self.num_workers, pin_memory=True,
+                                            persistent_workers=True if self.num_workers > 0 else False,
+                                            collate_fn=self.data_augmentation_collate_fn if self.augment else
+                                            self.collate_fn)
+        batch_size = min(self.batch_size, test_dataset.dataset_size)
+        self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
+                                           persistent_workers=True if self.num_workers > 0 else False,
+                                           num_workers=self.num_workers, pin_memory=True, collate_fn=self.collate_fn)
+        batch_size = min(self.batch_size, test_dataset.dataset_size)
+        self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False,
+                                          persistent_workers=True if self.num_workers > 0 else False,
+                                          num_workers=self.num_workers, pin_memory=True, collate_fn=self.collate_fn)
+
+        log.info(f"Data preparation done in {time.time() - start_time:.2f} [s]")
 
     def compute_loss_metrics(self, predictions: dict, inputs: dict) -> (torch.Tensor, dict):
         """
@@ -159,10 +174,17 @@ class DynamicsDataModule(pl.LightningDataModule):
     def prepared(self):
         return self._train_dataloader is not None
 
-    def data_augmentation_collate_fn(self, batch_list: dict) -> dict:
+    def collate_fn(self, batch_list: list) -> dict:
+        batch = torch.utils.data.default_collate(batch_list)
+        # for k, v in batch.items():
+        #     batch[k] = v.to(self.device)
+        return batch
+
+    def data_augmentation_collate_fn(self, batch_list: list) -> dict:
         batch = torch.utils.data.default_collate(batch_list)
         state = batch['state']
         next_state = batch['next_state']
+
         action = batch.get('action', None)
         next_action = batch.get('next_action', None)
 
@@ -187,82 +209,6 @@ class DynamicsDataModule(pl.LightningDataModule):
             batch['next_action'] = g_next_action
         return batch
 
-    # def plot_test_performance(self, pl_model: pl.LightningModule, dataset: ClosedLoopDynDataset,
-    #                           log_fig=False, show=False, eigvals=None, log_prefix=''):
-    #     assert self.trainer is not None
-    #     from utils.plotting import plotOCSolution, plotNdimTraj
-    #     from torch.utils.tensorboard import SummaryWriter
-    #     import numpy as np
-    #
-    #     num_trajs = len(dataset)
-    #     num_trajs_plot = 2
-    #
-    #     idx = np.arange(num_trajs)
-    #     gen = np.random.default_rng(12345)
-    #     shuffled_idx = gen.permutation(idx)
-    #     selected_trajs_idx = shuffled_idx[:num_trajs_plot]
-    #
-    #     # Get ground truth
-    #     gt = dataset.collate_fn([dataset[i] for i in selected_trajs_idx])
-    #     # Get model forecasts
-    #     x = self.trainer.model.model.batch_unpack(gt)
-    #     output = pl_model.model.forecast(x)
-    #     pred = self.trainer.model.model.batch_pack(output)
-    #
-    #     cmap = plt.cm.get_cmap('inferno', num_trajs_plot + 1)
-    #     if STATES in pred and CTRLS in pred:
-    #         # Unstandarized ground truth data for plotting. TODO: Make a more elegant solution here
-    #         raise NotImplementedError("Check this is working back again")
-    #         # gt[STATES] = (gt[STATES] * self.train_dataset._state_scale) + self.train_dataset._state_mean
-    #         # gt[CTRLS] = (gt[CTRLS] * self.train_dataset._ctrl_scale) + self.train_dataset._ctrl_mean
-    #         #
-    #         # fig = plot_state_actions(states=gt[STATES], ctrls=gt[CTRLS], states_pred=pred[STATES], ctrls_pred=pred[
-    #         # CTRLS],
-    #         #                          robot=self.robot, dt=self.dt, cmap=cmap)
-    #     if STATES_OBS in pred:
-    #         eigvals = None
-    #         fig_z, artists_c = plot_observations(pred[STATES_OBS], pred[f'{STATES_OBS}_pred'], eigvals=eigvals,
-    #                                              dt=self.dt, cmap=cmap)
-    #         fig_z_obs = None
-    #         if 'z_obs' in pred:
-    #             fig_z_obs, artists_c_obs = plot_observations(pred['z_obs'], pred[f'z_pred_obs'], dt=self.dt,
-    #             cmap=cmap)
-    #
-    #     if log_fig:
-    #         wandb_logger = None
-    #         for logger in self.trainer.loggers:
-    #             if isinstance(logger, WandbLogger):
-    #                 logger.log_image(key=f"{log_prefix}eigf", images=[fig_z], step=self.trainer.current_epoch)
-    #
-    #                 # logger.log({f"{log_prefix}eigfd": fig_z})
-    #
-    #             # fig.canvas.draw()
-    #             # img_data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    #             # img_data = img_data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-    #             # tb_logger.add_image(f"{log_prefix}pred", img_data, self.trainer.current_epoch, dataformats="HWC")
-    #             # fig_z.canvas.draw()
-    #             # imgs = []
-    #             # img_obs_data = np.frombuffer(fig_z.canvas.tostring_rgb(), dtype=np.uint8)
-    #             # img_obs_data = img_obs_data.reshape(fig_z.canvas.get_width_height()[::-1] + (3,))
-    #             # imgs.append(img_obs_data)
-    #             # wandb_logger.log_image(f"{log_prefix}eigf", img_obs_data, )
-    #             # if fig_z_obs is not None:
-    #             #     fig_z_obs.canvas.draw()
-    #             #     img_obs_data = np.frombuffer(fig_z_obs.canvas.tostring_rgb(), dtype=np.uint8)
-    #             #     img_obs_data = img_obs_data.reshape(fig_z_obs.canvas.get_width_height()[::-1] + (3,))
-    #             #     wandb_logger.log_image(f"{log_prefix}obs", img_obs_data, self.trainer.current_epoch,
-    #             #     dataformats="HWC")
-    #             #     imgs.append(img_obs_data)
-    #             # wandb_logger.log_image(f"{log_prefix}eigf", imgs, self.trainer.current_epoch)
-    #             log.debug(f"Logged prediction of {num_trajs_plot} trajectories")
-    #     if show:
-    #         # fig.show()
-    #         fig_z.show()
-    #         if fig_z_obs is not None:
-    #             fig_z_obs.show()
-    #
-    #     print("")
-
 
 if __name__ == "__main__":
     path_to_data = Path(__file__).parent
@@ -275,11 +221,11 @@ if __name__ == "__main__":
     mock_path = path_to_dyn_sys_data.pop()
 
     data_module = DynamicsDataModule(data_path=mock_path,
-                                     pred_horizon=.1,
+                                     pred_horizon=.5,
                                      eval_pred_horizon=.5,
                                      frames_per_step=1,
-                                     num_workers=2,
-                                     batch_size=500,
+                                     num_workers=1,
+                                     batch_size=1000,
                                      augment=True
                                      )
 
@@ -295,13 +241,26 @@ if __name__ == "__main__":
     states, state_trajs = None, None
     fig = None
 
+    # Time the time taken to iterate over train test and validation datasets and divide it by the number of samples
+    # in each partition, accessible through the dataset.dataset_size attribute
+    for partition, dataloader in zip(['Train', 'Test', 'Validation'],
+                                     [data_module.train_dataloader(), data_module.test_dataloader(),
+                                      data_module.val_dataloader()]):
+        start_time = time.time()
+        n_samples = 0
+        for i, batch in enumerate(dataloader):
+            states = batch['state']
+            n_samples += states.shape[0]
+        # print the time in [ms]
+        print(f"Average time per sample in {partition} set: {(time.time() - start_time) / n_samples * 1000:.2f} [ms]")
+        print(f"Total time iters over {partition} set: {(time.time() - start_time):.2f}[s]")
+
     for color, dataloader in zip(['Gray', 'Viridis'], [data_module.test_dataloader(), data_module.train_dataloader()]):
         for i, batch in enumerate(dataloader):
             states = batch['state'][:5].detach().numpy()
             next_states = batch['next_state'][:5].detach().numpy()
 
             for state, next_state in zip(states, next_states):
-                print(f"Initial confition {state}")
                 traj = np.concatenate([np.expand_dims(state, 0), next_state], axis=0)
                 if state_dim == 2:
                     pass

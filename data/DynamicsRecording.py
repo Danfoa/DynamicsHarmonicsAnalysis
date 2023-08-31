@@ -164,6 +164,7 @@ def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizo
                           frames_per_step: int = 1):
     num_trajs = 0
     num_samples = 0
+    steps_pred_horizon = []
     for r in recordings:
         r_num_trajs = r.info['num_traj']
         r_traj_length = r.info['trajectory_length']
@@ -171,11 +172,13 @@ def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizo
             steps_in_pred_horizon = floor((prediction_horizon * r_traj_length) // frames_per_step)
         else:
             steps_in_pred_horizon = prediction_horizon
+        steps_pred_horizon.append(steps_in_pred_horizon)
         frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step
         samples = r_traj_length - frames_in_pred_horizon - (r_traj_length % frames_per_step) + 1
         num_samples += r_num_trajs * samples
         num_trajs += r_num_trajs
-
+    steps_pred_horizon = np.mean(steps_pred_horizon)
+    log.debug(f"Steps in prediction horizon {int(steps_pred_horizon)}")
     return num_trajs, num_samples
 
 
@@ -218,8 +221,10 @@ def get_dynamics_dataset(train_shards: list[Path],
         recordings = [DynamicsRecording.load_from_file(f) for f in partition_shards]
         if partition == "train":
             pred_horizon = train_pred_horizon
-        else:
+        elif partition == "val":
             pred_horizon = eval_pred_horizon
+        else:
+            pred_horizon = 0.5
 
         num_trajs, num_samples = estimate_dataset_size(recordings, pred_horizon, frames_per_step)
         dataset = IterableDataset.from_generator(load_data_generator,
@@ -233,10 +238,13 @@ def get_dynamics_dataset(train_shards: list[Path],
                                                  )
 
         for sample in dataset:
-            print(f"[Dataset {partition} - Trajs:{num_trajs} - Samples: {num_samples}]-----------------------------")
-            print(
-                f"\tstate: num_frames_per_step={sample['state'].shape[0]}, dims_per_frame={sample['state'].shape[-1]}")
-            print(f"\tnext_state: steps in pred horizon={sample['next_state'].shape[0]}")
+            state = sample['state']
+            next_state = sample['next_state']
+            time_horizon = next_state.shape[1] + 1
+            log.debug(f"[Dataset {partition} - Trajs:{num_trajs} - Samples: {num_samples} - "
+                      f"Frames per sample : {frames_per_step * time_horizon}]-----------------------------")
+            log.debug(f"\tstate: {state.shape} = (frames_per_step, state_dim)")
+            log.debug(f"\tnext_state: {next_state.shape} = (pred_horizon, frames_per_step, state_dim)")
             break
 
         dataset.info.dataset_size = num_samples
@@ -290,8 +298,8 @@ if __name__ == "__main__":
     # Test errors while looping.
     for i, s in enumerate(torch_dataset):
         pass
-        # print(s)
+        # log.debug(s)
         # if i > 1000:
         #     break
 
-    print(i)
+    log.debug(i)
