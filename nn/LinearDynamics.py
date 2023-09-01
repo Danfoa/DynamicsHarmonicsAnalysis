@@ -39,7 +39,6 @@ class EquivariantLinearDynamics(MarkovDynamicsModule):
         self.equiv_lin_map = escnn.nn.Linear(in_type=in_type,
                                              out_type=in_type,
                                              bias=False,
-                                             basisexpansion='blocks',  # TODO: Improve basis expansion
                                              )
 
         a = self.equiv_lin_map.space.build_fiber_intertwiner_basis(in_type.representation, in_type.representation)
@@ -86,7 +85,7 @@ class EquivariantLinearDynamics(MarkovDynamicsModule):
 
     def get_hparams(self):
         return {'state_dim':                  self.state_dim,
-                'group':                      self.symm_group.name,
+                'group':                      self.symm_group.name
                 }
 
     def num_parameters(self):

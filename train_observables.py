@@ -77,6 +77,7 @@ def main(cfg: DictConfig):
                 assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
         elif cfg.model.name.lower() == "dpnet":
             if cfg.model.equivariant:
+                assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
                 model = EquivDeepProjectionNet(**model_agnostic_params,
                                                max_ck_window_length=cfg.model.max_ck_window_length,
                                                ck_w=cfg.model.ck_w,
@@ -84,7 +85,7 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
-        stop_call = EarlyStopping(monitor='val/loss', patience=max(3, int(cfg.max_epochs * 0.1)), mode='min')
+        stop_call = EarlyStopping(monitor='val/loss', patience=max(5, int(cfg.max_epochs * 0.1)), mode='min')
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
@@ -98,15 +99,14 @@ def main(cfg: DictConfig):
                                    # offline=True,
                                    job_type='debug' if cfg.debug else None)
 
-        log.info("Training Started\n")
         # Configure Lightning trainer
         trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
-                          devices=1 if torch.cuda.is_available() and device != 'cpu' else None,
+                          devices=1 if torch.cuda.is_available() and device != 'cpu' else 1,
                           logger=wandb_logger,
                           log_every_n_steps=50,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
-                          check_val_every_n_epoch=1,
-                          benchmark=True,
+                          check_val_every_n_epoch=2,
+                          # benchmark=True,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
                           # detect_anomaly=cfg.debug, # This shit slows down to the point of gen existential dread.
@@ -125,12 +125,16 @@ def main(cfg: DictConfig):
                                   test_epoch_metrics_fn=epoch_metrics_fn,
                                   val_epoch_metrics_fn=epoch_metrics_fn)
         pl_model.set_model(model)
+        # pl_model.to(device)
         wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)
+
+        # trainer.test(model=pl_model, datamodule=datamodule)
 
         # profiler = cProfile.Profile()
         # profiler.enable()
-
+        log.info("\nTraining Started\n")
         trainer.fit(model=pl_model, datamodule=datamodule)
+        log.info("\nTraining Done\n")
 
         # profiler.disable()
 
@@ -145,6 +149,7 @@ def main(cfg: DictConfig):
         if not cfg.debug:
             log.info("Loading best model and testing")
             best_ckpt = torch.load(best_path)
+            pl_model.eval()
             pl_model.load_state_dict(best_ckpt['state_dict'])  #
 
         trainer.test(model=pl_model, datamodule=datamodule)
@@ -161,6 +166,7 @@ def main(cfg: DictConfig):
         #                                      eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach(
         #                                      ).numpy())
         wandb_logger.experiment.unwatch(model)
+        wandb_logger.experiment.finish()
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
 

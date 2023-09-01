@@ -134,18 +134,43 @@ class DynamicsDataModule(LightningDataModule):
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
         self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size,
-                                            num_workers=self.num_workers, pin_memory=True,
+                                            num_workers=self.num_workers,
+                                            # pin_memory=True,
                                             persistent_workers=True if self.num_workers > 0 else False,
                                             collate_fn=self.data_augmentation_collate_fn if self.augment else
                                             self.collate_fn)
         batch_size = min(self.batch_size, test_dataset.dataset_size)
         self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
                                            persistent_workers=True if self.num_workers > 0 else False,
-                                           num_workers=self.num_workers, pin_memory=True, collate_fn=self.collate_fn)
+                                           num_workers=self.num_workers,
+                                           # pin_memory=True,
+                                           collate_fn=self.collate_fn)
         batch_size = min(self.batch_size, test_dataset.dataset_size)
         self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False,
                                           persistent_workers=True if self.num_workers > 0 else False,
-                                          num_workers=self.num_workers, pin_memory=True, collate_fn=self.collate_fn)
+                                          num_workers=self.num_workers,
+                                          # pin_memory=True,
+                                          collate_fn=self.collate_fn)
+
+        # Configure the prediction dataloader for the approximating and evaluating the transfer operator. This will
+        # be a dataloader passing state and next state single step measuremants:
+        datasets, metadata = get_dynamics_dataset(train_shards=train_data,
+                                                  test_shards=test_data,
+                                                  val_shards=val_data,
+                                                  train_pred_horizon=1,
+                                                  eval_pred_horizon=1,
+                                                  frames_per_step=self.frames_per_step,
+                                                  state_measurements=self.state_measurements,
+                                                  action_measurements=self.action_measurements)
+        transfer_op_train_dataset, _, _ = datasets
+        transfer_op_train_dataset = transfer_op_train_dataset.with_format("torch").map(
+            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
+
+        self._trans_op_dataloader = DataLoader(dataset=transfer_op_train_dataset,
+                                               batch_size=transfer_op_train_dataset.dataset_size,  # Single batch
+                                               pin_memory=False, num_workers=self.num_workers, shuffle=False,
+                                               collate_fn=self.collate_fn)
+
 
         log.info(f"Data preparation done in {time.time() - start_time:.2f} [s]")
 
@@ -168,7 +193,7 @@ class DynamicsDataModule(LightningDataModule):
         return self._test_dataloader
 
     def predict_dataloader(self):
-        return self._test_dataloader
+        return self._trans_op_dataloader
 
     @property
     def prepared(self):
@@ -176,8 +201,8 @@ class DynamicsDataModule(LightningDataModule):
 
     def collate_fn(self, batch_list: list) -> dict:
         batch = torch.utils.data.default_collate(batch_list)
-        # for k, v in batch.items():
-        #     batch[k] = v.to(self.device)
+        for k, v in batch.items():
+            batch[k] = v.to(self.device)
         return batch
 
     def data_augmentation_collate_fn(self, batch_list: list) -> dict:

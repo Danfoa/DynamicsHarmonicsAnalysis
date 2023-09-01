@@ -80,7 +80,10 @@ def append_dictionaries(dict1, dict2, recursive=True):
         elif isinstance(item1, int) or isinstance(item1, float):
             result[k] = [item1, item2]
         elif isinstance(item1, torch.Tensor) and isinstance(item2, torch.Tensor):
-            result[k] = torch.cat((item1, item2))
+            # try:
+            result[k] = torch.hstack((item1, item2))
+            # except RuntimeError as e:
+                # result[k] = torch.cat((torch.unsqueeze(item1, 0), torch.unsqueeze(item2, 0)))
         elif isinstance(item1, dict) and isinstance(item2, dict) and recursive:
             result[k] = append_dictionaries(item1, item2)
     return result

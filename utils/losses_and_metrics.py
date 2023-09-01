@@ -9,6 +9,7 @@ from escnn.group import Representation
 
 log = logging.getLogger(__name__)
 
+
 def compute_projection_score(cov_x, cov_y, cov_xy):
     """ Computes the projection score of the covariance matrices. Maximizing this score is equivalent to maximizing
     the correlation between x and y
@@ -124,14 +125,14 @@ def empirical_cov_cross_cov(state_0: torch.Tensor,
     # Expand state_traj to have an extra dimension for time_horizon
     state_traj_block = state_traj.permute(1, 0, 2)  # (T, batch_size, state_dim)
     state_traj_block = state_traj_block.unsqueeze(1).expand(-1, time_horizon, -1, -1)  # (T, T', batch_size, state_dim)
-    state_traj_block_transposed = state_traj_block.permute(1, 0, 2, 3)                 # (T', T, batch_size, state_dim)
+    state_traj_block_transposed = state_traj_block.permute(1, 0, 2, 3)  # (T', T, batch_size, state_dim)
 
     # Compute in a single tensor (parallel) operation all covariance and cross-covariance matrices of the trajectory.
     start_time = time.time()
-    Cov = torch.einsum('...ob,...ba->...oa',              # -> (T, T', state_dim, state_dim)
-                            state_traj_block.permute(0, 1, 3, 2),  # (T, T', state_dim, batch_size)
-                            state_traj_block_transposed            # (T', T, batch_size, state_dim)
-                            ) / num_samples
+    Cov = torch.einsum('...ob,...ba->...oa',  # -> (T, T', state_dim, state_dim)
+                       state_traj_block.permute(0, 1, 3, 2),  # (T, T', state_dim, batch_size)
+                       state_traj_block_transposed  # (T', T, batch_size, state_dim)
+                       ) / num_samples
 
     # log.debug(f"Parallel Cov Computation {time.time() - start_time:.2e}[s]")
 
@@ -318,3 +319,101 @@ def compute_chain_projection_scores(Cov: torch.Tensor, window_size: Optional[int
                 # assert torch.abs((exp - real) / real) < 0.1, f"Projection scores do not match {exp}!={real}"
 
     return projection_scores
+
+
+def obs_state_space_loss_and_metrics(obs_state: torch.Tensor,
+                                     next_obs_state: torch.Tensor,
+                                     representation: Optional[Representation] = None,
+                                     max_ck_window_length: int = 2,
+                                     ck_w: float = 0.01,
+                                     orthonormal_w: float = 0.1,
+                                     ):
+    pred_horizon = next_obs_state.shape[1]
+    state_dim = obs_state.shape[-1]
+    dtype = obs_state.dtype
+    device = obs_state.device
+
+    # Compute the empirical covariance and cross-covariance operators, ensuring that operators are equivariant.
+    # Cov_t_tdt[i, j] := Cov(X_i, X_j)  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
+    Cov_t_dt = empirical_cov_cross_cov(state_0=obs_state, next_states=next_obs_state,
+                                       representation=representation, cov_window_size=max_ck_window_length,
+                                       debug=False)  # log.level == logging.DEBUG)
+    # Orthonormality regularization terms for ALL time steps in horizon
+    # reg_orthonormal[t] = || Cov_t[i] - I || | t in [0, pred_horizon]
+    Cov_t = Cov_t_dt[range(pred_horizon + 1), range(pred_horizon + 1)]
+    reg_orthonormal = regularization_orthonormality(Cov_t)
+
+    # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
+    # spectral_scores[t, t+d] := ||Cov(X_t, X_t+d)||^2_HS / (||CovX_t|| ||CovX_t+d||)   |
+    #   t in [0, pred_horizon], d in [0, pred_horizon - t]
+    spectral_scores = compute_chain_spectral_scores(Cov=Cov_t_dt,
+                                                    window_size=max_ck_window_length,
+                                                    debug=False)  # log.level == logging.DEBUG)
+    projection_scores = compute_chain_projection_scores(Cov=Cov_t_dt,
+                                                        window_size=max_ck_window_length,
+                                                        debug=False)  # log.level == logging.DEBUG)
+    # Apply the Orthonormal regularization term to the spectral scores
+    spectral_scores_reg = torch.clone(spectral_scores)
+    time_horizon = pred_horizon + 1
+    for t in range(0, time_horizon):
+        for dt in range(1, time_horizon - t):
+            spectral_scores_reg[t, t + dt] -= orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
+            # projection_scores[t, t + dt] -= self.orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
+
+    # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
+    # ck_scores[i,j] = || Cov(X_i, X_j) - ( Cov(X_i, X_i+1), ... Cov(X_j-1, X_j) ) ||_2  | j >= i + 2
+    ck_regularization = chapman_kolmogorov_regularization(Cov=Cov_t_dt,
+                                                          ck_window_length=max_ck_window_length,
+                                                          debug=False)  # log.level == logging.DEBUG)
+
+    # Minimum number of steps to compute the CK regularization term
+    # s_ck_scores[t, t+d] = mean(Σ_i=t^t+d s_scores[t, t+i]) - ck_scores[t, t+d]
+    #                                             t in [0, time_horizon - 2], d in [2, min(pred_horizon-t, ck_window)]
+    min_steps = 2
+    s_ck_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+    iso_loss = torch.fill(torch.zeros_like(s_ck_scores, dtype=dtype, device=device), torch.nan)
+    for t in range(0, time_horizon - 2):  # ts ∈ [0, time_horizon - 2]
+        max_dt = min(time_horizon - t, max_ck_window_length)
+        for dt in range(min_steps, max_dt):
+            td = t + dt
+            s_ck_scores[t, td] = torch.mean(spectral_scores_reg[t, t + 1:td])
+            iso_loss[t, td] = -((s_ck_scores[t, td] - ck_w * ck_regularization[t, td]))
+
+    # Generate metrics dictionary
+    non_nans = lambda x: torch.logical_not(torch.isnan(x))
+    # Store the loss results.
+    loss = iso_loss[non_nans(iso_loss)]
+
+    # Useful to debug the expected sparsity pattern of the matrix.
+    # spectral_score_np = spectral_scores.detach().cpu().numpy()
+    # spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
+    # ck_reg_np = ck_regularization.detach().cpu().numpy()
+    # s_ck_scores_np = s_ck_scores.detach().cpu().numpy()
+    # loss_np = iso_loss.detach().cpu().numpy()
+
+    metrics = {}
+    metrics['reg_orthonormal'] = reg_orthonormal[non_nans(reg_orthonormal)]
+    metrics['S_score'] = spectral_scores[non_nans(spectral_scores)]
+    metrics['S_score_reg'] = spectral_scores_reg[non_nans(spectral_scores_reg)]
+    metrics['P_score'] = projection_scores[non_nans(projection_scores)]
+    metrics['CK_score'] = ck_regularization[non_nans(ck_regularization)]
+
+    return loss, metrics
+
+
+def forecasting_loss_and_metrics(
+        state_gt: torch.Tensor, state_pred: torch.Tensor) -> (torch.Tensor, dict[str, torch.Tensor]):
+    # Compute state squared error over time and the infinite norm of the state dimension over time.
+    l2_loss = torch.norm(state_gt - state_pred, p=2, dim=-1)
+    linf_loss = torch.norm(state_gt - state_pred, p=torch.inf, dim=-1)
+    time_steps = state_gt.shape[1]
+    metrics = {}
+    if time_steps > 4:
+        # Calculate the average prediction error in [25%,50%,75%] of the prediction horizon.
+        for quartile in [.25, .5, .75]:
+            stop_idx = int(quartile * time_steps)
+            l2_loss_quat = l2_loss[:, :stop_idx].mean(dim=-1)
+            metrics[f'pred_loss_{int(quartile * 100):d}%'] = l2_loss_quat.mean()
+    # pred_horizon = time_steps * self.dt
+    metrics.update(linf_loss=linf_loss.mean())
+    return l2_loss.mean(), metrics

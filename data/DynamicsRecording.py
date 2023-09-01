@@ -91,7 +91,7 @@ def load_data_generator(recordings: list[DynamicsRecording],
             if isinstance(prediction_horizon, float):
                 steps_in_pred_horizon = floor((prediction_horizon * traj_length) // frames_per_step) - 1
             else:
-                steps_in_pred_horizon = prediction_horizon - 1
+                steps_in_pred_horizon = prediction_horizon
 
             remnant = traj_length % frames_per_step
             frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step

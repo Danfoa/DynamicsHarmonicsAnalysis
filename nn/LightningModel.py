@@ -1,6 +1,6 @@
 import pathlib
 import time
-from typing import Union, Callable, Optional
+from typing import Any, Union, Callable, Optional
 
 import numpy as np
 import torch
@@ -9,6 +9,7 @@ import logging
 
 import wandb
 from lightning import LightningModule
+from lightning.pytorch.utilities.types import STEP_OUTPUT
 
 from nn.markov_dynamics import MarkovDynamicsModule
 
@@ -76,8 +77,9 @@ class LightningModel(LightningModule):
 
     def test_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps)
-        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch)
+        outputs = self.model(**batch, n_steps=n_steps, predict=True)
+
+        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch, predict=True)
 
         if self.val_metrics_fn is not None:
             test_metrics = self.test_metrics_fn(outputs, batch)
@@ -95,6 +97,11 @@ class LightningModel(LightningModule):
 
     def on_train_epoch_end(self) -> None:
         self.log('time_per_epoch', time.time() - self._epoch_start_time, prog_bar=False, on_epoch=True)
+
+    def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
+        # Distributions have to be logged manually. Why keep using Lightning ? :(
+        if self.trainer.global_step % self.trainer.log_every_n_steps == 0:
+            self.log_distribution(flush=True)
 
     def on_fit_start(self) -> None:
         # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics
@@ -143,6 +150,10 @@ class LightningModel(LightningModule):
     def on_validation_end(self) -> None:
         self.log_distribution(flush=True)
 
+    def on_test_start(self) -> None:
+        if hasattr(self.model, "approximate_transfer_operator"):
+            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+
     def on_test_end(self) -> None:
         self.log_distribution(flush=True)
 
@@ -158,29 +169,24 @@ class LightningModel(LightningModule):
                 self.log(name, v, prog_bar=False)
             else:
                 self.log(f"{name}_avg", torch.mean(v), prog_bar=False)
-                if self.trainer.global_step > 0:
-                    self.log_distribution(name, v, flush=False)
+                self.log_distribution(name, v, flush=False)
 
     def log_distribution(self, name: Optional[str] = None, value: Optional[torch.Tensor] = None, flush=False):
         wandb_logger = self.logger.experiment
-        if not flush:
+        if self.trainer.global_step > 0 and name is not None and value is not None:
             if name in self._log_cache:
                 self._log_cache[name] = np.concatenate([self._log_cache[name], value.detach().cpu().numpy()])
             else:
                 self._log_cache[name] = value.detach().cpu().numpy()
 
-            if self.trainer.global_step % self.trainer.log_every_n_steps == 0 or flush:
-                # Log a distribution of values using Weights and Biases.
-                wandb_logger.log({name: wandb.Histogram(self._log_cache[name]),
-                                  'trainer/global_step': self.trainer.global_step})
-                self._log_cache.pop(name, None)
-        else:
+        if flush:
             for name, value in self._log_cache.items():
                 wandb_logger.log({name: wandb.Histogram(self._log_cache[name]),
                                   'trainer/global_step': self.trainer.global_step})
 
             self._log_cache = {}
 
+    # def on_s
     def get_metrics(self):
         # don't show the version number on console logs.
         items = super().get_metrics()

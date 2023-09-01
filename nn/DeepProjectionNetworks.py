@@ -2,6 +2,7 @@ import cProfile
 import logging
 import pstats
 import time
+from functools import reduce
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -10,6 +11,7 @@ import numpy as np
 import torch
 from escnn.nn import FieldType, GeometricTensor
 from escnn.nn.modules.basismanager import BlocksBasisExpansion
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
@@ -17,7 +19,9 @@ from nn.EquivDynamicsAutoencoder import isotypic_basis
 from nn.mlp import EMLP
 from utils.losses_and_metrics import (chapman_kolmogorov_regularization, compute_chain_projection_scores,
                                       compute_chain_spectral_scores, empirical_cov_cross_cov,
+                                      forecasting_loss_and_metrics, obs_state_space_loss_and_metrics,
                                       regularization_orthonormality)
+from utils.mysc import append_dictionaries
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +101,9 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         # Private variables
         self._batch_dim = None  # Used to convert back and forward between Tensor and GeometricTensor.
 
+        self.iso_transfer_op = {irrep_id: None for irrep_id in self.obs_space_iso_reps.keys()}
+        self.transfer_op = None
+
         num_params = sum([param.nelement() for param in self.parameters()])
         num_train_params = sum([param.nelement() for param in self.parameters() if param.requires_grad])
         log.info(f"Equiv-DPnet Num. Parameters: {num_params} ({num_train_params} trainable)\n")
@@ -119,7 +126,7 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         state_trajectory = torch.cat([state, geom_next_state], dim=0)
         state_trajectory = self.state_type(state_trajectory)
 
-        return dict(state_trajectory=state_trajectory)
+        return dict(state_trajectory=state_trajectory, **kwargs)
 
     def post_process_pred(self,
                           obs_state_trajectory: GeometricTensor,
@@ -135,13 +142,15 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
             next_state = state_traj[self._batch_dim:, ...]  # Rest is the observations of the next states,
             # Return using the convention of the MarkovDynamicsModule
             return dict(state=state, next_state=next_state, obs_state=obs_state, next_obs_state=next_obs_state)
+
         return dict(obs_state=obs_state, next_obs_state=next_obs_state)
 
-    def forward(self, state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+    def forward(self,
+                state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
         """ Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
         Args:
-            state: Initial state of the system
-            n_steps: Number of steps to predict
+            state: Initial state of the system.
+            n_steps: Number of steps to predict.
             **kwargs: Auxiliary arguments
 
         Returns:
@@ -151,24 +160,22 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         # Apply any required pre-processing to the initial state and state trajectory
         input = self.pre_process_state(state, **kwargs)
         # Compute the observations of the trajectory of motion
-        predictions = self.project(**input, n_steps=n_steps, )
+        predictions = self.project(**input)
         # Post-process predictions
         predictions = self.post_process_pred(**predictions)
         return predictions
 
     def compute_loss_and_metrics(self,
-                                 predictions: dict[str, torch.Tensor],
-                                 ground_truth: dict[str, torch.Tensor]) -> (torch.Tensor, dict[str, torch.Tensor]):
-
+                                 projections: dict[str, torch.Tensor],
+                                 ground_truth: dict[str, torch.Tensor],
+                                 predict: bool = False) -> (torch.Tensor, dict[str, torch.Tensor]):
 
         # Decompose batched observations in their isotypic spaces.
-        obs_state = predictions['obs_state']
-        next_obs_state = predictions['next_obs_state']
-        time_horizon = obs_state.shape[1]
+        obs_state = projections['obs_state']
+        next_obs_state = projections['next_obs_state']
 
         device = obs_state.device
-        start_time = time.time()
-        log.debug(f"Computing Loss and Metrics for {predictions['obs_state'].shape[0]} samples. Device {device}")
+        # log.debug(f"Computing Loss and Metrics for {projections['obs_state'].shape[0]} samples. Device {device}")
 
         # Computing the cov and cross-covariance operator with the entire obs state dimension and the average trick
         # results in large equivariance error. Might be faster to compute on GPU but not accurate.
@@ -178,103 +185,95 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         # For each Isotypic Subspace, compute empirical Covariance and Cross-Covariance operators.
         # With these, compute spectral, projection scores and orthonormality and Chapman-Kolmogorov regularization.
         iso_losses = []
-        iso_metrics = {irrep_id: {} for irrep_id in self.obs_space_iso_reps.keys()}
+        metrics_per_iso = {irrep_id: {} for irrep_id in self.obs_space_iso_reps.keys()}
         for irrep_id, iso_rep in self.obs_space_iso_reps.items():
             rep = iso_rep if irrep_id != self.symm_group.trivial_representation else None  # Check for Trivial IsoSpace
             # Get the projection of the observable state in the isotypic subspace
             obs_state_iso = obs_state[..., self.iso_space_dims[irrep_id]]
             next_obs_state_iso = next_obs_state[..., self.iso_space_dims[irrep_id]]
             pred_horizon = next_obs_state_iso.shape[1]
-            iso_state_dim = obs_state_iso.shape[-1]
 
-            # Compute the empirical covariance and cross-covariance operators, ensuring that operators are equivariant.
-            # Cov_t_tdt[i, j] := Cov(X_i, X_j)  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
-            Cov_t_dt = empirical_cov_cross_cov(state_0=obs_state_iso, next_states=next_obs_state_iso,
-                                               representation=rep, cov_window_size=self.max_ck_window_length,
-                                               debug=False)  # log.level == logging.DEBUG)
-            # Orthonormality regularization terms for ALL time steps in horizon
-            # reg_orthonormal[t] = || Cov_t[i] - I || | t in [0, pred_horizon]
-            Cov_t = Cov_t_dt[range(pred_horizon + 1), range(pred_horizon + 1)]
-            reg_orthonormal = regularization_orthonormality(Cov_t)
+            # Compute Covariance and Cross-Covariance operators for this Isotypic subspace.
+            # Spectral and Projection scores, and CK loss terms.
+            iso_loss, iso_metrics = obs_state_space_loss_and_metrics(obs_state=obs_state_iso,
+                                                                     next_obs_state=next_obs_state_iso,
+                                                                     representation=rep,
+                                                                     max_ck_window_length=self.max_ck_window_length,
+                                                                     ck_w=self.ck_w,
+                                                                     orthonormal_w=self.orthonormal_w)
 
-            # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
-            # spectral_scores[t, t+d] := ||Cov(X_t, X_t+d)||^2_HS / (||CovX_t|| ||CovX_t+d||)   |
-            #   t in [0, pred_horizon], d in [0, pred_horizon - t]
-            spectral_scores = compute_chain_spectral_scores(Cov=Cov_t_dt,
-                                                            window_size=self.max_ck_window_length,
-                                                            debug=False)  # log.level == logging.DEBUG)
-            projection_scores = compute_chain_projection_scores(Cov=Cov_t_dt,
-                                                                window_size=self.max_ck_window_length,
-                                                                debug=False)  # log.level == logging.DEBUG)
-            # Apply the Orthonormal regularization term to the spectral scores
-            spectral_scores_reg = torch.clone(spectral_scores)
-            time_horizon = pred_horizon + 1
-            for t in range(0, time_horizon):
-                for dt in range(1, time_horizon - t):
-                    spectral_scores_reg[t, t + dt] -= self.orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
-                    # projection_scores[t, t + dt] -= self.orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
+            if predict and self.transfer_op is not None:
+                # Use the empirical transfer operator to compute the maximum likelihood prediction of the trajectory
+                pred_iso_state_traj = [obs_state_iso]
+                # The transfer operator of this Isotypic subspace
+                iso_transfer_op = self.iso_transfer_op[irrep_id]
+                for step in range(pred_horizon):
+                    # Compute the next state prediction s_t+1 = K @ s_t
+                    pred_iso_state_traj.append(torch.einsum('yx,bx->by', iso_transfer_op, pred_iso_state_traj[-1]))
+                    # iso_transfer_op @ state_traj[-1])
+                pred_next_state_iso = torch.stack(pred_iso_state_traj[1:], dim=1)
+                gt_next_state_iso = next_obs_state_iso
 
-            # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
-            # ck_scores[i,j] = || Cov(X_i, X_j) - ( Cov(X_i, X_i+1), ... Cov(X_j-1, X_j) ) ||_2  | j >= i + 2
-            ck_regularization = chapman_kolmogorov_regularization(Cov=Cov_t_dt,
-                                                                  ck_window_length=self.max_ck_window_length,
-                                                                  debug=False)  # log.level == logging.DEBUG)
+                # Compute the forcasting prediction error.
+                pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
+                                                                       state_pred=pred_next_state_iso)
+                iso_metrics.update(pred_metrics)
+                iso_metrics['pred_loss'] = pred_loss
 
-            # Minimum number of steps to compute the CK regularization term
-            # s_ck_scores[t, t+d] = mean(Σ_i=t^t+d s_scores[t, t+i]) - ck_scores[t, t+d]
-            #                                               | t in [0, time_horizon - 2], d in [2, min(pred_horizon-t, ck_window)]
-            dtype = obs_state_iso.dtype
-            device = obs_state_iso.device
-            min_steps = 2
-            s_ck_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
-            iso_loss = torch.fill(torch.zeros_like(s_ck_scores, dtype=dtype, device=device), torch.nan)
-            for t in range(0, time_horizon - 2):  # ts ∈ [0, time_horizon - 2]
-                max_dt = min(time_horizon - t, self.max_ck_window_length)
-                for dt in range(min_steps, max_dt):
-                    td = t + dt
-                    s_ck_scores[t, td] = torch.mean(spectral_scores_reg[t, t+1:td])
-                    iso_loss[t, td] = -((s_ck_scores[t, td] - self.ck_w * ck_regularization[t, td]))
+            metrics_per_iso[irrep_id] = iso_metrics
+            iso_losses.append(iso_loss)
 
-            non_nans = lambda x: torch.logical_not(torch.isnan(x))
-            # Store the loss results.
-            iso_losses.append(iso_loss[non_nans(iso_loss)])
-
-            # Useful to debug the expected sparsity pattern of the matrix.
-            # spectral_score_np = spectral_scores.detach().cpu().numpy()
-            # spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
-            # ck_reg_np = ck_regularization.detach().cpu().numpy()
-            # s_ck_scores_np = s_ck_scores.detach().cpu().numpy()
-            # loss_np = iso_loss.detach().cpu().numpy()
-
-            iso_metrics[irrep_id]['reg_orthonormal'] = reg_orthonormal[non_nans(reg_orthonormal)]
-            iso_metrics[irrep_id]['reg_orthonormal_scaled'] = (reg_orthonormal[non_nans(reg_orthonormal)]
-                                                               / iso_state_dim**2)
-            iso_metrics[irrep_id]['S_score'] = spectral_scores[non_nans(spectral_scores)]
-            iso_metrics[irrep_id]['S_score_reg'] = spectral_scores_reg[non_nans(spectral_scores_reg)]
-            iso_metrics[irrep_id]['P_score'] = projection_scores[non_nans(projection_scores)]
-            iso_metrics[irrep_id]['CK_score'] = ck_regularization[non_nans(ck_regularization)]
-            iso_metrics[irrep_id]['CK_score_scaled'] = ck_regularization[non_nans(ck_regularization)] / iso_state_dim**2
-            # iso_metrics[irrep_id]['loss'] = iso_loss[non_nans(iso_loss)]
-            # iso_metrics[irrep_id]['loss_scaled'] = iso_loss[non_nans(iso_loss)] / iso_state_dim**2
-            log.debug(f"Isotypic Space {irrep_id} of dim {iso_state_dim} took {time.time() - start_time:.2f}[s]")
-
-        metrics = dict(
-            reg_orthonormal=torch.cat([iso_metrics[iso_id]['reg_orthonormal'] for iso_id in iso_metrics.keys()]),
-            # reg_orthonormal_s=torch.cat([iso_metrics[iso_id]['reg_orthonormal_scaled'] for iso_id in iso_metrics.keys()]),
-            S_score=torch.cat([iso_metrics[iso_id]['S_score'] for iso_id in iso_metrics.keys()]),
-            S_score_reg=torch.cat([iso_metrics[iso_id]['S_score_reg'] for iso_id in iso_metrics.keys()]),
-            P_score=torch.cat([iso_metrics[iso_id]['P_score'] for iso_id in iso_metrics.keys()]),
-            ck_score=torch.cat([iso_metrics[iso_id]['CK_score'] for iso_id in iso_metrics.keys()]),
-            # ck_score_s=torch.cat([iso_metrics[iso_id]['CK_score_scaled'] for iso_id in iso_metrics.keys()]),
-            # loss_s=torch.cat([iso_metrics[iso_id]['loss_scaled'] for iso_id in iso_metrics.keys()]),
-            # loss=torch.cat([iso_metrics[iso_id]['loss'] for iso_id in iso_metrics.keys()]),
-            )
-
+        metrics = reduce(append_dictionaries, metrics_per_iso.values())
         loss = torch.mean(torch.cat(iso_losses))
 
         assert not torch.isnan(loss), f"Loss is NaN. Metrics: {metrics}"
-        log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
+        # log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
         return loss, metrics
+
+    def approximate_transfer_operator(self, data_loader: DataLoader):
+
+        train_data = {}
+        for batch in data_loader:
+            for key, value in batch.items():
+                if key not in train_data:
+                    train_data[key] = torch.squeeze(value)
+                else:
+                    torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+
+        # Perform data augmentation of the entire dataset.
+        # TODO: We should avoid this by simply solving the least square problem, considering equivariance.
+        for key, value in train_data.items():
+            orbit = [value]
+            for g in self.symm_group.elements:
+                gv = self.state_type.transform_fibers(value, g)
+                orbit.append(gv)
+            train_data[key] = torch.cat(orbit, dim=0)
+
+        with torch.no_grad():
+            pred = self(**train_data)
+            obs_state = pred['obs_state']
+            next_obs_state = torch.squeeze(pred['next_obs_state'])
+
+            # For each Isotypic Subspace, compute the empirical transfer operator with the present observable state
+            # space.
+            for irrep_id, iso_rep in self.obs_space_iso_reps.items():
+                rep = iso_rep if irrep_id != self.symm_group.trivial_representation else None  # Check for Trivial
+                # IsoSpace
+                # Get the projection of the observable state in the isotypic subspace
+                obs_state_iso = obs_state[..., self.iso_space_dims[irrep_id]]
+                next_obs_state_iso = next_obs_state[..., self.iso_space_dims[irrep_id]]
+
+                X = obs_state_iso  # .detach().cpu().numpy()
+                Y = next_obs_state_iso  # .detach().cpu().numpy()
+                # Compute the empirical transfer operator for this Isotypic subspace.
+                op = torch.linalg.lstsq(X, Y, rcond=None).solution
+                self.iso_transfer_op[irrep_id] = op.T  # y = op @ x   op:(|y| x |x|)
+
+        op = torch.block_diag(*self.iso_transfer_op.values())
+        self.transfer_op = op
+
+    def get_metric_labels(self) -> list[str]:
+        return ['pred_loss', 'S_score', 'ck_score', 'P_score', 'reg_orthonormal']
 
     def get_hparams(self):
         return {'encoder':             self.projection.get_hparams(),
@@ -318,8 +317,8 @@ if __name__ == "__main__":
     #
     G = data_module.symm_group
     state_type = data_module.state_field_type
-    obs_state_dimension = state_type.size * 20
-    num_encoder_hidden_neurons = obs_state_dimension * 2
+    obs_state_dimension = state_type.size * 3
+    num_encoder_hidden_neurons = obs_state_dimension * 3
     gspace = escnn.gspaces.no_base_space(G)
 
     #
@@ -333,6 +332,8 @@ if __name__ == "__main__":
                                     equivariant=equivariant, )
     dp_net.to(device)
 
+    dp_net.approximate_transfer_operator(data_module.predict_dataloader())
+
     start_time = time.time()
     profiler = cProfile.Profile()
     profiler.enable()
@@ -340,7 +341,7 @@ if __name__ == "__main__":
         for k, v in batch.items():
             batch[k] = v.to(device)
         obs = dp_net(**batch)
-        dp_net.compute_loss_and_metrics(predictions=obs, ground_truth=batch)
+        dp_net.compute_loss_and_metrics(projections=obs, ground_truth=batch, predict=True)
         if i > 100:
             break
     profiler.disable()

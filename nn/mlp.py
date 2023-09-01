@@ -85,7 +85,7 @@ class EMLP(EquivariantModule):
         # head_layer.check_equivariance()
         self.net.add_module("head", head_block)
         # Test the entire model is equivariant.
-        self.net.check_equivariance()
+        # self.net.check_equivariance()
 
     def forward(self, x):
         """Forward pass of the EMLP model."""

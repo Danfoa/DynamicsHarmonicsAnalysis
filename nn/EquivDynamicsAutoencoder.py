@@ -24,7 +24,7 @@ def isotypic_basis(group: Group, num_regular_fields: int, prefix=''):
     for iso_irrep_id, reg_rep_iso in rep.attributes['isotypic_reps'].items():
         iso_reps[iso_irrep_id] = directsum([reg_rep_iso] * num_regular_fields,
                                            name=f"{prefix}_IsoSpace{iso_irrep_id}")
-    return iso_reps
+    return iso_reps  # Dict[key:id_space -> value: rep_iso_space]
 
 
 def compute_invariant_features(x: torch.Tensor, field_type: FieldType) -> torch.Tensor:
@@ -35,7 +35,7 @@ def compute_invariant_features(x: torch.Tensor, field_type: FieldType) -> torch.
         # Each field here represents a representation of an Isotypic Subspace. This rep is only composed of a single
         # irrep type.
         x_field = x[..., field_start:field_end]
-        num_G_stable_spaces = len(rep.irreps)   # Number of G-invariant features = multiplicity of irrep
+        num_G_stable_spaces = len(rep.irreps)  # Number of G-invariant features = multiplicity of irrep
         # Again this assumes we are already in an Isotypic basis
         assert len(np.unique(rep.irreps, axis=0)) == 1, "This only works for now on the Isotypic Basis"
         # This basis is useful because we can apply the norm in a vectorized way
@@ -100,8 +100,10 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
 
         self.eigval_net = False  #
         if self.eigval_net:
-            # The eigenvalue network needs to be a G-invariant network. For obtaining G-invariant features for this network
-            # We can exploit the fact that in the isotypic basis every irreducible G-stable space can be used to obtain a
+            # The eigenvalue network needs to be a G-invariant network. For obtaining G-invariant features for this
+            # network
+            # We can exploit the fact that in the isotypic basis every irreducible G-stable space can be used to
+            # obtain a
             # G-invariant feature: The norm of the state in that irreducible G-stable space is G-invariant.
             num_G_stable_spaces = sum([len(rep.irreps) for rep in obs_space_iso_reps.values()])
             num_degrees_of_freedom = self.obs_state_dynamics.equiv_lin_map.basisexpansion.dimension()
@@ -157,7 +159,7 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
                     input[measurement] = self.state_type(state)
                 elif len(value.shape) == 3:
                     geom_value = torch.reshape(value, (-1, value.shape[-1]))
-                    input[measurement] =  self.state_type(geom_value)
+                    input[measurement] = self.state_type(geom_value)
             elif isinstance(state, GeometricTensor):
                 pass
             else:
@@ -171,8 +173,6 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
             elif isinstance(value, GeometricTensor):
                 predictions[measurement] = value.tensor
         return predictions
-
-
 
     def get_hparams(self):
         return {'encoder':      self.encoder.get_hparams(),
