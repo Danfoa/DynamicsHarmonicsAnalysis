@@ -16,10 +16,10 @@ from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
 from nn.EquivDynamicsAutoencoder import isotypic_basis
-from nn.mlp import EMLP
+from nn.mlp import EMLP, MLP
 from utils.losses_and_metrics import (chapman_kolmogorov_regularization, compute_chain_projection_scores,
                                       compute_chain_spectral_scores, empirical_cov_cross_cov,
-                                      forecasting_loss_and_metrics, obs_state_space_loss_and_metrics,
+                                      forecasting_loss_and_metrics, obs_state_space_metrics,
                                       regularization_orthonormality)
 from utils.mysc import append_dictionaries
 
@@ -195,31 +195,40 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
 
             # Compute Covariance and Cross-Covariance operators for this Isotypic subspace.
             # Spectral and Projection scores, and CK loss terms.
-            iso_loss, iso_metrics = obs_state_space_loss_and_metrics(obs_state=obs_state_iso,
-                                                                     next_obs_state=next_obs_state_iso,
-                                                                     representation=rep,
-                                                                     max_ck_window_length=self.max_ck_window_length,
-                                                                     ck_w=self.ck_w,
-                                                                     orthonormal_w=self.orthonormal_w)
+            iso_metrics = obs_state_space_metrics(obs_state=obs_state_iso,
+                                                  next_obs_state=next_obs_state_iso,
+                                                  representation=rep,
+                                                  max_ck_window_length=self.max_ck_window_length,
+                                                  ck_w=self.ck_w,
+                                                  orthonormal_w=self.orthonormal_w)
 
             if predict and self.transfer_op is not None:
-                # Use the empirical transfer operator to compute the maximum likelihood prediction of the trajectory
-                pred_iso_state_traj = [obs_state_iso]
-                # The transfer operator of this Isotypic subspace
-                iso_transfer_op = self.iso_transfer_op[irrep_id]
-                for step in range(pred_horizon):
-                    # Compute the next state prediction s_t+1 = K @ s_t
-                    pred_iso_state_traj.append(torch.einsum('yx,bx->by', iso_transfer_op, pred_iso_state_traj[-1]))
-                    # iso_transfer_op @ state_traj[-1])
-                pred_next_state_iso = torch.stack(pred_iso_state_traj[1:], dim=1)
-                gt_next_state_iso = next_obs_state_iso
+                with torch.no_grad():  # Fast forcasting
+                    # Use the empirical transfer operator to compute the maximum likelihood prediction of the trajectory
+                    pred_iso_state_traj = [obs_state_iso]
+                    # The transfer operator of this Isotypic subspace
+                    iso_transfer_op = self.iso_transfer_op[irrep_id]
+                    for step in range(pred_horizon):
+                        # Compute the next state prediction s_t+1 = K @ s_t
+                        pred_iso_state_traj.append(pred_iso_state_traj[-1] @ iso_transfer_op)
+                        # iso_transfer_op @ state_traj[-1])
+                    pred_next_state_iso = torch.stack(pred_iso_state_traj[1:], dim=1)
+                    gt_next_state_iso = next_obs_state_iso
 
-                # Compute the forcasting prediction error.
-                pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
-                                                                       state_pred=pred_next_state_iso)
-                iso_metrics.update(pred_metrics)
-                iso_metrics['pred_loss'] = pred_loss
+                    # Compute the forcasting prediction error.
+                    pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
+                                                                           state_pred=pred_next_state_iso)
+                    iso_metrics.update(pred_metrics)
+                    iso_metrics['pred_loss'] = pred_loss
 
+            S_score_reg = iso_metrics.pop('S_score_reg')
+            CK_score_reg = iso_metrics.pop('CK_score_reg')
+            if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
+                # loss = -S_score_reg[t, t+dt] = -(S(t, t+dt) - self.orthonormal_w * (R(Cov_t) + R(Cov_t+dt))
+                iso_loss = - S_score_reg
+            else:
+                # loss = mean(Σ_i=t^t+dt S_score_reg[t, t+i]) - ck_regularization[t, t+dt]
+                iso_loss = - CK_score_reg
             metrics_per_iso[irrep_id] = iso_metrics
             iso_losses.append(iso_loss)
 
@@ -231,25 +240,24 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         return loss, metrics
 
     def approximate_transfer_operator(self, data_loader: DataLoader):
-
-        train_data = {}
-        for batch in data_loader:
-            for key, value in batch.items():
-                if key not in train_data:
-                    train_data[key] = torch.squeeze(value)
-                else:
-                    torch.cat([train_data[key], torch.squeeze(value)], dim=0)
-
-        # Perform data augmentation of the entire dataset.
-        # TODO: We should avoid this by simply solving the least square problem, considering equivariance.
-        for key, value in train_data.items():
-            orbit = [value]
-            for g in self.symm_group.elements:
-                gv = self.state_type.transform_fibers(value, g)
-                orbit.append(gv)
-            train_data[key] = torch.cat(orbit, dim=0)
-
         with torch.no_grad():
+            train_data = {}
+            for batch in data_loader:
+                for key, value in batch.items():
+                    if key not in train_data:
+                        train_data[key] = torch.squeeze(value)
+                    else:
+                        torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+
+            # Perform data augmentation of the entire dataset.
+            # TODO: We should avoid this by simply solving the least square problem, considering equivariance.
+            for key, value in train_data.items():
+                orbit = [value]
+                for g in self.symm_group.elements:
+                    gv = self.state_type.transform_fibers(value, g)
+                    orbit.append(gv)
+                train_data[key] = torch.cat(orbit, dim=0)
+
             pred = self(**train_data)
             obs_state = pred['obs_state']
             next_obs_state = torch.squeeze(pred['next_obs_state'])
@@ -266,8 +274,17 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
                 X = obs_state_iso  # .detach().cpu().numpy()
                 Y = next_obs_state_iso  # .detach().cpu().numpy()
                 # Compute the empirical transfer operator for this Isotypic subspace.
-                op = torch.linalg.lstsq(X, Y, rcond=None).solution
-                self.iso_transfer_op[irrep_id] = op.T  # y = op @ x   op:(|y| x |x|)
+                result = torch.linalg.lstsq(X, Y, rcond=None)  # min||A X - B ||_F   |  B = A @ X
+
+                op = result.solution
+                self.iso_transfer_op[irrep_id] = op  # y =  x @ op   op:(|y| x |x|)
+                # residuals = result.residuals
+                # if log.level == logging.DEBUG:
+                #     pred = torch.einsum('yx,bx->by', op, obs_state_iso)
+                #     emp_residuals = torch.mean(torch.square(pred - next_obs_state_iso), dim=0)
+                #     pred2 = torch.einsum('yx,bx->by', op.T, obs_state_iso)
+                #     emp_residuals2 = torch.mean(torch.square(pred - next_obs_state_iso), dim=0)
+                #     residuals = torch.mean(torch.square(emp_residuals - next_obs_state_iso))
 
         op = torch.block_diag(*self.iso_transfer_op.values())
         self.transfer_op = op
@@ -283,6 +300,194 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
     def evaluate_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         batch_dim, state_dim = input_shape
         return batch_dim, self.obs_state_type.size
+
+
+class DeepProjectionNet(torch.nn.Module):
+
+    def __init__(self,
+                 state_dim: int,
+                 obs_state_dimension: int,
+                 num_encoder_layers: int = 4,
+                 num_encoder_hidden_neurons: int = 128,
+                 max_ck_window_length: int = 6,
+                 ck_w: float = 0.1,
+                 orthonormal_w: float = 0.1,
+                 approx_surjective_obs=False,
+                 activation=torch.nn.ReLU,
+                 **kwargs):
+        super().__init__()
+
+        self.state_dim = state_dim
+        self.obs_state_dim = obs_state_dimension
+        assert max_ck_window_length >= 2, "Minimum window_size of Chapman-Kolmogorov regularization is 2 steps"
+        self.max_ck_window_length = max_ck_window_length
+        self.approx_surjective_obs = approx_surjective_obs
+        self.ck_w = ck_w
+        self.orthonormal_w = orthonormal_w
+
+        # Define the observable network producing the observation state
+        self.projection = MLP(in_dim=self.state_dim,
+                              out_dim=self.obs_state_dim,
+                              num_hidden_units=num_encoder_hidden_neurons,
+                              num_layers=num_encoder_layers,
+                              activation=activation,
+                              with_bias=True)
+
+        if self.approx_surjective_obs:
+            self.projection_inv = MLP(in_dim=self.obs_state_dim,
+                                      out_dim=self.state_dim,
+                                      num_hidden_units=num_encoder_hidden_neurons,
+                                      num_layers=num_encoder_layers,
+                                      activation=activation,
+                                      with_bias=True)
+
+        # Private variables
+        self._batch_dim = None  # Used to convert back and forward between Tensor and GeometricTensor.
+
+        self.transfer_op = None
+
+        num_params = sum([param.nelement() for param in self.parameters()])
+        num_train_params = sum([param.nelement() for param in self.parameters() if param.requires_grad])
+        log.info(f"DPnet Num. Parameters: {num_params} ({num_train_params} trainable)\n")
+
+    def project(self, state_trajectory: torch.Tensor, **kwargs) -> [dict[str, torch.Tensor]]:
+
+        obs_trajectory = self.projection(state_trajectory)
+
+        if self.approx_surjective_obs:
+            state_traj = self.projection_inv(obs_trajectory)
+            return dict(obs_state_trajectory=obs_trajectory, state_traj=state_traj)
+
+        return dict(obs_state_trajectory=obs_trajectory)
+
+    def pre_process_state(self,
+                          state: torch.Tensor,
+                          next_state=torch.Tensor, **kwargs) -> Union[torch.Tensor, dict[str, torch.Tensor]]:
+
+        self._batch_dim = state.shape[0]
+
+        flat_next_state = torch.reshape(next_state, (-1, next_state.shape[-1]))
+        state_trajectory = torch.cat([state, flat_next_state], dim=0)
+
+        return dict(state_trajectory=state_trajectory, **kwargs)
+
+    def post_process_pred(self,
+                          obs_state_trajectory: torch.Tensor,
+                          state_trajectory: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
+
+        state_traj = torch.reshape(obs_state_trajectory, (self._batch_dim, -1, self.obs_state_dim))
+        obs_state = state_traj[:, 0, ...]  # First "time step" is the initial state observation
+        next_obs_state = state_traj[:, 1:, ...]  # The Rest is the observations of the next states,
+
+        if state_trajectory is not None:
+            state_traj = torch.reshape(state_trajectory.tensor, (self._batch_dim, -1, self.state_dim))
+            state = state_traj[:self._batch_dim, ...]  # First "batch" is the initial state observation
+            next_state = state_traj[self._batch_dim:, ...]  # Rest is the observations of the next states,
+            # Return using the convention of the MarkovDynamicsModule
+            return dict(state=state, next_state=next_state, obs_state=obs_state, next_obs_state=next_obs_state)
+
+        return dict(obs_state=obs_state, next_obs_state=next_obs_state)
+
+    def forward(self,
+                state: torch.Tensor, n_steps: int = 1, **kwargs) -> [dict[str, torch.Tensor]]:
+        """ Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
+        Args:
+            state: Initial state of the system.
+            n_steps: Number of steps to predict.
+            **kwargs: Auxiliary arguments
+
+        Returns:
+            predictions (dict): A dictionary containing the predicted states under the key 'state' and
+            potentially other auxiliary measurements.
+        """
+        # Apply any required pre-processing to the initial state and state trajectory
+        input = self.pre_process_state(state, **kwargs)
+        # Compute the observations of the trajectory of motion
+        predictions = self.project(**input)
+        # Post-process predictions
+        predictions = self.post_process_pred(**predictions)
+        return predictions
+
+    def compute_loss_and_metrics(self,
+                                 projections: dict[str, torch.Tensor],
+                                 ground_truth: dict[str, torch.Tensor],
+                                 predict: bool = False) -> (torch.Tensor, dict[str, torch.Tensor]):
+
+        # Decompose batched observations in their isotypic spaces.
+        obs_state = projections['obs_state']
+        next_obs_state = projections['next_obs_state']
+
+        pred_horizon = next_obs_state.shape[1]
+        # Compute Covariance and Cross-Covariance operators for the observation state space.
+        # Spectral and Projection scores, and CK loss terms.
+        obs_metrics = obs_state_space_metrics(obs_state=obs_state,
+                                              next_obs_state=next_obs_state,
+                                              representation=None,
+                                              max_ck_window_length=self.max_ck_window_length,
+                                              ck_w=self.ck_w,
+                                              orthonormal_w=self.orthonormal_w)
+
+        if predict and self.transfer_op is not None:
+            with torch.no_grad():  # Fast forcasting
+                # Use the empirical transfer operator to compute the maximum likelihood prediction of the trajectory
+                pred_state_traj = [obs_state]
+                for step in range(pred_horizon):
+                    # Compute the next state prediction s_t+1 = K @ s_t
+                    pred_state_traj.append(pred_state_traj[-1] @ self.transfer_op)
+                    # iso_transfer_op @ state_traj[-1])
+                pred_next_state_iso = torch.stack(pred_state_traj[1:], dim=1)
+                gt_next_state_iso = next_obs_state
+
+                # Compute the forcasting prediction error.
+                pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
+                                                                       state_pred=pred_next_state_iso)
+                obs_metrics.update(pred_metrics)
+                obs_metrics['pred_loss'] = pred_loss
+
+        S_score_reg = obs_metrics.pop('S_score_reg')
+        CK_score_reg = obs_metrics.pop('CK_score_reg')
+        if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
+            # loss = -S_score_reg[t, t+dt] = -(S(t, t+dt) - self.orthonormal_w * (R(Cov_t) + R(Cov_t+dt))
+            obs_loss = - S_score_reg
+        else:
+            # loss = mean(Σ_i=t^t+dt S_score_reg[t, t+i]) - ck_regularization[t, t+dt]
+            obs_loss = - CK_score_reg
+
+        loss = torch.mean(obs_loss)
+
+        assert not torch.isnan(loss), f"Loss is NaN"
+        # log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
+        return loss, obs_metrics
+
+    def approximate_transfer_operator(self, data_loader: DataLoader):
+        with torch.no_grad():
+            train_data = {}
+            for batch in data_loader:
+                for key, value in batch.items():
+                    if key not in train_data:
+                        train_data[key] = torch.squeeze(value)
+                    else:
+                        torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+
+            pred = self(**train_data)
+            obs_state = pred['obs_state']
+            next_obs_state = torch.squeeze(pred['next_obs_state'])
+
+            X = obs_state  # .detach().cpu().numpy()
+            Y = next_obs_state  # .detach().cpu().numpy()
+            # Compute the empirical transfer operator for this Isotypic subspace.
+            result = torch.linalg.lstsq(X, Y, rcond=None)  # min||A X - B ||_F   |  B = A @ X
+
+            op = result.solution.T
+            self.transfer_op = op  # y = op @ x   op:(|y| x |x|)
+
+    def get_metric_labels(self) -> list[str]:
+        return ['pred_loss', 'S_score', 'ck_score', 'P_score', 'reg_orthonormal']
+
+    def get_hparams(self):
+        return {'encoder': self.projection.get_hparams(),
+                }
+
 
 
 if __name__ == "__main__":
@@ -318,7 +523,7 @@ if __name__ == "__main__":
     G = data_module.symm_group
     state_type = data_module.state_field_type
     obs_state_dimension = state_type.size * 3
-    num_encoder_hidden_neurons = obs_state_dimension * 3
+    num_encoder_hidden_neurons = obs_state_dimension * 4
     gspace = escnn.gspaces.no_base_space(G)
 
     #

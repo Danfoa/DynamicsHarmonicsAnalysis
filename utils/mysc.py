@@ -223,3 +223,27 @@ def find_combinations(target_dim, irreps_dims, idx=0):
             results.append([current_dim] * num_irreps + comb)
 
     return results
+
+
+import re
+
+
+def format_scientific(text):
+    """
+    Formats any number in a string to scientific notation with 2 significant figures.
+
+    Parameters:
+    - text (str): The input text
+
+    Returns:
+    - str: Text with numbers formatted in scientific notation
+    """
+
+    # Function to replace each number with its scientific notation form
+    def replace_number(match):
+        number = float(match.group())
+        return "{:.1e}".format(number)
+
+    # Regular expression to find numbers after "=" and replace them
+    return re.sub(r"(?<=\=)(\d+\.\d+|\d+\.|\.\d+|\d+)", replace_number, text)
+

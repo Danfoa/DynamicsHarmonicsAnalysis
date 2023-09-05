@@ -65,7 +65,7 @@ class LightningModel(LightningModule):
     def validation_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
         outputs = self.model(**batch, n_steps=n_steps)
-        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch)
+        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch, predict=self.global_step > 0)
 
         if self.val_metrics_fn is not None:
             val_metrics = self.val_metrics_fn(outputs, batch)
@@ -154,6 +154,10 @@ class LightningModel(LightningModule):
         if hasattr(self.model, "approximate_transfer_operator"):
             self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
 
+    def on_validation_start(self) -> None:
+        if hasattr(self.model, "approximate_transfer_operator") and self.global_step > 0:
+            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+
     def on_test_end(self) -> None:
         self.log_distribution(flush=True)
 
@@ -166,10 +170,10 @@ class LightningModel(LightningModule):
         for k, v in flat_metrics_dic.items():
             name = f"{prefix}{k}"
             if v.ndim == 0:  # Single scalars.
-                self.log(name, v, prog_bar=False)
+                self.log(name, v, prog_bar=False, batch_size=batch_size)
             else:
-                self.log(f"{name}_avg", torch.mean(v), prog_bar=False)
-                self.log_distribution(name, v, flush=False)
+                self.log(f"{name}", torch.mean(v), prog_bar=False)
+                # self.log_distribution(name, v, flush=False)
 
     def log_distribution(self, name: Optional[str] = None, value: Optional[torch.Tensor] = None, flush=False):
         wandb_logger = self.logger.experiment
@@ -179,12 +183,15 @@ class LightningModel(LightningModule):
             else:
                 self._log_cache[name] = value.detach().cpu().numpy()
 
-        if flush:
+        if flush or self.trainer.global_step == self.trainer.log_every_n_steps:
+            logged_dist = []
             for name, value in self._log_cache.items():
-                wandb_logger.log({name: wandb.Histogram(self._log_cache[name]),
-                                  'trainer/global_step': self.trainer.global_step})
-
-            self._log_cache = {}
+                if value.size > 30:
+                    wandb_logger.log({name: wandb.Histogram(self._log_cache[name]),
+                                      'trainer/global_step': self.trainer.global_step})
+                    logged_dist.append(name)
+            for logged_name in logged_dist:
+                del self._log_cache[logged_name]
 
     # def on_s
     def get_metrics(self):

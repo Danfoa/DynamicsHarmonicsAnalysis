@@ -171,7 +171,6 @@ class DynamicsDataModule(LightningDataModule):
                                                pin_memory=False, num_workers=self.num_workers, shuffle=False,
                                                collate_fn=self.collate_fn)
 
-
         log.info(f"Data preparation done in {time.time() - start_time:.2f} [s]")
 
     def compute_loss_metrics(self, predictions: dict, inputs: dict) -> (torch.Tensor, dict):

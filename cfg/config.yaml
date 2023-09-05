@@ -3,6 +3,8 @@ defaults:
   - model: dpnet
   - system: linear_system
   - override hydra/launcher: joblib
+#  - override hydra/sweeper: optuna
+#  - override hydra/sweeper/sampler: tpe
 
 # Running hyperparameters
 exp_name: test
@@ -11,20 +13,20 @@ device: 0
 num_workers: 0           # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 500
+max_epochs: 20
 
 model: dae
 # Dynamical system
 system: linear_system
 
-
 # Hydra configuration _________
 hydra:
   verbose: ${debug}
   launcher:
-    n_jobs: -10
+    n_jobs: 1 # ${hydra.sweeper.n_jobs}
   run:
     dir: ./experiments/${hydra.job.name}/${system.name}-${model.name}/
+
   job:
     # TODO: Reorganize output dir
     name: ${exp_name}_${system.name}
@@ -74,3 +76,27 @@ hydra:
       handlers: [console]
 
     disable_existing_loggers: false
+
+#  sweeper:
+##    sampler:
+##      _target_: optuna.samplers.TPESampler
+##      seed: 123
+##      consider_prior: true
+##      prior_weight: 1.0
+##      consider_magic_clip: true
+##      consider_endpoints: false
+##      n_startup_trials: 10
+##      n_ei_candidates: 24
+##      multivariate: false
+##    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaS
+#    direction: minimize
+#    study_name: ${exp_name}
+#    storage: null
+#    n_trials: 100
+#    n_jobs: 8
+#    max_failure_rate: 0.1
+#    params:
+#      model.lr: tag(log, interval(0.0001, 0.1))
+#      model.ck_w: tag(log, interval(0.001, 1))
+#      model.orthonormal_w: tag(log, interval(0.001, 1))
+#      model.max_ck_window_length: choice(3, 6, 12)

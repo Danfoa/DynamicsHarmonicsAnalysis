@@ -61,6 +61,11 @@ class EMLP(EquivariantModule):
         regular_rep = self.gspace.fibergroup.regular_representation
         inner_type = FieldType(self.gspace, [regular_rep] * self.num_hidden_regular_fields)
 
+        input_irreps = set(in_type.representation.irreps)
+        inner_irreps = set(regular_rep.irreps)
+        diff = input_irreps.symmetric_difference(inner_irreps)
+        if len(diff) > 0:
+            log.warning(f"Irreps {diff} are not shared between input and latent representations")
         layer_in_type = in_type
 
         self.net = escnn.nn.SequentialModule()

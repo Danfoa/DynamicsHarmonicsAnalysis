@@ -16,10 +16,10 @@ from lightning_fabric import seed_everything
 from omegaconf import DictConfig, OmegaConf
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DeepProjectionNetworks import EquivDeepProjectionNet
+from nn.DeepProjectionNetworks import DeepProjectionNet, EquivDeepProjectionNet
 from nn.EquivDynamicsAutoencoder import EquivDynamicsAutoEncoder
 from nn.LightningModel import LightningModel
-from utils.mysc import check_if_resume_experiment, class_from_name
+from utils.mysc import check_if_resume_experiment, class_from_name, format_scientific
 
 log = logging.getLogger(__name__)
 
@@ -65,23 +65,30 @@ def main(cfg: DictConfig):
 
         # Get the selected model for observation learning _____________________________________________________________
         activation = class_from_name('escnn.nn' if cfg.model.equivariant else 'torch.nn', cfg.model.activation)
-        model_agnostic_params = dict(state_type=datamodule.state_field_type,
-                                     obs_state_dimension=obs_state_dim,
+        model_agnostic_params = dict(obs_state_dimension=obs_state_dim,
                                      num_encoder_layers=cfg.model.n_layers,
                                      num_encoder_hidden_neurons=num_hidden_neurons,
                                      activation=activation)
         if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
                 model = EquivDynamicsAutoEncoder(**model_agnostic_params,
+                                                 state_type=datamodule.state_field_type,
                                                  dt=datamodule.dt)
                 assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
         elif cfg.model.name.lower() == "dpnet":
+            assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
             if cfg.model.equivariant:
-                assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
                 model = EquivDeepProjectionNet(**model_agnostic_params,
+                                               state_type=datamodule.state_field_type,
                                                max_ck_window_length=cfg.model.max_ck_window_length,
                                                ck_w=cfg.model.ck_w,
                                                orthonormal_w=cfg.model.orthonormal_w)
+            else:
+                model = DeepProjectionNet(**model_agnostic_params,
+                                          state_dim=datamodule.state_field_type.size,
+                                          max_ck_window_length=cfg.model.max_ck_window_length,
+                                          ck_w=cfg.model.ck_w,
+                                          orthonormal_w=cfg.model.orthonormal_w)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
@@ -95,17 +102,17 @@ def main(cfg: DictConfig):
         wandb_logger = WandbLogger(project=f'{cfg.exp_name}',
                                    save_dir=seed_path.absolute(),
                                    config=run_hps,
-                                   group=run_name,
+                                   group=format_scientific(run_name),
                                    # offline=True,
                                    job_type='debug' if cfg.debug else None)
 
         # Configure Lightning trainer
         trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
-                          devices=1 if torch.cuda.is_available() and device != 'cpu' else 1,
+                          devices='auto',  # 1 if torch.cuda.is_available() and device != 'cpu' else 1,
                           logger=wandb_logger,
-                          log_every_n_steps=50,
+                          log_every_n_steps=25,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
-                          check_val_every_n_epoch=2,
+                          check_val_every_n_epoch=1,
                           # benchmark=True,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
@@ -150,26 +157,21 @@ def main(cfg: DictConfig):
             log.info("Loading best model and testing")
             best_ckpt = torch.load(best_path)
             pl_model.eval()
-            pl_model.load_state_dict(best_ckpt['state_dict'])  #
+            pl_model.model.eval()
+            pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
 
-        trainer.test(model=pl_model, datamodule=datamodule)
-        pl_model.to(device)
-
-        # datamodule.plot_test_performance(pl_model, dataset=datamodule.test_dataset, log_prefix="test/",
-        #                                  log_fig=True, show=cfg.debug_loops or cfg.debug,
-        #                                  eigvals=pl_model.model.obs_state_dynamics.eigvals.cpu().detach().numpy())
-        # datamodule.plot_test_performance(pl_model, dataset=datamodule.val_dataset, log_prefix="val/",
-        #                                  log_fig=True, show=cfg.debug_loops or cfg.debug,
-        #                                  eigvals=pl_model.model.obs_state_dynamics.eigvals.cpu().detach().numpy())
-        # if cfg.debug:
-        #     datamodule.plot_test_performance(pl_model, dataset=datamodule.train_dataset, show=True,
-        #                                      eigvals=pl_model.model.observation_dynamics.eigvals.cpu().detach(
-        #                                      ).numpy())
+        results = trainer.test(model=pl_model, datamodule=datamodule)
+        try:
+            test_pred_loss = results[0]['test/pred_loss_avg']
+        except:
+            test_pred_loss = results[0]['test/pred_loss']
         wandb_logger.experiment.unwatch(model)
         wandb_logger.experiment.finish()
+        return test_pred_loss
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
 
 
 if __name__ == '__main__':
     main()
+    # return r
