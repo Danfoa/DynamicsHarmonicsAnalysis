@@ -173,8 +173,8 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
         # Decompose batched observations in their isotypic spaces.
         obs_state = projections['obs_state']
         next_obs_state = projections['next_obs_state']
+        pred_horizon = next_obs_state.shape[1]
 
-        device = obs_state.device
         # log.debug(f"Computing Loss and Metrics for {projections['obs_state'].shape[0]} samples. Device {device}")
 
         # Computing the cov and cross-covariance operator with the entire obs state dimension and the average trick
@@ -184,14 +184,13 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
 
         # For each Isotypic Subspace, compute empirical Covariance and Cross-Covariance operators.
         # With these, compute spectral, projection scores and orthonormality and Chapman-Kolmogorov regularization.
-        iso_losses = []
-        metrics_per_iso = {irrep_id: {} for irrep_id in self.obs_space_iso_reps.keys()}
+        iso_spaces_metrics = {irrep_id: {} for irrep_id in self.obs_space_iso_reps.keys()}
+        iso_spaces_pred_metrics = {irrep_id: {} for irrep_id in self.obs_space_iso_reps.keys()}
         for irrep_id, iso_rep in self.obs_space_iso_reps.items():
             rep = iso_rep if irrep_id != self.symm_group.trivial_representation else None  # Check for Trivial IsoSpace
             # Get the projection of the observable state in the isotypic subspace
             obs_state_iso = obs_state[..., self.iso_space_dims[irrep_id]]
             next_obs_state_iso = next_obs_state[..., self.iso_space_dims[irrep_id]]
-            pred_horizon = next_obs_state_iso.shape[1]
 
             # Compute Covariance and Cross-Covariance operators for this Isotypic subspace.
             # Spectral and Projection scores, and CK loss terms.
@@ -199,8 +198,9 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
                                                   next_obs_state=next_obs_state_iso,
                                                   representation=rep,
                                                   max_ck_window_length=self.max_ck_window_length,
-                                                  ck_w=self.ck_w,
-                                                  orthonormal_w=self.orthonormal_w)
+                                                  ck_w=self.ck_w)
+
+            iso_spaces_metrics[irrep_id] = iso_metrics
 
             if predict and self.transfer_op is not None:
                 with torch.no_grad():  # Fast forcasting
@@ -218,26 +218,101 @@ class EquivDeepProjectionNet(escnn.nn.EquivariantModule):
                     # Compute the forcasting prediction error.
                     pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
                                                                            state_pred=pred_next_state_iso)
-                    iso_metrics.update(pred_metrics)
-                    iso_metrics['pred_loss'] = pred_loss
+                    iso_spaces_pred_metrics[irrep_id] = pred_metrics
+                    iso_spaces_pred_metrics[irrep_id]['pred_loss'] = pred_loss
 
-            S_score_reg = iso_metrics.pop('S_score_reg')
-            CK_score_reg = iso_metrics.pop('CK_score_reg')
-            if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
-                # loss = -S_score_reg[t, t+dt] = -(S(t, t+dt) - self.orthonormal_w * (R(Cov_t) + R(Cov_t+dt))
-                iso_loss = - S_score_reg
-            else:
-                # loss = mean(Σ_i=t^t+dt S_score_reg[t, t+i]) - ck_regularization[t, t+dt]
-                iso_loss = - CK_score_reg
-            metrics_per_iso[irrep_id] = iso_metrics
-            iso_losses.append(iso_loss)
+        # Now use the metrics of each Isotypic observable subspace to compute the loss and metrics of the entire
+        # observable space.
+        obs_space_metrics = self.obs_space_metrics(iso_spaces_metrics=iso_spaces_metrics,
+                                                   time_horizon=pred_horizon + 1)
+        spectral_score = obs_space_metrics['spectral_score']
+        ck_score = obs_space_metrics['ck_score']
+        orthonormal_reg = obs_space_metrics['orth_reg']
 
-        metrics = reduce(append_dictionaries, metrics_per_iso.values())
-        loss = torch.mean(torch.cat(iso_losses))
+        if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
+            loss = - (spectral_score - self.orthonormal_w * orthonormal_reg)
+        else:
+            loss = - (ck_score - self.orthonormal_w * orthonormal_reg)
 
-        assert not torch.isnan(loss), f"Loss is NaN. Metrics: {metrics}"
+        assert not torch.isnan(loss), f"Loss is NaN. Metrics: {obs_space_metrics}"
+        # Include prediction metrics if available
+        if len(iso_spaces_pred_metrics) > 0:
+            pred_metrics = reduce(append_dictionaries, iso_spaces_pred_metrics.values())
+            for metric, iso_vals in pred_metrics.items():
+                # Norm of a vector decomposed into orthogonal components is the square root of the sum of the
+                # squared norms of the components.
+                pred_metrics[metric] = torch.sqrt(torch.sum(iso_vals ** 2, dim=0))
+            obs_space_metrics.update(pred_metrics)
         # log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
-        return loss, metrics
+        return loss, obs_space_metrics
+
+    def obs_space_metrics(self, iso_spaces_metrics: dict, time_horizon: int) -> dict:
+        """ Compute the observable space metrics from the isotypic subspace metrics.
+
+        This function exploits the fact that the Hilbert-Schmidt (HS) norm of an operator (or the Frobenious norm 
+        of a matrix) that is block-diagonal is defined as the square root of the sum of the squared norms of the blocks:
+         ||A||_HS = sqrt(||A_o||_HS^2 + ... + ||A_i||_HS^2)  | A := block_diag(A_o, ..., A_i). 
+        Thus, we have that the projection score defined as:
+         P_score = ||CovX^-1/2 CovXY CovY^-1/2||_HS, can be decomposed into the projection score of the Iso spaces
+                 = sqrt(sum_iso(||Cov_iso(X)^-1/2 Cov_iso(XY) Cov_iso(Y)^-1/2||_HS))
+        Likewise for the orthogonal and the Chapman-Kolmogorov (Markovian) regularization terms.
+        Args:
+            iso_spaces_metrics:
+        Returns:
+            TODO:
+        """
+
+        # Compute the entire obs space Orthonormal regularization terms for all time horizon.
+        # orth_reg[t] = ||Cov(t, t) - I_obs ||_Fro = sqrt(sum_iso(||Cov_iso(t, t) - I_iso ||^2_Fro))
+        iso_orth_reg = torch.vstack(
+            [iso_spaces_metrics[irrep_id]['orth_reg'] for irrep_id in self.obs_space_iso_reps.keys()])
+        obs_space_orth_reg = torch.sqrt(torch.sum(iso_orth_reg ** 2, dim=0))
+
+        # Compute the entire obs space CK regularization terms.
+        # ck_reg[t, t+d] = ||Cov(t, t+d) - (Cov(t, t+1)...Cov(t+d-1, t+d))||_Fro
+        #                = sqrt(sum_iso(||Cov_iso(t, t+d) - (Cov_iso(t, t+1)...Cov_iso(t+d-1, t+d))||^2_Fro))
+        iso_ck_reg = torch.stack(
+            [iso_spaces_metrics[irrep_id]['ck_reg'] for irrep_id in self.obs_space_iso_reps.keys()], dim=0)
+        obs_space_ck_reg = torch.sqrt(torch.sum(iso_ck_reg ** 2, dim=0))
+
+        # Compute the Correlation/Projection score
+        # P_score[t, t+d] = ||Cov(t)^-1/2 Cov[t, t+d] Cov(t+d)^-1/2||_HS
+        #                 = sqrt(sum_iso(||Cov_iso(t)^-1/2 Cov_iso(t, t+d) Cov_iso(t+d)^-1/2||_HS^2))
+        #                 = sqrt(sum_iso(P_score_iso[t, t+d]^2))
+        iso_P_score = torch.stack(
+            [iso_spaces_metrics[irrep_id]['projection_scores'] for irrep_id in self.obs_space_iso_reps.keys()], dim=0)
+        obs_space_P_score = torch.sqrt(torch.sum(iso_P_score ** 2, dim=0))
+
+        # Compute the Spectral scores for the entire obs-space
+        # S_score[t, t+d] = ||Cov(t, t+d)||_HS / (||Cov(t)||_HS ||Cov(t+d)||_HS)
+        #                 <= ||Cov(t)^-1/2 Cov(t,t+d) Cov(t+d)^-1/2||_HS
+        #                 <= sqrt(sum_iso((||Cov_iso(X,Y)||_HS / (||Cov_iso(X)||_HS ||Cov_iso(Y)||_HS)^2)))
+        #                 <= sqrt(sum_iso(S_score_iso[t, t+d]^2)))
+        iso_S_score = torch.stack(
+            [iso_spaces_metrics[irrep_id]['spectral_scores'] for irrep_id in self.obs_space_iso_reps.keys()], dim=0)
+        obs_space_S_score = torch.sqrt(torch.sum(iso_S_score ** 2, dim=0))
+
+        # With the Spectral, Projection scores and the Orthogonal and CK regularization terms of the entire
+        # observation space, we proceed to compute the regularized Spectral and CK scores:
+        # CK_score_reg[t, t+d] = (Σ_i=0^d-1 S_score[t+i, t+i+1]) - ck_w * (ck_reg[t, t+d])
+        min_steps = 2
+        device, dtype = obs_space_orth_reg.device, obs_space_orth_reg.dtype
+        # s_scores_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+        ck_scores_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+        for t in range(0, time_horizon - min_steps):  # t ∈ [# 0, time_horizon - 2]
+            max_dt = min(time_horizon - t, self.max_ck_window_length + 1)
+            for dt in range(min_steps, max_dt):
+                avg_s_scores = torch.mean(obs_space_S_score[t, t + 1: t + dt])  # Σ_i=0^d-1 S_score[t+i, t+i+1]
+                ck_scores_reg[t, t + dt] = avg_s_scores - self.ck_w * obs_space_ck_reg[t, t + dt]
+                assert not torch.isnan(ck_scores_reg[t, t + dt]), f"Something is fishy here"
+
+        non_nans = lambda x: torch.logical_not(torch.isnan(x))
+
+        return dict(orth_reg=torch.mean(obs_space_orth_reg),
+                    ck_score=torch.mean(ck_scores_reg[non_nans(ck_scores_reg)]),
+                    spectral_score=torch.mean(obs_space_S_score[non_nans(obs_space_S_score)]),
+                    projection_score=torch.mean(obs_space_P_score[non_nans(obs_space_P_score)])
+                    )
 
     def approximate_transfer_operator(self, data_loader: DataLoader):
         with torch.no_grad():
@@ -420,12 +495,11 @@ class DeepProjectionNet(torch.nn.Module):
         pred_horizon = next_obs_state.shape[1]
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
-        obs_metrics = obs_state_space_metrics(obs_state=obs_state,
-                                              next_obs_state=next_obs_state,
-                                              representation=None,
-                                              max_ck_window_length=self.max_ck_window_length,
-                                              ck_w=self.ck_w,
-                                              orthonormal_w=self.orthonormal_w)
+        obs_space_metrics = obs_state_space_metrics(obs_state=obs_state,
+                                                    next_obs_state=next_obs_state,
+                                                    representation=None,
+                                                    max_ck_window_length=self.max_ck_window_length,
+                                                    ck_w=self.ck_w,)
 
         if predict and self.transfer_op is not None:
             with torch.no_grad():  # Fast forcasting
@@ -441,23 +515,27 @@ class DeepProjectionNet(torch.nn.Module):
                 # Compute the forcasting prediction error.
                 pred_loss, pred_metrics = forecasting_loss_and_metrics(state_gt=gt_next_state_iso,
                                                                        state_pred=pred_next_state_iso)
-                obs_metrics.update(pred_metrics)
-                obs_metrics['pred_loss'] = pred_loss
+                obs_space_metrics.update(pred_metrics)
+                obs_space_metrics['pred_loss'] = pred_loss
 
-        S_score_reg = obs_metrics.pop('S_score_reg')
-        CK_score_reg = obs_metrics.pop('CK_score_reg')
+        non_nans = lambda x: torch.logical_not(torch.isnan(x))
+        # Summarize the metrics into a scalar value
+        for metric, values in obs_space_metrics.items():
+            obs_space_metrics[metric] = torch.mean(values[non_nans(values)])
+
+        # Compute loss
+        spectral_score = obs_space_metrics['spectral_scores']
+        ck_score = obs_space_metrics['ck_scores']
+        orthonormal_reg = obs_space_metrics['orth_reg']
+
         if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
-            # loss = -S_score_reg[t, t+dt] = -(S(t, t+dt) - self.orthonormal_w * (R(Cov_t) + R(Cov_t+dt))
-            obs_loss = - S_score_reg
+            loss = - (spectral_score - self.orthonormal_w * orthonormal_reg)
         else:
-            # loss = mean(Σ_i=t^t+dt S_score_reg[t, t+i]) - ck_regularization[t, t+dt]
-            obs_loss = - CK_score_reg
-
-        loss = torch.mean(obs_loss)
+            loss = - (ck_score - self.orthonormal_w * orthonormal_reg)
 
         assert not torch.isnan(loss), f"Loss is NaN"
         # log.debug(f"Computing Loss and Metrics took {time.time() - start_time:.2f}[s]")
-        return loss, obs_metrics
+        return loss, obs_space_metrics
 
     def approximate_transfer_operator(self, data_loader: DataLoader):
         with torch.no_grad():
@@ -487,7 +565,6 @@ class DeepProjectionNet(torch.nn.Module):
     def get_hparams(self):
         return {'encoder': self.projection.get_hparams(),
                 }
-
 
 
 if __name__ == "__main__":
@@ -524,6 +601,7 @@ if __name__ == "__main__":
     state_type = data_module.state_field_type
     obs_state_dimension = state_type.size * 3
     num_encoder_hidden_neurons = obs_state_dimension * 4
+    max_ck_window_length = 6
     gspace = escnn.gspaces.no_base_space(G)
 
     #
@@ -531,10 +609,16 @@ if __name__ == "__main__":
                                     obs_state_dimension=obs_state_dimension,
                                     num_encoder_layers=num_encoder_layers,
                                     num_encoder_hidden_neurons=num_encoder_hidden_neurons,
-                                    max_ck_window_length=6,
+                                    max_ck_window_length=max_ck_window_length,
                                     activation=escnn.nn.ReLU,
-                                    eigval_network=False,
-                                    equivariant=equivariant, )
+                                    eigval_network=False, )
+
+    # dp_net = DeepProjectionNet(state_dim=data_module.state_field_type.size,
+    #                            obs_state_dimension=obs_state_dimension,
+    #                            num_encoder_layers=num_encoder_layers,
+    #                            num_encoder_hidden_neurons=num_encoder_hidden_neurons,
+    #                            max_ck_window_length=max_ck_window_length)
+
     dp_net.to(device)
 
     dp_net.approximate_transfer_operator(data_module.predict_dataloader())
@@ -565,7 +649,3 @@ if __name__ == "__main__":
     # Print only the info for the functions defined in your script
     # Assuming your script's name is 'your_script.py'
     stats.print_stats('koopman_robotics')
-
-    # TODO: Have to parallelize compute_chain_spectral_scores.
-    # Print only the top 50 functions sorted by time
-    stats.print_stats(50)

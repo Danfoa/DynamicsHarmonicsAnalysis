@@ -178,7 +178,7 @@ def chapman_kolmogorov_regularization(Cov: torch.Tensor,
     """ Compute the Chapman-Kolmogorov regularization using the cross-covariance operators between distinct time steps.
 
     This regularization aims at exploitation Markov Assumption of a linear dynamical system. Specifically it computes:
-    ||Cov(X_t, X_t+d) - Cov(X_t, X_t+1) Cov(X_t+1, X_t+2) ... Cov(X_t+d-1, X_t+d) || ∀ t in [0, pred_horizon-2],
+    ||Cov(t, t+d) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+d-1, t+d) || ∀ t in [0, pred_horizon-2],
     d in [2, min(pred_horizon, ck_window_length)].
 
     The function thus computes all possible regularization terms of the provided initial state and state trajectory,
@@ -204,11 +204,11 @@ def chapman_kolmogorov_regularization(Cov: torch.Tensor,
     dtype, device = Cov.dtype, Cov.device
 
     # Generate upper triangular matrix that will contain the CK error values at each position, such that:
-    # ck_errors[i, j] = || Cov(X_i, X_j) - Cov(X_i, X_i+1) Cov(X_i+1, X_i+2) ... Cov(X_j-1, X_j) || | j >= i+2
+    # ck_errors[i, j] = || Cov(i, j) - Cov(i, i+1) Cov(i+1, i+2) ... Cov(j-1, j) || | j >= i+2
     ck_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
 
     # Minimum number of steps to compute the CK regularization term
-    # ck_errors[t, t+2] = || Cov(X_t, X_t+2) - Cov(X_t, X_t+1) Cov(X_t+1, X_t+2) ||
+    # ck_errors[t, t+2] = || Cov(t, t+2) - Cov(t, t+1) Cov(t+1, t+2) ||
     min_steps = 2
     for ts in range(0, time_horizon - 2):  # ts ∈ [0, time_horizon - 2]
         chain_cov = None
@@ -217,17 +217,17 @@ def chapman_kolmogorov_regularization(Cov: torch.Tensor,
         for dt in range(min_steps, max_dt):
             te = ts + dt  # te ∈ [ts + 2, min(pred_horizon, ts + ck_window)]
             # Compute the covariance chain using Dynamic Programming (i.e., do not repeat computations)
-            # Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2), ... Cov(X_te-1, X_te)
-            if chain_cov is None:  # chain_cov = Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2)
+            # Cov(ts, ts+1), Cov(ts+1, ts+2), ... Cov(te-1, te)
+            if chain_cov is None:  # chain_cov = Cov(ts, ts+1), Cov(ts+1, ts+2)
                 chain_cov = Cov[ts, ts + 1] @ Cov[ts + 1, ts + 2]
                 chain_test.extend([(ts, ts + 1), (ts + 1, ts + 2)])
-            else:  # chain_cov *= Cov(X_te-1, X_te)
+            else:  # chain_cov *= Cov(te-1, te)
                 chain_cov = chain_cov @ Cov[te - 1, te]
                 chain_test.append((te - 1, te))
             # Select the target covariance as the operator in the upper right if the [ts : te, ts : te] block.
-            target_cov = Cov[ts, te]  # Cov(X_ts, X_te)
+            target_cov = Cov[ts, te]  # Cov(ts, te)
 
-            # || Cov(X_ts, X_te) - Cov(X_ts, X_ts+1), Cov(X_ts+1, X_ts+2), ... Cov(X_te-1, X_te) ||_2
+            # || Cov(ts, te) - Cov(ts, ts+1), Cov(ts+1, ts+2), ... Cov(te-1, te) ||_2
             ck_reg[ts, te] = torch.linalg.matrix_norm(chain_cov - target_cov, ord='fro')
 
             if debug:
@@ -247,7 +247,7 @@ def compute_chain_spectral_scores(Cov: torch.Tensor, window_size: Optional[int] 
     Args:
         Cov: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
          operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
-         Cov_t_dt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, time_horizon], j >= i.
+         Cov_t_dt[i, j] = Cov(i, j) ∀ i, j in [0, time_horizon], j >= i.
         window_size: (int) Maximum window length to compute the spectral score. Defaults to None, in which case the
          score is computed for all window_size > j >= i
         debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
@@ -263,10 +263,10 @@ def compute_chain_spectral_scores(Cov: torch.Tensor, window_size: Optional[int] 
     spectral_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
     # Compute the norm of the diagonal of the covariance matrices is a single parallel operation.
     Cov_t = Cov[range(time_horizon), range(time_horizon)]
-    norm_Cov_t = torch.linalg.matrix_norm(Cov_t, ord=2, dim=(-2, -1))  # norm_Cov_t[i] = ||Cov(X_i, X_i)||_2
+    norm_Cov_t = torch.linalg.matrix_norm(Cov_t, ord=2, dim=(-2, -1))  # norm_Cov_t[i] = ||Cov(i, i)||_2
 
     # Compute the HS norm of the Cross-Covariance operators in a single parallel operation.
-    # norm_Cov_t_dt[i, j] = ||Cov(X_i, X_j)||_HS
+    # norm_Cov_t_dt[i, j] = ||Cov(i, j)||_HS
     norm_Cov = torch.linalg.matrix_norm(Cov, ord='fro', dim=(-2, -1))
 
     for ts in range(time_horizon):
@@ -292,7 +292,7 @@ def compute_chain_projection_scores(Cov: torch.Tensor, window_size: Optional[int
     Args:
         Cov: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
          operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
-         Cov_t_dt[i, j] = Cov(X_i, X_j) ∀ i, j in [0, time_horizon], j >= i.
+         Cov_t_dt[i, j] = Cov(i, j) ∀ i, j in [0, time_horizon], j >= i.
         debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
     Returns:
         projection_scores: (time_horizon, time_horizon) Tensor containing the projection scores between all pairs of
@@ -328,25 +328,51 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
                             representation: Optional[Representation] = None,
                             max_ck_window_length: int = 2,
                             ck_w: float = 0.01,
-                            orthonormal_w: float = 0.1,
                             ):
+    """ Compute the metrics of an observable space with expected linear dynamics.
+
+    This function computes the metrics of an observable space with expected linear dynamics. Specifically,
+    Args:
+        obs_state: (batch, obs_state_dim) Initial state
+        next_obs_state: (batch, pred_horizon, obs_state_dim) future trajectory of states of length `pred_horizon`
+        representation: Symmetry representation on the observable space. If provided, the empirical covariance and
+            cross-covariance operators will be improved using the group average trick:
+        max_ck_window_length: Maximum window length to compute the Chapman-Kolmogorov regularization term.
+        ck_w: Weight of the Chapman-Kolmogorov regularization term.
+    Returns:
+        Dictionary containing:
+            - orth_reg: (pred_horizon + 1) Tensor containing the orthonormality regularization term for each time step.
+              That is orth_reg[t] = || Cov(t,t) - I ||_2
+            - ck_reg: (pred_horizon + 1, pred_horizon + 1) Tensor containing the Chapman-Kolmogorov regularization term.
+              That is ck_reg[t, t+d] = || Cov(t,t+d) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+d-1, t+d) ||
+              for all t in [0, pred_horizon-2], d in [2, min(pred_horizon, ck_window_length)]
+            - spectral_scores: (pred_horizon + 1, pred_horizon + 1) Tensor containing the spectral scores.
+              spectral_scores[t, t+d] = ||Cov(t, t+d)||_HS / (||Cov(t)||_HS ||Cov(t+d)||_HS)  for
+              t in [0, pred_horizon-2] and d in [1, min(pred_horizon, ck_window_length)]
+            - projection_scores: (pred_horizon + 1, pred_horizon + 1) Tensor containing the projection scores.
+              projection_scores[t, t+d] = ||Cov(t)^-1/2 Cov[t, t+d] Cov(t+d)^-1/2||_HS for
+              t in [0, pred_horizon-2] and d in [1, min(pred_horizon, ck_window_length)]
+            - ck_scores: (pred_horizon + 1, pred_horizon + 1) Tensor containing the Chapman-Kolmogorov scores
+              ck_score[t, t+d] = (Σ_i=0^d-1 S_score[t+i, t+i+1]) - ck_w * (ck_reg[t, t+d]) for 
+              t in [0, pred_horizon-2] and d in [2, min(pred_horizon, ck_window_length)]
+    """
     pred_horizon = next_obs_state.shape[1]
     time_horizon = pred_horizon + 1
     dtype = obs_state.dtype
     device = obs_state.device
 
     # Compute the empirical covariance and cross-covariance operators, ensuring that operators are equivariant.
-    # Cov_t_tdt[i, j] := Cov(X_i, X_j)  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
+    # Cov_t_tdt[i, j] := Cov(i, j)  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
     Cov = empirical_cov_cross_cov(state_0=obs_state, next_states=next_obs_state,
                                   representation=representation, cov_window_size=max_ck_window_length,
                                   debug=False)  # log.level == logging.DEBUG)
     # Orthonormality regularization terms for ALL time steps in horizon
     # reg_orthonormal[t] = || Cov_t[i] - I || | t in [0, pred_horizon]
-    Cov_t = Cov[range(time_horizon), range(time_horizon)]   # Covariance operators Cov(X_t, X_t) ∀ t in [0, T]
+    Cov_t = Cov[range(time_horizon), range(time_horizon)]  # Covariance operators Cov(t, t) ∀ t in [0, T]
     reg_orthonormal = regularization_orthonormality(Cov_t)  # || Cov_t[i] - I || ∀ i in [0, T]
 
     # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
-    # spectral_scores[t, t+d] := ||Cov(X_t, X_t+d)||^2_HS / (||CovX_t|| ||CovX_t+d||)   |
+    # spectral_scores[t, t+d] := ||Cov(t, t+d)||^2_HS / (||Cov(t)|| ||Cov(t)+d||)   |
     #   t in [0, pred_horizon], d in [0, pred_horizon - t]
     spectral_scores = compute_chain_spectral_scores(Cov=Cov,
                                                     window_size=max_ck_window_length,
@@ -354,16 +380,10 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
     projection_scores = compute_chain_projection_scores(Cov=Cov,
                                                         window_size=max_ck_window_length,
                                                         debug=log.level == logging.DEBUG)
-    # Apply the Orthonormal regularization term to the spectral scores
-    spectral_scores_reg = torch.clone(spectral_scores)
     time_horizon = pred_horizon + 1
-    for t in range(0, time_horizon):
-        for dt in range(1, time_horizon - t):
-            spectral_scores_reg[t, t + dt] -= orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
-            # projection_scores[t, t + dt] -= orthonormal_w * (reg_orthonormal[t] + reg_orthonormal[t + dt])
 
     # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
-    # ck_regularization[i,j] = || Cov(X_i, X_j) - ( Cov(X_i, X_i+1), ... Cov(X_j-1, X_j) ) ||_2  | j >= i + 2
+    # ck_regularization[i,j] = || Cov(i, j) - ( Cov(i, i+1), ... Cov(j-1, j) ) ||_2  | j >= i + 2
     ck_regularization = chapman_kolmogorov_regularization(Cov=Cov,
                                                           ck_window_length=max_ck_window_length,
                                                           debug=log.level == logging.DEBUG)
@@ -373,32 +393,24 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
     #                                             t in [0, time_horizon - 2], d in [2, min(pred_horizon-t, ck_window)]
     min_steps = 2
     ck_scores_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
-    for t in range(0, time_horizon - 2):  # ts ∈ [
-        # 0, time_horizon - 2]
+    for t in range(0, time_horizon - min_steps):  # ts ∈ [# 0, time_horizon - 2]
         max_dt = min(time_horizon - t, max_ck_window_length + 1)
         for dt in range(min_steps, max_dt):
-            s_ck_scores = torch.mean(spectral_scores_reg[t, t + 1: t + dt])
+            s_ck_scores = torch.mean(spectral_scores[t, t + 1: t + dt])
             assert not torch.isnan(s_ck_scores), f"NaN in spectral_scores_reg[{t}, {t + 1: t + dt}]"
             ck_scores_reg[t, t + dt] = s_ck_scores - ck_w * ck_regularization[t, t + dt]
 
-    # Generate metrics dictionary
-    non_nans = lambda x: torch.logical_not(torch.isnan(x))
-    # Store the loss results.
-
     # Useful to debug the expected sparsity pattern of the matrix.
-    spectral_score_np = spectral_scores.detach().cpu().numpy()
-    spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
-    ck_reg_np = ck_regularization.detach().cpu().numpy()
-    ck_scores_reg_np = ck_scores_reg.detach().cpu().numpy()
+    # spectral_score_np = spectral_scores.detach().cpu().numpy()
+    # spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
+    # ck_reg_np = ck_regularization.detach().cpu().numpy()
+    # ck_scores_reg_np = ck_scores_reg.detach().cpu().numpy()
 
-    metrics = {'orth_reg':     reg_orthonormal[non_nans(reg_orthonormal)],
-               'S_score':      spectral_scores[non_nans(spectral_scores)],
-               'S_score_reg':  spectral_scores_reg[non_nans(spectral_scores_reg)],
-               'P_score':      projection_scores[non_nans(projection_scores)],
-               'CK_reg':       ck_regularization[non_nans(ck_regularization)],
-               'CK_score_reg': ck_scores_reg[non_nans(ck_scores_reg)]}
-
-    return metrics
+    return dict(orth_reg=reg_orthonormal,
+                ck_reg=ck_regularization,
+                spectral_scores=spectral_scores,
+                projection_scores=projection_scores,
+                ck_scores=ck_scores_reg)
 
 
 def forecasting_loss_and_metrics(

@@ -95,6 +95,8 @@ class DynamicsDataModule(LightningDataModule):
 
         # Ensure what we shuffle the train dataset:
         train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size / 2)
+        test_dataset = test_dataset.shuffle(buffer_size=test_dataset.dataset_size)
+        val_dataset = val_dataset.shuffle(buffer_size=val_dataset.dataset_size)
         # Convert to torch. Apply map to get samples containing state and next state
         train_dataset = train_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
@@ -245,8 +247,8 @@ if __name__ == "__main__":
     mock_path = path_to_dyn_sys_data.pop()
 
     data_module = DynamicsDataModule(data_path=mock_path,
-                                     pred_horizon=.5,
-                                     eval_pred_horizon=.5,
+                                     pred_horizon=10,
+                                     eval_pred_horizon=50,
                                      frames_per_step=1,
                                      num_workers=1,
                                      batch_size=1000,
@@ -279,7 +281,7 @@ if __name__ == "__main__":
         print(f"Average time per sample in {partition} set: {(time.time() - start_time) / n_samples * 1000:.2f} [ms]")
         print(f"Total time iters over {partition} set: {(time.time() - start_time):.2f}[s]")
 
-    for color, dataloader in zip(['Gray', 'Viridis'], [data_module.test_dataloader(), data_module.train_dataloader()]):
+    for color, dataloader in zip(['Gray', 'Agsunset', 'Viridis'], [data_module.test_dataloader(), data_module.val_dataloader(), data_module.train_dataloader()]):
         for i, batch in enumerate(dataloader):
             states = batch['state'][:5].detach().numpy()
             next_states = batch['next_state'][:5].detach().numpy()
@@ -294,4 +296,5 @@ if __name__ == "__main__":
                 else:
                     pass
             break
+    fig.write_html("Example-test-val-train-samples.html")
     fig.show()
