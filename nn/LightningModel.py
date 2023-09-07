@@ -56,7 +56,7 @@ class LightningModel(LightningModule):
     def training_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
         outputs = self.model(**batch, n_steps=n_steps)
-        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch)
+        loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
         self.log("train/loss", loss, prog_bar=False)
         self.log_metrics(metrics, prefix="train/", batch_size=self._batch_size)
@@ -65,7 +65,7 @@ class LightningModel(LightningModule):
     def validation_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
         outputs = self.model(**batch, n_steps=n_steps)
-        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch, predict=self.global_step > 0)
+        loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
         if self.val_metrics_fn is not None:
             val_metrics = self.val_metrics_fn(outputs, batch)
@@ -77,9 +77,9 @@ class LightningModel(LightningModule):
 
     def test_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps, predict=True)
+        outputs = self.model(**batch, n_steps=n_steps)
 
-        loss, metrics = self.model.compute_loss_and_metrics(outputs, batch, predict=True)
+        loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
         if self.val_metrics_fn is not None:
             test_metrics = self.test_metrics_fn(outputs, batch)
