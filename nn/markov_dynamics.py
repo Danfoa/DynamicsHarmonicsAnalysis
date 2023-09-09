@@ -1,12 +1,8 @@
-import math
-from typing import Iterable, Union
-
-import numpy as np
+from typing import Iterable
 import torch
-from torch.nn import Module
 
 
-class MarkovDynamicsModule(Module):
+class MarkovDynamicsModule(torch.nn.Module):
 
     def __init__(self, state_dim: int, dt: float, **kwargs):
         super().__init__()

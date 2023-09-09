@@ -245,5 +245,10 @@ def format_scientific(text):
         return "{:.1e}".format(number)
 
     # Regular expression to find numbers after "=" and replace them
-    return re.sub(r"(?<=\=)(\d+\.\d+|\d+\.|\.\d+|\d+)", replace_number, text)
+    str = re.sub(r"(?<=\=)(\d+\.\d+|\d+\.|\.\d+|\d+)", replace_number, text)
+    # Remove the following keywords from the string
+    keywords = ['model.', 'hydra.', 'system.']
+    for keyword in keywords:
+        str = str.replace(keyword, '')
+    return str
 

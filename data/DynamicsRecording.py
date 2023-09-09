@@ -92,6 +92,7 @@ def load_data_generator(recordings: list[DynamicsRecording],
                 steps_in_pred_horizon = floor((prediction_horizon * traj_length) // frames_per_step) - 1
             else:
                 steps_in_pred_horizon = prediction_horizon
+            assert steps_in_pred_horizon > 0, f"Invalid prediction horizon {steps_in_pred_horizon}"
 
             remnant = traj_length % frames_per_step
             frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step
@@ -104,7 +105,6 @@ def load_data_generator(recordings: list[DynamicsRecording],
                     continue
                 sample = {}
                 for measurement, trajs in recordings.items():
-                    # Enforce Float 32
                     trajs = np.asarray(trajs, dtype=np.float32)
                     sample[measurement] = trajs[traj_id][frame:frame + frames_per_step]
                     horizon = []
@@ -113,9 +113,9 @@ def load_data_generator(recordings: list[DynamicsRecording],
                         step = trajs[traj_id][frame + (frames_per_step * step_id):
                                               frame + (frames_per_step * step_id) + frames_per_step]
                         horizon.append(step)
+                    if len(horizon) != steps_in_pred_horizon:
+                        raise ValueError(f"Invalid horizon length {len(horizon)} != {steps_in_pred_horizon}")
                     sample[f"next_{measurement}"] = np.asarray(horizon)
-                if len(sample[f"next_{measurement}"]) != steps_in_pred_horizon:
-                    raise ValueError(f"Issue")
                 yield sample
 
 

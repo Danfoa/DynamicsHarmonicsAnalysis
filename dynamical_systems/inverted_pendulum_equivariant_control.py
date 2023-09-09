@@ -212,7 +212,7 @@ if __name__ == "__main__":
     double_pendulum_rw = example_robot_data.load('double_pendulum_continuous')
     # Build a single DoF pendulum from the double pendulum model by fixing elbow joint
     pendulum_rw = double_pendulum_rw.buildReducedRobot(list_of_joints_to_lock=[2])
-    model = pendulum_rw.model
+    model = pendulum_rw.dp_net
 
     # Crocoddyl state and actuation
     state = crocoddyl.StateMultibody(model)

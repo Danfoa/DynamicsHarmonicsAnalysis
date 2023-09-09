@@ -11,3 +11,5 @@ pred_horizon: 10             # Number (or percentage) of Markov Process state ti
 eval_pred_horizon: 100       # Number (or percentage) of Markov Process state time steps to predict into the future
 
 data_path: '${system.name}/${system.state_dim}-dim/'
+
+summary: s:${state_dim}-os:${obs_state_dim}-H:${system.pred_horizon}-Hv:${system.eval_pred_horizon}-F:${system.frames_per_state}

@@ -16,7 +16,8 @@ from lightning_fabric import seed_everything
 from omegaconf import DictConfig, OmegaConf
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DeepProjectionNetworks import DeepProjectionNet, EquivDeepProjectionNet
+from nn.DPNet import DPNet
+from nn.EquivDPNet import EquivDPNet
 from nn.EquivDynamicsAutoencoder import EquivDynamicsAutoEncoder
 from nn.LightningModel import LightningModel
 from utils.mysc import check_if_resume_experiment, class_from_name, format_scientific
@@ -43,7 +44,7 @@ def main(cfg: DictConfig):
 
     # Check if experiment already run
     ckpt_folder_path = seed_path
-    ckpt_call = ModelCheckpoint(dirpath=ckpt_folder_path, filename='best', monitor="val/loss", save_last=True)
+    ckpt_call = ModelCheckpoint(dirpath=ckpt_folder_path, filename='best', monitor="loss/val", save_last=True)
     training_done, ckpt_path, best_path = check_if_resume_experiment(ckpt_call)
 
     if not training_done:
@@ -59,65 +60,64 @@ def main(cfg: DictConfig):
                                         device=device,
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
-        group = datamodule.symm_group
-        obs_state_dim = math.ceil(cfg.system.obs_state_dim / group.order())
+        obs_state_dim = math.ceil(cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
         num_hidden_neurons = max(32, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
         activation = class_from_name('escnn.nn' if cfg.model.equivariant else 'torch.nn', cfg.model.activation)
-        model_agnostic_params = dict(obs_state_dimension=obs_state_dim,
+        model_agnostic_params = dict(obs_state_dim=obs_state_dim,
                                      num_encoder_layers=cfg.model.n_layers,
                                      num_encoder_hidden_neurons=num_hidden_neurons,
+                                     dt=datamodule.dt,
                                      activation=activation)
         if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
                 model = EquivDynamicsAutoEncoder(**model_agnostic_params,
-                                                 state_type=datamodule.state_field_type,
-                                                 dt=datamodule.dt)
+                                                 state_type=datamodule.state_field_type)
                 assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
         elif cfg.model.name.lower() == "dpnet":
             assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
             if cfg.model.equivariant:
-                model = EquivDeepProjectionNet(**model_agnostic_params,
-                                               state_type=datamodule.state_field_type,
-                                               max_ck_window_length=cfg.model.max_ck_window_length,
-                                               ck_w=cfg.model.ck_w,
-                                               orthonormal_w=cfg.model.orthonormal_w)
+                model = EquivDPNet(**model_agnostic_params,
+                                   state_type=datamodule.state_field_type,
+                                   max_ck_window_length=cfg.model.max_ck_window_length,
+                                   ck_w=cfg.model.ck_w,
+                                   orthonormal_w=cfg.model.orthonormal_w)
             else:
-                model = DeepProjectionNet(**model_agnostic_params,
-                                          state_dim=datamodule.state_field_type.size,
-                                          max_ck_window_length=cfg.model.max_ck_window_length,
-                                          ck_w=cfg.model.ck_w,
-                                          orthonormal_w=cfg.model.orthonormal_w)
+                model = DPNet(**model_agnostic_params,
+                              state_dim=datamodule.state_field_type.size,
+                              max_ck_window_length=cfg.model.max_ck_window_length,
+                              ck_w=cfg.model.ck_w,
+                              orthonormal_w=cfg.model.orthonormal_w)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
-        stop_call = EarlyStopping(monitor='val/loss', patience=max(5, int(cfg.max_epochs * 0.1)), mode='min')
+        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(10, int(cfg.max_epochs * 0.1)), )
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
         run_hps['model']['num_hidden_neurons'] = num_hidden_neurons
 
         run_name = run_path.name
-        wandb_logger = WandbLogger(project=f'{cfg.exp_name}',
+        wandb_logger = WandbLogger(project=f'{cfg.system.name}',
                                    save_dir=seed_path.absolute(),
                                    config=run_hps,
-                                   group=format_scientific(run_name),
-                                   # offline=True,
-                                   job_type='debug' if cfg.debug else None)
+                                   name=run_name,
+                                   group=f'{cfg.exp_name}',
+                                   job_type='debug' if (cfg.debug or cfg.debug_loops) else None)
 
         # Configure Lightning trainer
         trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
                           devices='auto',  # 1 if torch.cuda.is_available() and device != 'cpu' else 1,
                           logger=wandb_logger,
-                          log_every_n_steps=25,
+                          log_every_n_steps=1,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
                           check_val_every_n_epoch=1,
                           # benchmark=True,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
                           # detect_anomaly=cfg.debug, # This shit slows down to the point of gen existential dread.
-                          enable_progress_bar=cfg.debug_loops or cfg.debug,
+                          enable_progress_bar=True,#cfg.debug_loops or cfg.debug,
                           limit_train_batches=5 if cfg.debug_loops else 1.0,
                           limit_test_batches=10 if cfg.debug_loops else 1.0,
                           limit_val_batches=10 if cfg.debug_loops else 1.0,
@@ -161,10 +161,7 @@ def main(cfg: DictConfig):
             pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
 
         results = trainer.test(model=pl_model, datamodule=datamodule)
-        try:
-            test_pred_loss = results[0]['test/pred_loss_avg']
-        except:
-            test_pred_loss = results[0]['test/pred_loss']
+        test_pred_loss = results[0]['obs_pred_loss/test']
         wandb_logger.experiment.unwatch(model)
         wandb_logger.experiment.finish()
         return test_pred_loss

@@ -3,17 +3,19 @@ defaults:
 
 name: DPNet
 # Model hyperparameters
-equivariant: True
-activation: ReLU
+equivariant: False
+activation: Identity
 n_layers: 4             # Number MLPs' layers (including input and output layers)
 
 # Optimization hyperparameters parameters
 lr: 1e-3
 batch_size: 1024
 
-max_ck_window_length: 6
-ck_w: 0.5              # Weight of the Chapman-Kolmogorov regularization term in the loss function
-orthonormal_w: 0.01    # Weight of the orthonormal regularization term in the loss function
+max_ck_window_length: 3
+ck_w: 0.0              # Weight of the Chapman-Kolmogorov regularization term in the loss function
+orthonormal_w: 0.1     # Weight of the orthonormal regularization term in the loss function
 
 #eigval_init: "stable"   # Initialization of eigenvalues [stable, ]
 #eigval_constraint: "unconstrained"   # [unconstrained or unit_circle]
+
+summary: equiv:${model.equivariant}-ck_w:${model.ck_w}-orth_w:${model.orthonormal_w}-window:${model.max_ck_window_length}-act:${model.activation}-lr:${model.lr}

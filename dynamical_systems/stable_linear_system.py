@@ -244,7 +244,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
-    order = 4
+    order = 3
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -285,9 +285,9 @@ if __name__ == '__main__':
             offset = np.concatenate((offset, offset_orbit)) if offset is not None else offset_orbit
 
     # Generate trajectories of the system dynamics
-    dt = 0.01
+    dt = 0.1
     T = 4 * time_constant
-    sigma = 0.2
+    sigma = 0.0
     n_trajs = 30
     state_trajs = []
     for _ in range(n_trajs):
@@ -345,10 +345,17 @@ if __name__ == '__main__':
         data.save_to_file(path_to_file)
         # data2 = MarkovDynamicsRecording.load_from_file(path_to_file)
 
+    fig = None
     if state_dim == 2:
-        fig = plot_system_2D(A_G, state_trajs[test_idx], P=P_symm, z_constraint=offset)
+        fig = plot_system_2D(A_G, state_trajs[train_idx], P=P_symm, z_constraint=offset)
     elif state_dim == 3:
-        fig = plot_system_3D(A_G, state_trajs[train_idx], constraint_matrix=P_symm, constraint_offset=offset)
+        # ['Gray', 'Agsunset', 'Viridis']
+        fig = plot_system_3D(A_G, trajectories=state_trajs[train_idx], fig=fig, constraint_matrix=P_symm,
+                             constraint_offset=offset, traj_colorscale='Viridis', init_state_color='red')
+        fig = plot_system_3D(A_G, trajectories=state_trajs[test_idx], fig=fig, constraint_matrix=P_symm,
+                             constraint_offset=offset, traj_colorscale='Gray', init_state_color='black')
+        fig = plot_system_3D(A_G, trajectories=state_trajs[val_idx], fig=fig, constraint_matrix=P_symm,
+                             constraint_offset=offset, traj_colorscale='Agsunset', init_state_color='yellow')
 
     fig.write_html(path_2_system / 'test_trajectories.html')
 

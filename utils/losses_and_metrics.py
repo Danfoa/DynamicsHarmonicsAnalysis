@@ -393,6 +393,7 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
     #                                             t in [0, time_horizon - 2], d in [2, min(pred_horizon-t, ck_window)]
     min_steps = 2
     ck_scores_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
+
     for t in range(0, time_horizon - min_steps):  # ts ∈ [# 0, time_horizon - 2]
         max_dt = min(time_horizon - t, max_ck_window_length + 1)
         for dt in range(min_steps, max_dt):
@@ -408,16 +409,16 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
 
     return dict(orth_reg=reg_orthonormal,
                 ck_reg=ck_regularization,
-                spectral_scores=spectral_scores,
-                projection_scores=projection_scores,
-                ck_scores=ck_scores_reg)
+                spectral_score=spectral_scores,
+                projection_score=projection_scores,
+                ck_score=ck_scores_reg)
 
 
 def forecasting_loss_and_metrics(
-        state_gt: torch.Tensor, state_pred: torch.Tensor) -> (torch.Tensor, dict[str, torch.Tensor]):
+        state_gt: torch.Tensor, state_pred: torch.Tensor, prefix='') -> (torch.Tensor, dict[str, torch.Tensor]):
     # Compute state squared error over time and the infinite norm of the state dimension over time.
     l2_loss = torch.norm(state_gt - state_pred, p=2, dim=-1)
-    linf_loss = torch.norm(state_gt - state_pred, p=torch.inf, dim=-1)
+    # linf_loss = torch.norm(state_gt - state_pred, p=torch.inf, dim=-1)
     time_steps = state_gt.shape[1]
     metrics = {}
     if time_steps > 4:
@@ -425,7 +426,8 @@ def forecasting_loss_and_metrics(
         for quartile in [.25, .5, .75]:
             stop_idx = int(quartile * time_steps)
             l2_loss_quat = l2_loss[:, :stop_idx].mean(dim=-1)
-            metrics[f'pred_loss_{int(quartile * 100):d}%'] = l2_loss_quat.mean()
+            metrics[f'{prefix}pred_loss_{int(quartile * 100):d}%'] = l2_loss_quat.mean()
     # pred_horizon = time_steps * self.dt
-    metrics.update(linf_loss=linf_loss.mean())
+    # metrics.update(linf_loss=linf_loss.mean())
+    a = l2_loss.detach().cpu().numpy()
     return l2_loss.mean(), metrics

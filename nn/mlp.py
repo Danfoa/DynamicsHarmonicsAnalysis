@@ -21,6 +21,7 @@ class EMLP(EquivariantModule):
                  with_bias: bool = True,
                  activation: Union[EquivariantModule, List[EquivariantModule]] = escnn.nn.ReLU,
                  head_with_activation: bool = False,
+                 batch_norm: bool = True,
                  init_mode="fan_in"):
         """Constructor of an Equivariant Multi-Layer Perceptron (EMLP) model.
 
@@ -53,9 +54,8 @@ class EMLP(EquivariantModule):
         self.activations = activation if isinstance(activation, list) else [activation] * (num_layers - 1)
 
         self.num_layers = num_layers
-        n_hidden_layers = self.num_layers - 2
-        if n_hidden_layers == 0:
-            log.warning(f"{self} model initialized with 0 hidden layers")
+        if self.num_layers == 1 and not head_with_activation:
+            log.warning(f"{self} model with 1 layer and no activation. This is equivalent to a linear map")
 
         self.num_hidden_regular_fields = int(np.ceil(num_hidden_units / self.gspace.fibergroup.order()))
         regular_rep = self.gspace.fibergroup.regular_representation
@@ -65,7 +65,8 @@ class EMLP(EquivariantModule):
         inner_irreps = set(regular_rep.irreps)
         diff = input_irreps.symmetric_difference(inner_irreps)
         if len(diff) > 0:
-            log.warning(f"Irreps {diff} are not shared between input and latent representations")
+            log.warning(f"Irreps {list(diff)} of group {self.gspace.fibergroup} are not shared between input and latent"
+                        f" representations. This will create an information bottleneck.")
         layer_in_type = in_type
 
         self.net = escnn.nn.SequentialModule()
@@ -75,7 +76,8 @@ class EMLP(EquivariantModule):
 
             block = escnn.nn.SequentialModule()
             block.add_module(f"linear_{n}", escnn.nn.Linear(layer_in_type, layer_out_type, bias=with_bias))
-            block.add_module(f"batchnorm_{n}", escnn.nn.IIDBatchNorm1d(layer_out_type)),
+            if batch_norm:
+                block.add_module(f"batchnorm_{n}", escnn.nn.IIDBatchNorm1d(layer_out_type)),
             block.add_module(f"act_{n}", activation)
 
             self.net.add_module(f"block_{n}", block)
@@ -85,7 +87,8 @@ class EMLP(EquivariantModule):
         head_block = escnn.nn.SequentialModule()
         head_block.add_module(f"linear_{num_layers - 1}", escnn.nn.Linear(layer_in_type, out_type, bias=with_bias))
         if head_with_activation:
-            head_block.add_module(f"batchnorm_{num_layers - 1}", escnn.nn.IIDBatchNorm1d(out_type)),
+            if batch_norm:
+                head_block.add_module(f"batchnorm_{num_layers - 1}", escnn.nn.IIDBatchNorm1d(out_type)),
             head_block.add_module(f"act_{num_layers - 1}", activation)
         # head_layer.check_equivariance()
         self.net.add_module("head", head_block)
@@ -121,6 +124,8 @@ class MLP(torch.nn.Module):
                  num_hidden_units: int = 64,
                  num_layers: int = 3,
                  with_bias: bool = True,
+                 batch_norm: bool = True,
+                 head_with_activation: bool = False,
                  activation: Union[torch.nn.Module, List[torch.nn.Module]] = torch.nn.ReLU,
                  init_mode="fan_in"):
         """Constructor of a Multi-Layer Perceptron (MLP) model.
@@ -147,9 +152,8 @@ class MLP(torch.nn.Module):
         self.activation = activation if isinstance(activation, list) else [activation] * (num_layers - 1)
 
         self.num_layers = num_layers
-        n_hidden_layers = self.num_layers - 2
-        if n_hidden_layers == 0:
-            log.warning(f"{self} model initialized with 0 hidden layers")
+        if self.num_layers == 1 and not head_with_activation:
+            log.warning(f"{self} model with 1 layer and no activation. This is equivalent to a linear map")
 
         dim_in = self.dim_input
         dim_out = num_hidden_units
@@ -160,15 +164,22 @@ class MLP(torch.nn.Module):
 
             block = torch.nn.Sequential()
             block.add_module(f"linear_{n}", torch.nn.Linear(dim_in, dim_out, bias=with_bias))
-            block.add_module(f"batchnorm_{n}", torch.nn.BatchNorm1d(dim_out))
+            if batch_norm:
+                block.add_module(f"batchnorm_{n}", torch.nn.BatchNorm1d(dim_out))
             block.add_module(f"act_{n}", activation())
 
             self.net.add_module(f"block_{n}", block)
             dim_in = dim_out
 
         # Add last layer
-        linear_out = torch.nn.Linear(in_features=dim_out, out_features=self.dim_output, bias=with_bias)
-        self.net.add_module("head", linear_out)
+        head_block = torch.nn.Sequential()
+        head_block.add_module(f"linear_{num_layers - 1}", torch.nn.Linear(in_features=dim_out, out_features=self.dim_output, bias=with_bias))
+        if head_with_activation:
+            if batch_norm:
+                head_block.add_module(f"batchnorm_{num_layers - 1}", torch.nn.BatchNorm1d(dim_out))
+            head_block.add_module(f"act_{num_layers - 1}", activation())
+
+        self.net.add_module("head", head_block)
 
         self.reset_parameters(init_mode=self.init_mode)
 
@@ -189,6 +200,7 @@ class MLP(torch.nn.Module):
             if isinstance(module, torch.nn.Sequential):
                 tensor = module[0].weight
                 activation = module[-1].__class__.__name__
+                activation = "linear" if activation == "Identity" else activation
             elif isinstance(module, torch.nn.Linear):
                 tensor = module.weight
                 activation = "Linear"

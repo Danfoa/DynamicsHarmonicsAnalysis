@@ -43,7 +43,7 @@ class DynamicsDataModule(LightningDataModule):
             self.pred_horizon = pred_horizon
         elif isinstance(pred_horizon, int):
             assert pred_horizon >= 1, "At least we need to forecast a single dynamics step"
-            self.pred_horizon = pred_horizon + 1
+            self.pred_horizon = pred_horizon
         self.eval_pred_horizon = eval_pred_horizon
         self.batch_size = batch_size
         self.num_workers = num_workers

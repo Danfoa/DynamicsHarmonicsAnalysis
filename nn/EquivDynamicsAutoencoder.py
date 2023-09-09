@@ -1,30 +1,17 @@
 import logging
-import math
-from collections import OrderedDict
 from typing import Union
 
 import escnn
 import numpy as np
 import torch
-from escnn.group import Group, directsum
 from escnn.nn import FieldType, GeometricTensor
 
 from nn.LinearDynamics import EquivariantLinearDynamics
 from nn.markov_dynamics import MarkovDynamicsModule
 from nn.mlp import EMLP, MLP
-from utils.representation_theory import identify_isotypic_spaces
+from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
-
-
-def isotypic_basis(group: Group, num_regular_fields: int, prefix=''):
-    rep, _ = identify_isotypic_spaces(group.regular_representation)
-    # Construct the obs state representation as a `num_regular_field` copies of the isotypic representation
-    iso_reps = OrderedDict()
-    for iso_irrep_id, reg_rep_iso in rep.attributes['isotypic_reps'].items():
-        iso_reps[iso_irrep_id] = directsum([reg_rep_iso] * num_regular_fields,
-                                           name=f"{prefix}_IsoSpace{iso_irrep_id}")
-    return iso_reps  # Dict[key:id_space -> value: rep_iso_space]
 
 
 def compute_invariant_features(x: torch.Tensor, field_type: FieldType) -> torch.Tensor:
@@ -157,7 +144,7 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
             if isinstance(value, torch.Tensor):
                 if len(value.shape) == 2:
                     input[measurement] = self.state_type(state)
-                elif len(value.shape) == 3:
+                elif len(value.shape) == 3:  # [batch, time, state_dim] -> [batch * time, state_dim]
                     geom_value = torch.reshape(value, (-1, value.shape[-1]))
                     input[measurement] = self.state_type(geom_value)
             elif isinstance(state, GeometricTensor):

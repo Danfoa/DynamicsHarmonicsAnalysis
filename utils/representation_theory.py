@@ -2,7 +2,7 @@ import functools
 from collections import OrderedDict
 
 import numpy as np
-from escnn.group import Representation, directsum
+from escnn.group import Group, Representation, directsum
 from morpho_symm.groups.isotypic_decomposition import cplx_isotypic_decomposition
 
 def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Representation]:
@@ -70,3 +70,13 @@ def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Represen
     new_rep.supported_nonlinearities = functools.reduce(set.intersection, iso_supported_nonlinearities)
     new_rep.attributes['isotypic_reps'] = ordered_isotypic_reps
     return new_rep, rep.change_of_basis
+
+
+def isotypic_basis(representation: Representation, multiplicity: int = 1, prefix=''):
+    rep, _ = identify_isotypic_spaces(representation)
+
+    iso_reps = OrderedDict()
+    for iso_irrep_id, reg_rep_iso in rep.attributes['isotypic_reps'].items():
+        iso_reps[iso_irrep_id] = directsum([reg_rep_iso] * multiplicity,
+                                           name=f"{prefix}_IsoSpace{iso_irrep_id}")
+    return iso_reps  # Dict[key:id_space -> value: rep_iso_space]

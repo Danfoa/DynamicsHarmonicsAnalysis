@@ -107,7 +107,7 @@ if __name__ == "__main__":
     # Build a single DoF pendulum from the double pendulum model by fixing elbow joint
 
     pendulum_rw = double_pendulum_rw.buildReducedRobot(list_of_joints_to_lock=[2])
-    model = pendulum_rw.model
+    model = pendulum_rw.dp_net
 
     # Crocoddyl state and actuation
     state = crocoddyl.StateMultibody(model)
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     train_color, test_color, val_color = (0, 0.0, 0.0, 1.), (0.218, 0.752, 0.780, 1.), (1.00, 0.784, 0.190, 1.)
     for color, trajs in zip((train_color, test_color, val_color), (train_trajs, val_trajs, test_trajs)):
         for i, traj in enumerate(trajs):
-            fig, axs = plotOCSolution(xs=traj["states"], us=traj["ctrls"], xs_des=traj_des, robot_model=pendulum_rw.model,
+            fig, axs = plotOCSolution(xs=traj["states"], us=traj["ctrls"], xs_des=traj_des, robot_model=pendulum_rw.dp_net,
                                       show=False, dt=dt, fig=fig, color=color, markersize=0, plot_area=False)
             fig.suptitle(f"{robot_name} {trajType} \n"
                          f"Nodes: {n_traj_nodes}, dt: {dt}, train:{len(train_trajs)}-test:{len(test_trajs)}-"

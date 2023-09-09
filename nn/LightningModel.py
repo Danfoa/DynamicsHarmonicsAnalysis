@@ -3,6 +3,7 @@ import time
 from typing import Any, Union, Callable, Optional
 
 import numpy as np
+import plotly.graph_objs
 import torch
 
 import logging
@@ -48,6 +49,9 @@ class LightningModel(LightningModule):
 
     def set_model(self, model: MarkovDynamicsModule):
         self.model = model
+        if hasattr(model, 'eval_metrics'):
+            self.test_metrics_fn = model.eval_metrics
+            self.val_metrics_fn = model.eval_metrics
 
     def forward(self, batch):
         inputs = self._batch_unpack_fn(batch)
@@ -58,8 +62,8 @@ class LightningModel(LightningModule):
         outputs = self.model(**batch, n_steps=n_steps)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
-        self.log("train/loss", loss, prog_bar=False)
-        self.log_metrics(metrics, prefix="train/", batch_size=self._batch_size)
+        self.log("loss/train", loss, prog_bar=False)
+        self.log_metrics(metrics, sufix="train", batch_size=self._batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -67,12 +71,8 @@ class LightningModel(LightningModule):
         outputs = self.model(**batch, n_steps=n_steps)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
-        if self.val_metrics_fn is not None:
-            val_metrics = self.val_metrics_fn(outputs, batch)
-            metrics.update(val_metrics)
-
-        self.log("val/loss", loss, prog_bar=False)
-        self.log_metrics(metrics, prefix="val/", batch_size=self._batch_size)
+        self.log("loss/val", loss, prog_bar=False)
+        self.log_metrics(metrics, sufix="val", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def test_step(self, batch, batch_idx):
@@ -81,12 +81,8 @@ class LightningModel(LightningModule):
 
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
 
-        if self.val_metrics_fn is not None:
-            test_metrics = self.test_metrics_fn(outputs, batch)
-            metrics.update(test_metrics)
-
-        self.log("test/loss", loss, prog_bar=False)
-        self.log_metrics(metrics, prefix="test/", batch_size=self._batch_size)
+        self.log("loss/test", loss, prog_bar=False)
+        self.log_metrics(metrics, sufix="test", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def predict_step(self, batch, batch_idx, **kwargs):
@@ -97,6 +93,19 @@ class LightningModel(LightningModule):
 
     def on_train_epoch_end(self) -> None:
         self.log('time_per_epoch', time.time() - self._epoch_start_time, prog_bar=False, on_epoch=True)
+
+        if self.val_metrics_fn is not None and self.global_step > 0:
+            with torch.no_grad():
+                batch = next(iter(self.trainer.datamodule.train_dataloader()))
+                n_steps = batch['next_state'].shape[1]
+                outputs = self.model(**batch, n_steps=n_steps)
+                figs, metrics = self.val_metrics_fn(**outputs, **batch)
+
+                if metrics is not None:
+                    self.log_metrics(metrics, sufix="train", batch_size=self._batch_size)
+                if figs is not None:
+                    self.log_figures(figs, sufix="train")
+
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         # Distributions have to be logged manually. Why keep using Lightning ? :(
@@ -121,17 +130,6 @@ class LightningModel(LightningModule):
         hparams = flatten_dict(self._run_hps)
         if hasattr(self.model, "get_hparams"):
             hparams.update(flatten_dict(self.model.get_hparams()))
-        # Get the labels of metrics
-        if self.logger:
-            metrics = {"val/loss": 0, "test/loss": 0, "train/loss": 0}
-            if callable(getattr(self.model, 'get_metric_labels', None)):
-                metric_labels = self.model.get_metric_labels()
-                for k in metric_labels:
-                    metrics[f"test/{k}"] = 0
-                    metrics[f"val/{k}"] = 0
-            else:
-                log.warning(f"Model does not implement `get_metric_labels` function. Only default metrics "
-                            f"{list(metrics.keys())} will be logged to tensorboard hyperparam metrics")
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
@@ -147,33 +145,57 @@ class LightningModel(LightningModule):
                 ckpt_path.unlink()
                 log.info(f"Removing last ckpt {ckpt_path} from successful training run.")
 
+    def on_validation_start(self) -> None:
+        if hasattr(self.model, "approximate_transfer_operator") and self.global_step > 0:
+            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+
     def on_validation_end(self) -> None:
         self.log_distribution(flush=True)
+
+        if self.val_metrics_fn is not None and self.global_step > 0:
+            with torch.no_grad():
+                batch = next(iter(self.trainer.datamodule.val_dataloader()))
+                n_steps = batch['next_state'].shape[1]
+                val_outputs = self.model(**batch, n_steps=n_steps)
+                figs, metrics = self.val_metrics_fn(**val_outputs, **batch)
+
+                if metrics is not None:
+                    self.log_metrics(metrics, sufix="val", batch_size=self._batch_size)
+                if figs is not None:
+                    self.log_figures(figs, sufix="val")
 
     def on_test_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):
             self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
 
-    def on_validation_start(self) -> None:
-        if hasattr(self.model, "approximate_transfer_operator") and self.global_step > 0:
-            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
-
     def on_test_end(self) -> None:
         self.log_distribution(flush=True)
+
+        if self.test_metrics_fn is not None and self.global_step > 0:
+            with torch.no_grad():
+                batch = next(iter(self.trainer.datamodule.test_dataloader()))
+                n_steps = batch['next_state'].shape[1]
+                outputs = self.model(**batch, n_steps=n_steps)
+                figs, metrics = self.test_metrics_fn(**outputs, **batch)
+
+                if metrics is not None:
+                    self.log_metrics(metrics, sufix="test", batch_size=self._batch_size)
+                if figs is not None:
+                    self.log_figures(figs, sufix="test")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
 
-    def log_metrics(self, metrics: dict, prefix='', batch_size=None):
+    def log_metrics(self, metrics: dict, sufix='', batch_size=None):
         flat_metrics_dic = flatten_dict(metrics)
         for k, v in flat_metrics_dic.items():
-            name = f"{prefix}{k}"
+            name = f"{k}/{sufix}"
             if v.ndim == 0:  # Single scalars.
                 self.log(name, v, prog_bar=False, batch_size=batch_size)
             else:
-                self.log(f"{name}", torch.mean(v), prog_bar=False)
-                # self.log_distribution(name, v, flush=False)
+                self.log(f"{name}", torch.mean(v), prog_bar=False, batch_size=batch_size)
+                self.log_distribution(f"{name}_dist", v, flush=False)
 
     def log_distribution(self, name: Optional[str] = None, value: Optional[torch.Tensor] = None, flush=False):
         wandb_logger = self.logger.experiment
@@ -192,6 +214,12 @@ class LightningModel(LightningModule):
                     logged_dist.append(name)
             for logged_name in logged_dist:
                 del self._log_cache[logged_name]
+
+    def log_figures(self, figs: dict[str, plotly.graph_objs.Figure], sufix=''):
+        """Log plotly figures to wandb."""
+        wandb_logger = self.logger.experiment
+        for fig_name, fig in figs.items():
+            wandb_logger.log({f"{fig_name}/{sufix}": fig, 'trainer/global_step': self.trainer.global_step})
 
     # def on_s
     def get_metrics(self):

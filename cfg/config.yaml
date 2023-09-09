@@ -25,7 +25,7 @@ hydra:
   launcher:
     n_jobs: 1 # ${hydra.sweeper.n_jobs}
   run:
-    dir: ./experiments/${hydra.job.name}/${system.name}-${model.name}/
+    dir: ./experiments/${hydra.job.name}/${system.summary}-${model.summary}/
 
   job:
     # TODO: Reorganize output dir
