@@ -147,7 +147,7 @@ class MLP(torch.nn.Module):
         super().__init__()
         logging.info("Instantiating MLP (PyTorch)")
         self.dim_input, self.dim_output = in_dim, out_dim
-        self.init_mode = init_mode
+        self.init_mode = init_mode if init_mode is not None else "fan_in"
         self.hidden_channels = num_hidden_units
         self.activation = activation if isinstance(activation, list) else [activation] * (num_layers - 1)
 

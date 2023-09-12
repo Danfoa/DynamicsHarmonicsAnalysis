@@ -5,17 +5,15 @@ name: DPNet
 # Model hyperparameters
 equivariant: False
 activation: Identity
-n_layers: 4             # Number MLPs' layers (including input and output layers)
-
+n_layers: 2             # Number MLPs' layers (including input and output layers)
+batch_norm: False       # Something wrong happens when we turn batch norm on. Performance goes to hell.
+bias: False
 # Optimization hyperparameters parameters
 lr: 1e-3
 batch_size: 1024
 
-max_ck_window_length: 3
+max_ck_window_length: ${system.pred_horizon}    # Maximum length of the Chapman-Kolmogorov window
 ck_w: 0.0              # Weight of the Chapman-Kolmogorov regularization term in the loss function
-orthonormal_w: 0.1     # Weight of the orthonormal regularization term in the loss function
+orth_w: 0.1     # Weight of the orthonormal regularization term in the loss function
 
-#eigval_init: "stable"   # Initialization of eigenvalues [stable, ]
-#eigval_constraint: "unconstrained"   # [unconstrained or unit_circle]
-
-summary: equiv:${model.equivariant}-ck_w:${model.ck_w}-orth_w:${model.orthonormal_w}-window:${model.max_ck_window_length}-act:${model.activation}-lr:${model.lr}
+summary: ${model.name}-Equiv:${model.equivariant}-CK_w:${model.ck_w}-Orth_w:${model.orth_w}-Win:${model.max_ck_window_length}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.n_layers}

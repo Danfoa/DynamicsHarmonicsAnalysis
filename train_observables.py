@@ -64,12 +64,17 @@ def main(cfg: DictConfig):
         num_hidden_neurons = max(32, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
+        if cfg.model.equivariant and cfg.model.activation == 'Identity':
+            cfg.model.activation = 'IdentityModule'  # unnecessary change from ESCNN
         activation = class_from_name('escnn.nn' if cfg.model.equivariant else 'torch.nn', cfg.model.activation)
+
         model_agnostic_params = dict(obs_state_dim=obs_state_dim,
-                                     num_encoder_layers=cfg.model.n_layers,
-                                     num_encoder_hidden_neurons=num_hidden_neurons,
+                                     num_layers=cfg.model.n_layers,
+                                     num_hidden_units=num_hidden_neurons,
                                      dt=datamodule.dt,
-                                     activation=activation)
+                                     activation=activation,
+                                     bias=cfg.model.bias,
+                                     batch_norm=cfg.model.batch_norm,)
         if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
                 model = EquivDynamicsAutoEncoder(**model_agnostic_params,
@@ -82,17 +87,19 @@ def main(cfg: DictConfig):
                                    state_type=datamodule.state_field_type,
                                    max_ck_window_length=cfg.model.max_ck_window_length,
                                    ck_w=cfg.model.ck_w,
-                                   orthonormal_w=cfg.model.orthonormal_w)
+                                   orth_w=cfg.model.orth_w)
             else:
                 model = DPNet(**model_agnostic_params,
                               state_dim=datamodule.state_field_type.size,
                               max_ck_window_length=cfg.model.max_ck_window_length,
                               ck_w=cfg.model.ck_w,
-                              orthonormal_w=cfg.model.orthonormal_w)
+                              orth_w=cfg.model.orth_w)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
-        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(10, int(cfg.max_epochs * 0.1)), )
+        log.info(f"Model \n {model}")
+
+        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(50, int(cfg.max_epochs * 0.2)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
@@ -108,9 +115,9 @@ def main(cfg: DictConfig):
 
         # Configure Lightning trainer
         trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
-                          devices='auto',  # 1 if torch.cuda.is_available() and device != 'cpu' else 1,
+                          devices= 1 if torch.cuda.is_available() and device != 'cpu' else 1,
                           logger=wandb_logger,
-                          log_every_n_steps=1,
+                          log_every_n_steps=3,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
                           check_val_every_n_epoch=1,
                           # benchmark=True,

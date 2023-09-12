@@ -11,6 +11,8 @@ import math
 
 from itertools import chain, combinations
 
+from torch import Tensor
+
 
 def powerset(iterable):
     "Return the list of all subsets of the input iterable"
@@ -252,3 +254,39 @@ def format_scientific(text):
         str = str.replace(keyword, '')
     return str
 
+def traj_from_states(state: Tensor, next_state: Tensor) -> Tensor:
+    """
+    Concatenate states and next_states into a trajectory.
+    Args:
+        state: (batch_size, state_dim)
+        next_state: (batch_size, state_dim) or (batch_size, time, state_dim)
+
+    Returns:
+        state_trajectory: (batch_size, time, state_dim)
+    """
+
+    if len(state.shape) == 2:
+        state = torch.unsqueeze(state, dim=1)
+    if len(next_state.shape) == 2:
+        next_state = torch.unsqueeze(next_state, dim=1)
+
+    if next_state is not None:
+        state_trajectory = torch.cat([state, next_state], dim=1)
+    else:
+        state_trajectory = state
+
+    return state_trajectory
+
+def states_from_traj(state_trajectory: Tensor) -> Tensor:
+    """
+    Split a trajectory into states and next_states.
+    Args:
+        state_trajectory: (batch_size, time, state_dim)
+    Returns:
+        state: (batch_size, state_dim)
+        next_state: (batch_size, state_dim)
+    """
+    assert len(state_trajectory.shape) == 3, f"{state_trajectory.shape} - Expected (batch_size, time, state_dim)"
+    state = state_trajectory[:, 0, :]
+    next_state = state_trajectory[:, 1:, :]
+    return state, next_state

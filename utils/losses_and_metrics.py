@@ -3,7 +3,6 @@ import logging
 from functools import reduce
 from typing import Optional
 
-import numpy as np
 import torch
 from escnn.group import Representation
 
@@ -288,11 +287,10 @@ def compute_chain_spectral_scores(Cov: torch.Tensor, window_size: Optional[int] 
 
 def compute_chain_projection_scores(Cov: torch.Tensor, window_size: Optional[int] = None, debug: bool = False):
     """ Compute the projection scores using the cross-covariance operators between distinct time steps.
-
     Args:
         Cov: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing in all empirical covariance
          operators between states in a trajectory of length `time_horizon`. Each entry of the tensor is assumed to be:
-         Cov_t_dt[i, j] = Cov(i, j) ∀ i, j in [0, time_horizon], j >= i.
+         Cov[i, j] = Cov(i, j) ∀ i, j in [0, time_horizon], j >= i.
         debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
     Returns:
         projection_scores: (time_horizon, time_horizon) Tensor containing the projection scores between all pairs of
@@ -300,25 +298,34 @@ def compute_chain_projection_scores(Cov: torch.Tensor, window_size: Optional[int
     """
     assert (len(Cov.shape) == 4 and Cov.shape[0] == Cov.shape[1]
             and Cov.shape[2] == Cov.shape[3]), f"Expected Cov of shape (T, T, state_dim, state_dim)"
-    time_horizon = Cov.shape[0]
+    time_horizon, state_dim = Cov.shape[0], Cov.shape[-1]
+    pred_horizon = time_horizon - 1
     dtype, device = Cov.dtype, Cov.device
 
     projection_scores = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
     # Compute the norm of the diagonal of the covariance matrices is a single parallel operation.
     Cov_t = Cov[range(time_horizon), range(time_horizon)]
-    Cov_t_inv = torch.linalg.pinv(Cov_t, hermitian=True)
+    epsilon = 1e-6 * torch.eye(state_dim, device=Cov.device, dtype=Cov.dtype)
+    Cov_t = Cov_t + epsilon
+    Cov_t_inv = batch_matrix_sqrt_inv(Cov_t, epsilon=1e-5)
 
-    for ts in range(time_horizon):
-        for te in range(ts + 1, min(time_horizon, window_size + ts)):
-            projection_scores[ts, te] = torch.linalg.matrix_norm(
-                Cov_t_inv[ts] @ Cov[ts, te] @ Cov_t_inv[te], ord='fro') ** 2
+    for ts in range(pred_horizon):
+        max_dt = min(time_horizon - ts, window_size + 1)
+        # Compute C_ts,ts^-1/2 @ C_ts,ts+i   |  i in [1, min(time_horizon, window_size)]
+        C_ts_ts_dt = Cov[ts, ts + 1:ts + max_dt]
+        intermediate = torch.matmul(Cov_t_inv[ts], C_ts_ts_dt)
+        # Compute C_ts,ts^-1/2 @ C_ts,ts+i @ C_ts+i,ts+i^-1/2   |  i in [1, min(time_horizon, window_size)]
+        correlation_matrix = torch.matmul(intermediate, Cov_t_inv[ts + 1:ts + max_dt])
+
+        projection_scores[ts, ts + 1: ts + max_dt] = torch.linalg.matrix_norm(correlation_matrix, ord='fro') ** 2
 
     if debug:
-        for ts in range(time_horizon):
-            for te in range(ts + 1, min(time_horizon, window_size + ts)):
+        for ts in range(pred_horizon):
+            for te in range(ts + 1, min(time_horizon, window_size + ts + 1)):
                 exp = projection_scores[ts, te]
-                real = compute_projection_score(cov_x=Cov_t[ts], cov_y=Cov_t[te], cov_xy=Cov[ts, te])
-                # assert torch.abs((exp - real) / real) < 0.1, f"Projection scores do not match {exp}!={real}"
+                correlation_matrix = Cov_t_inv[ts] @ Cov[ts, te] @ Cov_t_inv[te]
+                real = torch.linalg.matrix_norm(correlation_matrix, ord='fro') ** 2
+                assert torch.abs((exp - real) / real) < 0.1, f"Projection scores do not match {exp}!={real}"
 
     return projection_scores
 
@@ -374,6 +381,8 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
     # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
     # spectral_scores[t, t+d] := ||Cov(t, t+d)||^2_HS / (||Cov(t)|| ||Cov(t)+d||)   |
     #   t in [0, pred_horizon], d in [0, pred_horizon - t]
+    a = log.level
+    b = logging.DEBUG
     spectral_scores = compute_chain_spectral_scores(Cov=Cov,
                                                     window_size=max_ck_window_length,
                                                     debug=log.level == logging.DEBUG)
@@ -394,6 +403,7 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
     min_steps = 2
     ck_scores_reg = torch.fill(torch.zeros((time_horizon, time_horizon), dtype=dtype, device=device), torch.nan)
 
+
     for t in range(0, time_horizon - min_steps):  # ts ∈ [# 0, time_horizon - 2]
         max_dt = min(time_horizon - t, max_ck_window_length + 1)
         for dt in range(min_steps, max_dt):
@@ -401,33 +411,62 @@ def obs_state_space_metrics(obs_state: torch.Tensor,
             assert not torch.isnan(s_ck_scores), f"NaN in spectral_scores_reg[{t}, {t + 1: t + dt}]"
             ck_scores_reg[t, t + dt] = s_ck_scores - ck_w * ck_regularization[t, t + dt]
 
+    # Obtain the matrix (T, max_ck_window_length) of spectral scores for all possible dt transitions.
+    # spectral_score_t = torch.fill(
+    #     torch.zeros((pred_horizon, max_ck_window_length - 1), dtype=dtype, device=device), torch.nan)
+    # projection_score_t = torch.fill(torch.zeros_like(spectral_score_t), torch.nan)
+    # for n_steps in range(1, max_ck_window_length):
+    #     # Spectral scores for transitions of `n_steps`
+    #     n_steps_s_scores = torch.diagonal(spectral_scores, offset=n_steps)
+    #     n_steps_p_scores = torch.diagonal(projection_scores, offset=n_steps)
+    #     spectral_score_t[:len(n_steps_s_scores), n_steps - 1] = n_steps_s_scores
+    #     projection_score_t[:len(n_steps_p_scores), n_steps - 1] = n_steps_p_scores
+
     # Useful to debug the expected sparsity pattern of the matrix.
     # spectral_score_np = spectral_scores.detach().cpu().numpy()
+    # spectral_score_t_np = spectral_score_t.detach().cpu().numpy()
+    # projection_score_t_np = projection_score_t.detach().cpu().numpy()
     # spectral_score_reg_np = spectral_scores_reg.detach().cpu().numpy()
     # ck_reg_np = ck_regularization.detach().cpu().numpy()
     # ck_scores_reg_np = ck_scores_reg.detach().cpu().numpy()
-
+    # a = torch.nanmean(spectral_score_t, dim=0, keepdim=True)      # (batch, time)
     return dict(orth_reg=reg_orthonormal,
                 ck_reg=ck_regularization,
+                ck_score=ck_scores_reg,
                 spectral_score=spectral_scores,
                 projection_score=projection_scores,
-                ck_score=ck_scores_reg)
+                # projection_score_t=torch.nanmean(projection_score_t, dim=0, keepdim=True),  # (batch, time)
+                # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)       # (batch, time)
+                )
 
 
 def forecasting_loss_and_metrics(
-        state_gt: torch.Tensor, state_pred: torch.Tensor, prefix='') -> (torch.Tensor, dict[str, torch.Tensor]):
+        state_gt: torch.Tensor, state_pred: torch.Tensor) -> (torch.Tensor, dict[str, torch.Tensor]):
     # Compute state squared error over time and the infinite norm of the state dimension over time.
     l2_loss = torch.norm(state_gt - state_pred, p=2, dim=-1)
-    # linf_loss = torch.norm(state_gt - state_pred, p=torch.inf, dim=-1)
     time_steps = state_gt.shape[1]
     metrics = {}
-    if time_steps > 4:
-        # Calculate the average prediction error in [25%,50%,75%] of the prediction horizon.
-        for quartile in [.25, .5, .75]:
-            stop_idx = int(quartile * time_steps)
-            l2_loss_quat = l2_loss[:, :stop_idx].mean(dim=-1)
-            metrics[f'{prefix}pred_loss_{int(quartile * 100):d}%'] = l2_loss_quat.mean()
-    # pred_horizon = time_steps * self.dt
-    # metrics.update(linf_loss=linf_loss.mean())
-    a = l2_loss.detach().cpu().numpy()
+    metrics['pred_loss_t'] = l2_loss
     return l2_loss.mean(), metrics
+
+
+def batch_matrix_sqrt_inv(C, epsilon=1e-10):
+    # Perform batched eigenvalue decomposition
+    eigenvalues, Q = torch.linalg.eigh(C)   # C = Q @ Lambda @ Q^T
+
+    # Handle degenerate matrices by adding a small constant
+    eigenvalues = torch.where(
+        eigenvalues < epsilon, eigenvalues, torch.tensor(epsilon, device=C.device)
+    )
+
+    # Compute Lambda^(-1/2)
+    Lambda_inv_sqrt = 1.0 / torch.sqrt(eigenvalues).unsqueeze(-1)
+
+    # Perform batched matrix multiplication to compute C^(-1/2)
+    # Intermediate multiplication: eigenvectors * Lambda_inv_sqrt
+    intermediate = Q * Lambda_inv_sqrt
+
+    # Final multiplication: intermediate @ eigenvectors^T
+    C_inv_sqrt = torch.matmul(intermediate, Q.transpose(-1, -2))
+
+    return C_inv_sqrt

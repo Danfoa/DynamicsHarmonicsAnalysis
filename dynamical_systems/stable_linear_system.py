@@ -150,7 +150,7 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     for isotypic_id, rep_iso in isotypic_reps.items():
         A_iso = stable_lin_dynamics(rep_iso,
                                     time_constant=5,
-                                    stable_eigval_prob=1 / (state_dim + 1),
+                                    stable_eigval_prob=1 ,#/ (state_dim + 1),
                                     min_period=min_period,
                                     max_period=max_period)
         # Enforce G-equivariance
@@ -180,7 +180,7 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     # Compute the empirical time constant of the system:
     time_constants = [1 / np.abs(eigval) for eigval in transient_eigvals]
     slowest_time_constant = np.max(time_constants) if len(transient_eigvals) > 0 else np.inf
-    print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
+    # print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
     return A_G, rep_X, slowest_time_constant
 
 
@@ -265,14 +265,14 @@ if __name__ == '__main__':
 
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
-    max_time_constant = 5  # [s] Maximum time constant of the system.
+    max_time_constant = 6  # [s] Maximum time constant of the system.
     A_G, rep_X, time_constant = stable_equivariant_lin_dynamics(rep_X,
                                                                 time_constant=max_time_constant,
                                                                 min_period=max_time_constant / 3,
                                                                 max_period=max_time_constant * 2)
     time_constant = max_time_constant * 2 if np.isinf(time_constant) else time_constant
     # Generate hyperplanes that constraint outer region of space
-    n_constraints = 2
+    n_constraints = 0
     P_symm, offset = None, None
     if n_constraints > 0:
         normal_planes = np.random.rand(state_dim, n_constraints)

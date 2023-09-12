@@ -13,23 +13,26 @@ device: 0
 num_workers: 0           # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 20
+max_epochs: 200
 
-model: dae
+# Markov Dynamics Model
+model: dpnet
 # Dynamical system
 system: linear_system
 
+#run_name:
 # Hydra configuration _________
 hydra:
   verbose: ${debug}
   launcher:
     n_jobs: 1 # ${hydra.sweeper.n_jobs}
   run:
-    dir: ./experiments/${hydra.job.name}/${system.summary}-${model.summary}/
+    dir: ./experiments/${hydra.job.name}/${system.summary}_${model.summary}_${hydra.job.override_dirname}
+
 
   job:
     # TODO: Reorganize output dir
-    name: ${exp_name}_${system.name}
+    name: ${exp_name}
     num: ${seed}
     chdir: True
     env_set:
@@ -40,12 +43,25 @@ hydra:
         kv_sep: "="
         item_sep: " "
         exclude_keys:
-          - model.batch_size
           - model
           - device
           - exp_name
-          - model.max_epochs
+          - model.max_epochs     # Metrics included in model.summary
           - model.dynamic_regime
+          - model.orthonormal_w
+          - model.ck_w
+          - model.equivariant
+          - model.max_ck_window_length
+          - model.activation
+          - model.lr
+          - model.batch_norm
+          - model.bias
+          - system.state_dim     # Metrics included in system.summary
+          - system.obs_state_dim
+          - system.frames_per_state
+          - system.pred_horizon
+          - system.eval_pred_horizon
+          - system.data_path
           - debug
           - debug_loops
           - seed
@@ -53,7 +69,7 @@ hydra:
 
   sweep:
     dir: ./experiments/${hydra.job.name}/
-    subdir: ${hydra.job.override_dirname}
+    subdir: ${system.summary}_${model.summary}_${hydra.job.override_dirname}
 
   job_logging:
     version: 1
@@ -61,21 +77,21 @@ hydra:
     formatters:
       simple:
         format: '[%(levelname)s][%(name)s] %(message)s'
-    handlers:
-      console:
-        class: logging.StreamHandler
-        formatter: simple
-        stream: ext://sys.stdout
-      file:
-        class: logging.handlers.RotatingFileHandler
-        formatter: simple
-        filename: log.log
-        maxBytes: 2048
-        backupCount: 1
-    root:
-      handlers: [console]
-
-    disable_existing_loggers: false
+#    handlers:
+#      console:
+#        class: logging.StreamHandler
+#        formatter: simple
+#        stream: ext://sys.stdout
+#      file:
+#        class: logging.handlers.RotatingFileHandler
+#        formatter: simple
+#        filename: log.log
+#        maxBytes: 2048
+#        backupCount: 1
+#    root:
+#      handlers: [console]
+#
+#    disable_existing_loggers: false
 
 #  sweeper:
 ##    sampler:

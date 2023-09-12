@@ -3,6 +3,7 @@ import time
 from typing import Any, Union, Callable, Optional
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objs
 import torch
 
@@ -61,18 +62,22 @@ class LightningModel(LightningModule):
         n_steps = batch['next_state'].shape[1]
         outputs = self.model(**batch, n_steps=n_steps)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
+        vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/train", loss, prog_bar=False)
-        self.log_metrics(metrics, sufix="train", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, sufix="train", batch_size=self._batch_size)
+        self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
         n_steps = batch['next_state'].shape[1]
         outputs = self.model(**batch, n_steps=n_steps)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
+        vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/val", loss, prog_bar=False)
-        self.log_metrics(metrics, sufix="val", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, sufix="val", batch_size=self._batch_size)
+        self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def test_step(self, batch, batch_idx):
@@ -80,9 +85,11 @@ class LightningModel(LightningModule):
         outputs = self.model(**batch, n_steps=n_steps)
 
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
+        vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/test", loss, prog_bar=False)
-        self.log_metrics(metrics, sufix="test", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, sufix="test", batch_size=self._batch_size)
+        self.log_vector_metrics(vector_metrics, type_sufix="test", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def predict_step(self, batch, batch_idx, **kwargs):
@@ -94,7 +101,7 @@ class LightningModel(LightningModule):
     def on_train_epoch_end(self) -> None:
         self.log('time_per_epoch', time.time() - self._epoch_start_time, prog_bar=False, on_epoch=True)
 
-        if self.val_metrics_fn is not None and self.global_step > 0:
+        if self.val_metrics_fn is not None:
             with torch.no_grad():
                 batch = next(iter(self.trainer.datamodule.train_dataloader()))
                 n_steps = batch['next_state'].shape[1]
@@ -106,11 +113,10 @@ class LightningModel(LightningModule):
                 if figs is not None:
                     self.log_figures(figs, sufix="train")
 
-
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         # Distributions have to be logged manually. Why keep using Lightning ? :(
         if self.trainer.global_step % self.trainer.log_every_n_steps == 0:
-            self.log_distribution(flush=True)
+            self.log_vector_metrics(flush=True)
 
     def on_fit_start(self) -> None:
         # Ensure datamodule has the function for preprocessing batches and function for computing losses and metrics
@@ -133,7 +139,7 @@ class LightningModel(LightningModule):
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
-        self.log_distribution(flush=True)
+        self.log_vector_metrics(flush=True)
         self.logger.save()
 
         if ckpt_call is not None:
@@ -146,11 +152,11 @@ class LightningModel(LightningModule):
                 log.info(f"Removing last ckpt {ckpt_path} from successful training run.")
 
     def on_validation_start(self) -> None:
-        if hasattr(self.model, "approximate_transfer_operator") and self.global_step > 0:
+        if hasattr(self.model, "approximate_transfer_operator"):
             self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
 
     def on_validation_end(self) -> None:
-        self.log_distribution(flush=True)
+        self.log_vector_metrics(flush=True)
 
         if self.val_metrics_fn is not None and self.global_step > 0:
             with torch.no_grad():
@@ -169,7 +175,7 @@ class LightningModel(LightningModule):
             self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
 
     def on_test_end(self) -> None:
-        self.log_distribution(flush=True)
+        self.log_vector_metrics(flush=True)
 
         if self.test_metrics_fn is not None and self.global_step > 0:
             with torch.no_grad():
@@ -188,32 +194,66 @@ class LightningModel(LightningModule):
         return optimizer
 
     def log_metrics(self, metrics: dict, sufix='', batch_size=None):
-        flat_metrics_dic = flatten_dict(metrics)
-        for k, v in flat_metrics_dic.items():
+        flat_metrics = flatten_dict(metrics)
+        for k, v in flat_metrics.items():
             name = f"{k}/{sufix}"
-            if v.ndim == 0:  # Single scalars.
-                self.log(name, v, prog_bar=False, batch_size=batch_size)
-            else:
-                self.log(f"{name}", torch.mean(v), prog_bar=False, batch_size=batch_size)
-                self.log_distribution(f"{name}_dist", v, flush=False)
+            self.log(name, v, prog_bar=False, batch_size=batch_size)
 
-    def log_distribution(self, name: Optional[str] = None, value: Optional[torch.Tensor] = None, flush=False):
+    @torch.no_grad()
+    def log_vector_metrics(self, metrics: Optional[dict]=None, type_sufix='', batch_size=None, flush=False):
+        if metrics is None and flush is False:
+            return
+
+        flat_metrics = flatten_dict(metrics) if metrics is not None else {}
+        # get the wandb logger
         wandb_logger = self.logger.experiment
-        if self.trainer.global_step > 0 and name is not None and value is not None:
-            if name in self._log_cache:
-                self._log_cache[name] = np.concatenate([self._log_cache[name], value.detach().cpu().numpy()])
-            else:
-                self._log_cache[name] = value.detach().cpu().numpy()
 
-        if flush or self.trainer.global_step == self.trainer.log_every_n_steps:
-            logged_dist = []
-            for name, value in self._log_cache.items():
-                if value.size > 30:
-                    wandb_logger.log({name: wandb.Histogram(self._log_cache[name]),
-                                      'trainer/global_step': self.trainer.global_step})
-                    logged_dist.append(name)
-            for logged_name in logged_dist:
-                del self._log_cache[logged_name]
+        for metric, vector in flat_metrics.items():
+            assert vector.ndim >= 1, f"Vector metric {metric} has to be of shape (n_samples,) or (batch, time_steps)."
+            # Separate the last _sufix part from the key to obtain the metric name.
+            tmp = metric.split('_')   # Average value will use this name, vector metric will use the full name.
+            metric_name, metric_sufix = '_'.join(tmp[:-1]), tmp[-1]
+            
+            metric_log_name = f"{metric}/{type_sufix}"
+            self.log(metric_log_name, torch.mean(vector), prog_bar=False, batch_size=batch_size)
+
+            if metric_name in self._log_cache:
+                self._log_cache[metric_log_name] = np.concatenate([self._log_cache[metric_name], vector.detach().cpu().numpy()], axis=0)
+            else:
+                self._log_cache[metric_log_name] = vector.detach().cpu().numpy()
+
+            full_vector = self._log_cache[metric_log_name]
+            log_vector_metrics_n_steps = self.trainer.log_every_n_steps * 10
+            if self.trainer.global_step % log_vector_metrics_n_steps == 0 or flush:
+                if metric_sufix == "t":  # Vector to be plotted against time
+                    assert full_vector.ndim == 2, f"{metric} Expected (batch, time_steps) vector, got {full_vector.shape}."
+                    dt = self.model.dt if hasattr(self.model, 'dt') else 1
+                    time_horizon = np.arange(full_vector.shape[-1]) * dt
+                    y = np.mean(full_vector, axis=0)
+
+                    df = pd.DataFrame(columns=["time", f"{metric_name}", "epoch"])
+                    df["time"] = time_horizon
+                    df[f"{metric_name}"] = y
+                    df["epoch"] = self.trainer.global_step
+                    # in order to get the history of the lines we have to save the lines per "epoch" in memory
+                    if f"{metric_log_name}-table" not in self._log_cache:
+                        self._log_cache[f"{metric_log_name}-table"] = df
+                    else:
+                        # Append the new epoch trajectory to the table.
+                        df_old = self._log_cache[f"{metric_log_name}-table"]
+                        self._log_cache[f"{metric_log_name}-table"] = pd.concat([df_old, df], axis=0)
+                        df = self._log_cache[f"{metric_log_name}-table"]
+
+                    table = wandb.Table(dataframe=df)
+                    line_2D = wandb.plot.line(table,"time", f"{metric_name}", title=f"{metric}/{type_sufix}")
+                    wandb_logger.log({f"{metric}/{type_sufix}": line_2D,
+                                      "trainer/global_step":    self.trainer.global_step})
+
+                elif metric_sufix == "dist":  # Distribution to be logged as a histogram.
+                    wandb_logger.log({f"{metric}/{type_sufix}": wandb.Histogram(full_vector),
+                                      'trainer/global_step':    self.trainer.global_step})
+
+                    self._log_cache.pop(metric_log_name)
 
     def log_figures(self, figs: dict[str, plotly.graph_objs.Figure], sufix=''):
         """Log plotly figures to wandb."""
@@ -227,3 +267,18 @@ class LightningModel(LightningModule):
         items = super().get_metrics()
         items.pop("v_num", None)
         return items
+
+    def separate_vector_scalar_metrics(self, metrics: dict):
+        vector_metrics = []
+        scalar_metrics = []
+
+        for k, v in metrics.items():
+            if len(v.shape) >= 1:  # Metric to be plotted against time or in a histogram.
+                vector_metrics.append(k)
+            else:
+                scalar_metrics.append(k)
+
+        vector_metrics = {k: v for k, v in metrics.items() if k in vector_metrics}
+        scalar_metrics = {k: v for k, v in metrics.items() if k in scalar_metrics}
+
+        return vector_metrics, scalar_metrics
