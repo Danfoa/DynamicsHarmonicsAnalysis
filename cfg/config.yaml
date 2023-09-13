@@ -48,7 +48,7 @@ hydra:
           - exp_name
           - model.max_epochs     # Metrics included in model.summary
           - model.dynamic_regime
-          - model.orthonormal_w
+          - model.orth_w
           - model.ck_w
           - model.equivariant
           - model.max_ck_window_length
@@ -56,6 +56,8 @@ hydra:
           - model.lr
           - model.batch_norm
           - model.bias
+          - model.single_obs_space
+          - model.use_spectral_score
           - system.state_dim     # Metrics included in system.summary
           - system.obs_state_dim
           - system.frames_per_state

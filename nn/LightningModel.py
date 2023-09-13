@@ -223,7 +223,7 @@ class LightningModel(LightningModule):
                 self._log_cache[metric_log_name] = vector.detach().cpu().numpy()
 
             full_vector = self._log_cache[metric_log_name]
-            log_vector_metrics_n_steps = self.trainer.log_every_n_steps * 10
+            log_vector_metrics_n_steps = self.trainer.log_every_n_steps * 20
             if self.trainer.global_step % log_vector_metrics_n_steps == 0 or flush:
                 if metric_sufix == "t":  # Vector to be plotted against time
                     assert full_vector.ndim == 2, f"{metric} Expected (batch, time_steps) vector, got {full_vector.shape}."

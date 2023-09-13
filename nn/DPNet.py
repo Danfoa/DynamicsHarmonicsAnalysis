@@ -51,6 +51,8 @@ class DPNet(torch.nn.Module):
         max_ck_window_length: int = 6,
         ck_w: float = 0.1,
         orth_w: float = 0.1,
+        use_spectral_score: bool = True,
+        single_obs_space: bool = False,
         dmd_algorithm: Optional[DmdSolver] = None,
         dt: float = 1.0,
         batch_norm: bool = True,
@@ -68,6 +70,8 @@ class DPNet(torch.nn.Module):
         self.ck_w = ck_w
         self.orth_w = orth_w
         self.dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else self._full_rank_lstsq
+        self.use_spectral_score = use_spectral_score
+        self.single_obs_space = single_obs_space
 
         self.obs_state_fn = self.build_obs_fn(num_layers=num_layers,
                                               activation=activation,
@@ -163,38 +167,33 @@ class DPNet(torch.nn.Module):
             pred_next_obs_state=pred_next_obs_state,
         )
 
-    def compute_loss_and_metrics(
-        self,
-        obs_state: Tensor,
-        next_obs_state: Tensor,
-        obs_state_prime: Optional[Tensor] = None,
-        next_obs_state_prime: Optional[Tensor] = None,
-        pred_next_obs_state: Optional[Tensor] = None,
-        state: Optional[Tensor] = None,
-        pred_state: Optional[Tensor] = None,
-        next_state: Optional[Tensor] = None,
-        pred_next_state: Optional[Tensor] = None,
-    ) -> (Tensor, dict[str, Tensor]):
+    def compute_loss_and_metrics(self,
+                                 obs_state: Tensor,
+                                 next_obs_state: Tensor,
+                                 obs_state_prime: Optional[Tensor] = None,
+                                 next_obs_state_prime: Optional[Tensor] = None,
+                                 pred_next_obs_state: Optional[Tensor] = None,
+                                 state: Optional[Tensor] = None,
+                                 pred_state: Optional[Tensor] = None,
+                                 next_state: Optional[Tensor] = None,
+                                 pred_next_state: Optional[Tensor] = None
+                                 ) -> (Tensor, dict[str, Tensor]):
+
+        obs_state_traj = traj_from_states(obs_state, next_obs_state)
+        obs_state_traj_prime = traj_from_states(obs_state_prime, next_obs_state_prime)
+
+        if self.single_obs_space:
+            obs_state_traj_prime = None
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
-        obs_space_metrics = obs_state_space_metrics(
-            obs_state=obs_state,
-            next_obs_state=next_obs_state,
-            representation=None,
-            max_ck_window_length=self.max_ck_window_length,
-            ck_w=self.ck_w
-            )
+        obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
+                                                    obs_state_traj_prime=obs_state_traj_prime,
+                                                    max_ck_window_length=self.max_ck_window_length)
 
-        non_nans = lambda x: torch.logical_not(torch.isnan(x))
-        for metric, vals in obs_space_metrics.items():
-            if torch.any(torch.isnan(vals)):
-                obs_space_metrics[metric] = vals[non_nans(vals)]
-
-        loss = self.compute_loss(
-            spectral_score=torch.mean(obs_space_metrics["spectral_score"]),
-            ck_score=torch.mean(obs_space_metrics["ck_score"]),
-            orth_reg=torch.mean(obs_space_metrics["orth_reg"]),
-        )
+        loss = self.compute_loss(spectral_score=obs_space_metrics["spectral_score"],
+                                 corr_score=obs_space_metrics["corr_score"],
+                                 ck_reg=obs_space_metrics["ck_reg"],
+                                 orth_reg=obs_space_metrics["orth_reg"])
 
         # Include prediction metrics if available
         if pred_next_obs_state is not None:
@@ -218,12 +217,34 @@ class DPNet(torch.nn.Module):
 
         return loss, obs_space_metrics
 
-    def compute_loss(self, spectral_score, ck_score, orth_reg):
-        if self.ck_w == 0.0 or np.isclose(self.ck_w, 0.0):
-            loss = -(spectral_score - self.orth_w * orth_reg)
-        else:
-            loss = -(ck_score - self.orth_w * orth_reg)
+    def compute_loss(self, spectral_score: Tensor, corr_score: Tensor, ck_reg: Tensor, orth_reg: Tensor):
+        """ Compute DPNet loss term.
 
+        Args:
+            spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps separated
+             apart by a shift of `dt` [steps/time]. That is:
+                spectral_score[dt - 1] = avg(||Cov(x_i, x'_i+dt)||_HS^2/(||Cov(x_i, x_i)||_2*||Cov(x'_i+dt, x'_i+dt)||_2))
+                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+            corr_score: (time_horizon - 1) Tensor containing the correlation scores between time steps separated
+             apart by a shift of `dt` [steps/time]. That is:
+                corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
+                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+            orth_reg: (time_horizon) Tensor containing the orthonormality regularization term for each time step.
+                That is orth_reg[t] = || Cov(t,t) - I ||_2
+            ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
+                ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
+                ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
+        Returns:
+            loss: Scalar tensor containing the DPNet loss.
+        """
+
+        transfer_inv_score = spectral_score if self.use_spectral_score else corr_score
+
+        score = torch.mean(transfer_inv_score) - (self.ck_w * torch.mean(ck_reg)) - (self.orth_w * torch.mean(orth_reg))
+
+        # Apply the orthogonal regularization term
+        score = score - self.orth_w * torch.mean(orth_reg)
+        loss = -score  # Change sign to minimize the loss and maximize the score.
         assert not torch.isnan(loss), f"Loss is NaN."
         return loss
 
@@ -302,13 +323,13 @@ class DPNet(torch.nn.Module):
         # Approximate a linear decoder from "main" observable space to state space.
         X = obs_state.T                      # (obs_state_dim, n_samples)
         Y = state.T                        # (state_dim, n_samples)
-        rank_X = torch.linalg.matrix_rank(X)
-        rank_Y = torch.linalg.matrix_rank(Y)
+        # rank_X = torch.linalg.matrix_rank(X)
+        # rank_Y = torch.linalg.matrix_rank(Y)
         self.inverse_projector = self._full_rank_lstsq(X, Y)
         Y_pred = self.inverse_projector @ X
-        error = torch.mean(torch.abs(Y - Y_pred), dim=-1)
-        rank_inv_proj = torch.linalg.matrix_rank(Y)
-        print("Rank of inv Proj: ", rank_inv_proj)
+        # error = torch.mean(torch.abs(Y - Y_pred), dim=-1)
+        # rank_inv_proj = torch.linalg.matrix_rank(Y)
+        # print("Rank of inv Proj: ", rank_inv_proj)
 
 
     @staticmethod
@@ -372,6 +393,7 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     log.setLevel(logging.DEBUG)
+    log.level = logging.DEBUG
     # Find all dynamic systems recordings
     path_to_data /= "linear_system"
     path_to_dyn_sys_data = set(
@@ -409,7 +431,7 @@ if __name__ == "__main__":
         num_layers=num_encoder_layers,
         num_hidden_units=num_encoder_hidden_neurons,
         max_ck_window_length=max_ck_window_length,
-        activation=torch.nn.Tanh,
+        activation=torch.nn.Identity,
         bias=True,
         batch_norm=False,
         # init_mode='normal.1',

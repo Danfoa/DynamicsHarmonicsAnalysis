@@ -61,7 +61,7 @@ def main(cfg: DictConfig):
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
         obs_state_dim = math.ceil(cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
-        num_hidden_neurons = max(32, 2 * obs_state_dim)
+        num_hidden_neurons = obs_state_dim # max(32, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
         if cfg.model.equivariant and cfg.model.activation == 'Identity':
@@ -93,7 +93,9 @@ def main(cfg: DictConfig):
                               state_dim=datamodule.state_field_type.size,
                               max_ck_window_length=cfg.model.max_ck_window_length,
                               ck_w=cfg.model.ck_w,
-                              orth_w=cfg.model.orth_w)
+                              orth_w=cfg.model.orth_w,
+                              use_spectral_score=cfg.model.use_spectral_score,
+                              single_obs_space=cfg.model.single_obs_space)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 

@@ -180,7 +180,7 @@ class EquivDPNet(DPNet):
                                                    time_horizon=pred_horizon + 1)
 
         loss = self.compute_loss(spectral_score=obs_space_metrics['spectral_score'],
-                                 ck_score=obs_space_metrics['ck_score'],
+                                 ck_reg=obs_space_metrics['ck_score'],
                                  orth_reg=obs_space_metrics['orth_reg'])
 
         # Include prediction metrics if available
