@@ -9,28 +9,29 @@ from torch import Tensor
 log = logging.getLogger(__name__)
 
 
-def compute_projection_score(cov_x, cov_y, cov_xy):
-    """ Computes the projection score of the covariance matrices. Maximizing this score is equivalent to maximizing
+def compute_correlation_score(cov_x, cov_y, cov_xy):
+    """ Computes the correlation score of the covariance matrices. Maximizing this score is equivalent to maximizing
     the correlation between x and y
 
-    The projection score is defined as:
-        P := ( ||cov_x_inv @ cov_xy @ cov_y_inv||_HS )^2
+    The correlation score is defined as:
+        P := ( ||cov_x^1/2 @ cov_xy @ cov_y^1/2 ||_HS )^2
     Args:
         cov_x: (time, features, features) or (features, features)
         cov_y: (time, features, features) or (features, features)
         cov_xy: (time, features, features) or (features, features)
 
     Returns:
-        Score value: (time, 1) or (1,) depending on the input shape.
+        Correlation Score value: (time, 1) or (1,) depending on the input shape.
     """
-    score = torch.linalg.lstsq(cov_x, cov_xy).solution  # cov_x_inv @ cov_xy
-    score = score @ torch.linalg.pinv(cov_y, hermitian=True)  # cov_x_inv @ cov_xy @ cov_y_inv
-    score = torch.linalg.matrix_norm(score, ord='fro') ** 2  # ||cov_x_inv @ cov_xy @ cov_y_inv||_HS^2
-    return score
-
+    Cov_X_inv = torch.linalg.pinv(cov_x, hermitian=True)
+    Cov_Y_inv = torch.linalg.pinv(cov_y, hermitian=True)
+    M = Cov_X_inv @ cov_xy @ Cov_Y_inv @ cov_xy.transpose(-1, -2)
+    # Compute the trace of the matrix in batched form.
+    traces = M.diagonal(offset=0, dim1=-1, dim2=-2).sum(dim=-1)
+    return traces
 
 def compute_spectral_score(cov_x, cov_y, cov_xy):
-    """ Computes the spectral score of the covariance matrices. This is a looser bound on the projection score, but a
+    """ Computes the spectral score of the covariance matrices. This is a looser bound on the correlation score, but a
     more numerically stable metric, since it avoids computing the inverse of the covariance matrices.
 
     The spectral score is defined as:
@@ -60,12 +61,6 @@ def regularization_orthonormality(cov_x):
     identity = torch.eye(cov_x.shape[-1], device=cov_x.device)
     reg = torch.linalg.matrix_norm(identity - cov_x, ord='fro', dim=(-2, -1))
     return reg
-
-
-def regularization_2(cov_x, cov_y, rank):
-    r1 = rank + torch.trace(cov_x @ torch.log(cov_x.abs()) - cov_x)
-    r2 = rank + torch.trace(cov_y @ torch.log(cov_y.abs()) - cov_y)
-    return (r1 + r2).mean()
 
 
 def covariance(X: Tensor, Y: Tensor):
@@ -272,6 +267,8 @@ def chapman_kolmogorov_regularization(CCov: Tensor, ck_window_length: int = 3, d
 
 
 def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor,
+                                       Cov_sqrt_inv: Optional[Tensor] = None,
+                                       Cov_prime_sqrt_inv: Optional[Tensor] = None,
                                        window_size: Optional[int] = None, debug: bool = False):
     """ Compute the spectral and correlation scores using the cross-covariance operators between distinct time steps.
 
@@ -297,9 +294,10 @@ def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Ten
             corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
              | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
     """
-    assert (len(CCov.shape) == 4 and CCov.shape[0] == CCov.shape[1]
-            and CCov.shape[2] == CCov.shape[3]), f"Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
-    assert len(Cov.shape) == 3 and Cov.shape[0] == Cov.shape[1], f"Expected Cov of shape (T, state_dim, state_dim)"
+    assert (len(CCov.shape) == 4 and CCov.shape[0] == CCov.shape[1] and CCov.shape[2] == CCov.shape[3]), \
+        f"CCov:{CCov.shape}. Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
+    assert len(Cov.shape) == 3 and Cov.shape[-1] == Cov.shape[-2], \
+        f"Cov:{Cov.shape}. Expected Cov of shape (T, state_dim, state_dim)"
     assert Cov.shape == Cov_prime.shape, f"Expected Cov_prime of shape (T, state_dim, state_dim)"
 
     time_horizon = CCov.shape[0]
@@ -311,6 +309,13 @@ def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Ten
     # Compute the HS norm of the Cross-Covariance operators in a single parallel operation.
     # norm_CCov[i, j] = ||Cov(x_i, x'_j)||_HS
     norm_CCov = torch.linalg.matrix_norm(CCov, ord='fro', dim=(-2, -1))
+
+    # Compute Cov(x_t)^-1/2 and Cov(x'_t)^-1/2 in a single parallel operation.
+    if Cov_sqrt_inv is None:
+        Cov_sqrt_inv, _ = batch_matrix_sqrt_inv(Cov, debug=debug)
+        Cov_prime_sqrt_inv, _ = batch_matrix_sqrt_inv(Cov_prime, debug=debug)
+    else:
+        assert Cov_sqrt_inv.shape == Cov.shape and Cov_prime_sqrt_inv.shape == Cov_prime.shape
 
     # Compute all the Spectral scores between time steps separated by `dt`
     # spectral_score[dt - 1] = ||Cov(x_i, x'_i+dt)||_HS^2 / (||Cov(x_i, x_i)||_2 * ||Cov(x'_i+dt, x'_i+dt)||_2) |
@@ -326,14 +331,13 @@ def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Ten
         norm_CovX, norm_CovY, = norm_Cov[cov_X_idx], norm_Cov_prime[cov_Y_idx]
         norm_CovXY = norm_CCov[cov_X_idx, cov_Y_idx]  # Get elements of the `dt` diagonal of the CCov matrix
         spectral_scores_dt = norm_CovXY ** 2 / (norm_CovX * norm_CovY)
-        assert len(
-            spectral_scores_dt) == time_horizon - dt, (f"Expected {time_horizon - dt} scores, "
-                                                       f"got {len(spectral_scores_dt)}")
         spectral_scores.append(spectral_scores_dt)
+
         # Compute Correlation score
-        CovX, CovY = Cov[cov_X_idx], Cov_prime[cov_Y_idx]
+        CovX_sqrt_inv, CovY_sqrt_inv = Cov_sqrt_inv[cov_X_idx], Cov_prime_sqrt_inv[cov_Y_idx]
         CovXY = CCov[cov_X_idx, cov_Y_idx]
-        p_score = compute_projection_score(cov_x=CovX, cov_y=CovY, cov_xy=CovXY)
+        empirical_transfer_op = CovX_sqrt_inv @ CovXY @ CovY_sqrt_inv
+        p_score = torch.linalg.matrix_norm(empirical_transfer_op, ord='fro', dim=(-2, -1)) ** 2
         corr_scores.append(p_score)
 
     if debug:  # Check vectorized operations are equivalent to sequential operations
@@ -347,7 +351,7 @@ def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Ten
                 real = compute_spectral_score(cov_x=covX, cov_y=covY, cov_xy=covXY)
                 assert torch.allclose(exp, real, atol=1e-5), f"Spectral scores do not match {exp}!={real}"
                 exp = p_scores_dt[t]
-                real = compute_projection_score(cov_x=covX, cov_y=covY, cov_xy=covXY)
+                real = compute_correlation_score(cov_x=covX, cov_y=covY, cov_xy=covXY)
                 assert torch.allclose(exp, real, atol=1e-5, rtol=1e-5), f"Correlation scores do not match {exp}!={real}"
 
     # Compute the average spectral score per each dt in [1, min(time_horizon, window_size))
@@ -360,7 +364,7 @@ def compute_chain_spectral_corr_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Ten
 
 def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor,
                                     window_size: Optional[int] = None, debug: bool = False):
-    """ Compute the projection scores using the cross-covariance operators between distinct time steps.
+    """ Compute the correlation scores using the cross-covariance operators between distinct time steps.
     Args:
         CCov: (time_horizon, time_horizon, state_dim, state_dim) Tensor containing all the Cross-Covariance
          empirical operators between the states in the main trajectory and states in the auxiliary trajectory.
@@ -372,7 +376,7 @@ def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor
          time steps on the auxiliary state space. Cov_prime(i) = Cov(x'_i, x'_i) ∀ i in [0, time_horizon]
         debug: (bool) Whether to print debug information on the scores computed. Defaults to False.
     Returns:
-        projection_scores: (time_horizon, time_horizon) Tensor containing the projection scores between all pairs of
+        projection_scores: (time_horizon, time_horizon) Tensor containing the correlation scores between all pairs of
             states i, j in [0, time_horizon], j >= i.
     """
     assert (len(CCov.shape) == 4 and CCov.shape[0] == CCov.shape[1]
@@ -395,7 +399,7 @@ def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor
         CovXY = CCov[cov_X_idx, cov_Y_idx]
         # corr_matrix = CovX_sqrt_inv @ CovXY @ CovY_sqrt_inv
         # corr_score = torch.linalg.matrix_norm(corr_matrix, ord='fro', dim=(-2, -1)) ** 2 / state_dim**2
-        p_score = compute_projection_score(cov_x=CovX, cov_y=CovY, cov_xy=CovXY)
+        p_score = compute_correlation_score(cov_x=CovX, cov_y=CovY, cov_xy=CovXY)
         corr_scores.append(p_score)
 
     if debug:  # Check vectorized operations are equivalent to sequential operations
@@ -405,7 +409,7 @@ def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor
                 covX, covY = Cov[t], Cov_prime[t + dt]
                 covXY = CCov[t, t + dt]
                 exp = s_scores_dt[t]
-                real = compute_projection_score(cov_x=covX, cov_y=covY, cov_xy=covXY)
+                real = compute_correlation_score(cov_x=covX, cov_y=covY, cov_xy=covXY)
                 assert torch.allclose(exp, real, atol=1e-5), f"Spectral scores do not match {exp}!={real}"
 
     # Compute the average spectral score per each dt in [1, min(time_horizon, window_size))
@@ -431,46 +435,57 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
         ck_w: Weight of the Chapman-Kolmogorov regularization term.
     Returns:
         Dictionary containing:
-            - spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps separated
-             apart by a shift of `dt` [steps/time]. That is:
-                spectral_score[dt - 1] = avg(||Cov(x_i, x'_i+dt)||_HS^2/(||Cov(x_i, x_i)||_2*||Cov(x'_i+dt, x'_i+dt)||_2))
-                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
-            - corr_score: (time_horizon - 1) Tensor containing the correlation scores between time steps separated
-             apart by a shift of `dt` [steps/time]. That is:
-                corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
-                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
-            - orth_reg: (time_horizon) Tensor containing the orthonormality regularization term for each time step.
-                That is orth_reg[t] = || Cov(t,t) - I ||_2
-            - ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
-                ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
-                ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
-            - cov_cond_num: (float) Average condition number of the Covariance matrices.
+        - spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps
+        separated
+         apart by a shift of `dt` [steps/time]. That is:
+            spectral_score[dt - 1] = avg(||Cov(x_i, x'_i+dt)||_HS^2/(||Cov(x_i, x_i)||_2*||Cov(x'_i+dt, x'_i+dt)||_2))
+             | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+        - corr_score: (time_horizon - 1) Tensor containing the correlation scores between time steps separated
+         apart by a shift of `dt` [steps/time]. That is:
+            corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
+             | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+        - orth_reg: (time_horizon) Tensor containing the orthonormality regularization term for each time step.
+         That is: orth_reg[t] = || Cov(t,t) - I ||_2
+        - ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
+            ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
+            ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
+        - cov_cond_num: (float) Average condition number of the Covariance matrices.
     """
     debug = log.level == logging.DEBUG  # TODO: remove default debug
     # Compute the empirical covariance and cross-covariance operators, ensuring that operators are equivariant.
-    # Cov[i, j'] := Cov(i, j')  | t in [0, pred_horizon], i,j in [0, pred_horizon], j >= i
+    # CCov[i, j] := Cov(x_i, x'_j)     | i,j in [time_horizon], j > i  # Upper triangular tensor
+    # Cov[t] := Cov(x_t, x_t)          | t in [time_horizon]
+    # Cov_prime[t] := Cov(x'_t, x'_t)  | t in [time_horizon]
     CCov, Cov, Cov_prime = empirical_cov_cross_cov(state_traj=obs_state_traj, state_traj_prime=obs_state_traj_prime,
                                                    representation=representation, cov_window_size=max_ck_window_length,
                                                    debug=debug)
+
+    # Compute Cov(x_t)^-1/2 and Cov(x'_t)^-1/2 in a single parallel operation.
+    Cov_inv_sqrt, cond_num_Cov = batch_matrix_sqrt_inv(Cov, debug=debug)
+    Cov_prime_inv_sqrt, conv_num_Cov_prime = batch_matrix_sqrt_inv(Cov_prime, debug=debug)
+
     # Orthonormality regularization terms for ALL time steps in horizon
     # reg_orthonormal[t] = || Cov(x_i, x_i) - I || | t in [0, pred_horizon]
     orthonormality_Cov = regularization_orthonormality(Cov)
     orthonormality_Cov_prime = regularization_orthonormality(Cov_prime)
     reg_orthonormal = (orthonormality_Cov + orthonormality_Cov_prime) / 2.0
 
-    cond_num_Cov = torch.linalg.cond(torch.cat((Cov, Cov_prime), dim=0), p=2)
+    cond_num_Cov = torch.cat([cond_num_Cov, conv_num_Cov_prime], dim=0).mean()
 
-    # Compute the Projection, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
+    # Compute the Correlation, Spectral and Orthonormality regularization terms for ALL time steps in horizon.
     # spectral_scores[dt - 1] := ||Cov(t, t+dt)||^2_HS / (||Cov(t)|| ||Cov(t+d)||) | dt in [1, time_horizon)
     # corr_scores[dt - 1] := ||Cov(t)^-1 Cov(t, t+dt) Cov(t+d)^-1||^2_HS | dt in [1, time_horizon)
     spectral_scores, corr_scores = compute_chain_spectral_corr_scores(CCov=CCov,
-                                                                      Cov=Cov, Cov_prime=Cov_prime, debug=debug)
+                                                                      Cov=Cov, Cov_prime=Cov_prime,
+                                                                      Cov_sqrt_inv=Cov_inv_sqrt,
+                                                                      Cov_prime_sqrt_inv=Cov_prime_inv_sqrt,
+                                                                      debug=debug)
     if debug:
         assert (corr_scores > spectral_scores).all(), "Correlation scores should be upper bound of spectral scores"
 
     # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
     # ck_regularization[i,j] = || Cov(i, j) - ( Cov(i, i+1), ... Cov(j-1, j) ) ||_2  | j >= i + 2
-    ck_regularization = chapman_kolmogorov_regularization(CCov=CCov,
+    ck_regularization = chapman_kolmogorov_regularization(CCov=CCov, #Cov=Cov, Cov_prime=Cov_prime,
                                                           ck_window_length=max_ck_window_length,
                                                           debug=debug)
 
@@ -478,7 +493,7 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
                 ck_reg=ck_regularization,
                 spectral_score=spectral_scores,
                 corr_score=corr_scores,
-                cov_cond_num=torch.mean(cond_num_Cov),
+                cov_cond_num=cond_num_Cov,
                 # projection_score_t=torch.nanmean(projection_score_t, dim=0, keepdim=True),  # (batch, time)
                 # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)       # (batch, time)
                 )
@@ -494,7 +509,7 @@ def forecasting_loss_and_metrics(
     return l2_loss.mean(), metrics
 
 
-def batch_matrix_sqrt_inv(C, epsilon=None):
+def batch_matrix_sqrt_inv(C, epsilon=None, debug=False):
     """ Compute the inverse square root of a batch of matrices.
     Args:
         C: (batch, d, d) Tensor containing a batch of matrices to compute the inverse square root.
@@ -502,22 +517,38 @@ def batch_matrix_sqrt_inv(C, epsilon=None):
     Returns:
         C_inv_sqrt: (batch, d, d) Tensor containing the inverse square root of the input matrices.
     """
+    dim = C.shape[-1]
     # Perform batched eigenvalue decomposition
     eigenvalues, Q = torch.linalg.eigh(C)  # C = Q @ Lambda @ Q^T
     cond_num = eigenvalues[:, -1] / eigenvalues[:, 0]
     if epsilon is None:
         epsilon = torch.finfo(eigenvalues.dtype).eps
-    # Handle degenerate matrices by adding a small constant
-    eigenvalues = torch.where(eigenvalues > epsilon, eigenvalues, epsilon)
 
-    # Compute Lambda^(-1/2)
-    Lambda_inv_sqrt = 1.0 / torch.sqrt(eigenvalues).unsqueeze(-1)
+    Lambda_inv_sqrt = 1.0 / torch.sqrt(eigenvalues)
 
-    # Perform batched matrix multiplication to compute C^(-1/2)
-    # Intermediate multiplication: eigenvectors * Lambda_inv_sqrt
-    intermediate = Q * Lambda_inv_sqrt
+    # Perform batched matrix multiplication to compute C^(-1/2) = Q @ 1/sqrt(Lambda) @ Q^T
+    C_inv_sqrt = Q @ torch.diag_embed(Lambda_inv_sqrt) @ Q.mT
 
-    # Final multiplication: intermediate @ eigenvectors^T
-    C_inv_sqrt = torch.matmul(intermediate, Q.transpose(-1, -2))
+    # Determine if some matrices are defective.
+    max_eigvals = eigenvalues[:, -1]
+    relevant_eigvals_mask = eigenvalues > (max_eigvals * epsilon).unsqueeze(-1)
+    ranks = relevant_eigvals_mask.sum(dim=-1)
+    defective_mask = ranks < dim
+    # Recompute defective matrix inversion and sqrt by ignoring defective eigenvalues and eigenvectors
+    if defective_mask.any():
+        # Eigvals are sorted in ascending order, so we can just remove the first `dim-rank` dimensions.
+        unique_def_ranks = torch.unique(ranks[defective_mask])
+        for rank in unique_def_ranks:
+            matrix_mask = defective_mask & (ranks == rank)    # Select defective matrices of rank `rank`
+            Q_low_rank = Q[matrix_mask, :, -rank:]            # Select the last `rank` eigenvectors
+            eig_low_rank = eigenvalues[matrix_mask, -rank:]   # Select the last `rank` eigenvalues
+            Lambda_inv_sqrt_low_rank = 1.0 / torch.sqrt(eig_low_rank)
+            C_inv_sqrt[matrix_mask] = Q_low_rank @ torch.diag_embed(Lambda_inv_sqrt_low_rank) @ Q_low_rank.mT
+
+    if debug:
+        C_inv_true = torch.linalg.pinv(C, hermitian=True)
+        C_inv_pred = C_inv_sqrt @ C_inv_sqrt
+        assert torch.allclose(C_inv_true, C_inv_pred, atol=1e-5), \
+            f"Matrix norm error {torch.linalg.matrix_norm(C_inv_true - C_inv_pred, ord='fro', dim=(-2, -1))}"
 
     return C_inv_sqrt, cond_num

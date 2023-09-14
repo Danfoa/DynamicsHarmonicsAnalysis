@@ -62,8 +62,15 @@ class DynamicsDataModule(LightningDataModule):
     def prepare_data(self):
 
         if self.prepared:
-            log.warning("Data preparation called again. Skipping...")
+            self._train_dataset = self._train_dataset.shuffle(buffer_size=self._train_dataset.dataset_size / 2)
+            self._train_dataloader = DataLoader(dataset=self._train_dataset, batch_size=self.batch_size,
+                                                num_workers=self.num_workers,
+                                                persistent_workers=True if self.num_workers > 0 else False,
+                                                collate_fn=self.data_augmentation_collate_fn if self.augment else
+                                                self.collate_fn)
+            log.info(f"Train dataset reshuffled")
             return
+
         start_time = time.time()
         log.info(f"Preparing datasets {self._data_path}")
 
@@ -105,6 +112,10 @@ class DynamicsDataModule(LightningDataModule):
         val_dataset = val_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
 
+        self._train_dataset = train_dataset
+        self._test_dataset = test_dataset
+        self._val_dataset = val_dataset
+
         # Rebuilt the ESCNN representations of measurements _________________________________________________________
         # TODO: Handle dyn systems without symmetries
         G_domain = escnn.group.O3()
@@ -137,7 +148,6 @@ class DynamicsDataModule(LightningDataModule):
 
         self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size,
                                             num_workers=self.num_workers,
-                                            # pin_memory=True,
                                             persistent_workers=True if self.num_workers > 0 else False,
                                             collate_fn=self.data_augmentation_collate_fn if self.augment else
                                             self.collate_fn)

@@ -50,7 +50,8 @@ def main(cfg: DictConfig):
     if not training_done:
         # Load the dynamics dataset.
         data_path = root_path / "data" / cfg.system.data_path
-        device = torch.device("cuda" if torch.cuda.is_available() and cfg.device != "cpu" else "cpu")
+        device = torch.device(f"cuda:{cfg.device}" if torch.cuda.is_available() and cfg.device != "cpu" else "cpu")
+        log.info(f"Configuring to use device {device}")
         datamodule = DynamicsDataModule(data_path,
                                         batch_size=cfg.model.batch_size,
                                         frames_per_step=cfg.system.frames_per_state,
@@ -61,7 +62,7 @@ def main(cfg: DictConfig):
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
         obs_state_dim = math.ceil(cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
-        num_hidden_neurons = obs_state_dim # max(32, 2 * obs_state_dim)
+        num_hidden_neurons = max(32, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
         if cfg.model.equivariant and cfg.model.activation == 'Identity':
@@ -95,13 +96,13 @@ def main(cfg: DictConfig):
                               ck_w=cfg.model.ck_w,
                               orth_w=cfg.model.orth_w,
                               use_spectral_score=cfg.model.use_spectral_score,
-                              single_obs_space=cfg.model.single_obs_space)
+                              aux_obs_space=cfg.model.aux_obs_space)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
         log.info(f"Model \n {model}")
 
-        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(50, int(cfg.max_epochs * 0.2)))
+        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(5, int(cfg.max_epochs * 0.1)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
@@ -117,9 +118,9 @@ def main(cfg: DictConfig):
 
         # Configure Lightning trainer
         trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
-                          devices= 1 if torch.cuda.is_available() and device != 'cpu' else 1,
+                          devices=[cfg.device] if torch.cuda.is_available() and device != 'cpu' else 1,
                           logger=wandb_logger,
-                          log_every_n_steps=3,
+                          log_every_n_steps=1,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
                           check_val_every_n_epoch=1,
                           # benchmark=True,
@@ -139,7 +140,8 @@ def main(cfg: DictConfig):
                                   batch_size=cfg.model.batch_size,
                                   run_hps=cfg.model,
                                   test_epoch_metrics_fn=epoch_metrics_fn,
-                                  val_epoch_metrics_fn=epoch_metrics_fn)
+                                  val_epoch_metrics_fn=epoch_metrics_fn,
+                                  log_figs_every_n_epochs=10)
         pl_model.set_model(model)
         # pl_model.to(device)
         wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)

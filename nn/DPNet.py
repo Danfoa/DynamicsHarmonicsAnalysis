@@ -52,7 +52,7 @@ class DPNet(torch.nn.Module):
         ck_w: float = 0.1,
         orth_w: float = 0.1,
         use_spectral_score: bool = True,
-        single_obs_space: bool = False,
+        aux_obs_space: bool = False,
         dmd_algorithm: Optional[DmdSolver] = None,
         dt: float = 1.0,
         batch_norm: bool = True,
@@ -71,7 +71,7 @@ class DPNet(torch.nn.Module):
         self.orth_w = orth_w
         self.dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else self._full_rank_lstsq
         self.use_spectral_score = use_spectral_score
-        self.single_obs_space = single_obs_space
+        self.aux_obs_space = aux_obs_space
 
         self.obs_state_fn = self.build_obs_fn(num_layers=num_layers,
                                               activation=activation,
@@ -182,7 +182,7 @@ class DPNet(torch.nn.Module):
         obs_state_traj = traj_from_states(obs_state, next_obs_state)
         obs_state_traj_prime = traj_from_states(obs_state_prime, next_obs_state_prime)
 
-        if self.single_obs_space:
+        if not self.aux_obs_space:
             obs_state_traj_prime = None
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
@@ -261,10 +261,14 @@ class DPNet(torch.nn.Module):
                      ) -> (dict[str, Figure], dict[str, Tensor]):
 
         obs_state_traj = traj_from_states(obs_state, next_obs_state).detach().cpu().numpy()
-        pred_obs_state_traj = traj_from_states(obs_state, pred_next_obs_state).detach().cpu().numpy()
-
         state_traj = traj_from_states(state, next_state).detach().cpu().numpy()
-        pred_state_traj = traj_from_states(pred_state, pred_next_state).detach().cpu().numpy()
+
+        if pred_next_obs_state is not None:
+            pred_obs_state_traj = traj_from_states(obs_state, pred_next_obs_state).detach().cpu().numpy()
+            pred_state_traj = traj_from_states(pred_state, pred_next_state).detach().cpu().numpy()
+        else:
+            pred_obs_state_traj = None
+            pred_state_traj = None
 
         fig = plot_two_panel_trajectories(state_trajs=state_traj,
                                           pred_state_trajs=pred_state_traj,
@@ -272,11 +276,15 @@ class DPNet(torch.nn.Module):
                                           pred_obs_state_trajs=pred_obs_state_traj,
                                           dt=self.dt,
                                           n_trajs_to_show=5)
+        if self.obs_state_dim == 3:
+            fig_3ds = plot_system_3D(trajectories=state_traj, secondary_trajectories=pred_state_traj,
+                                     title='state_traj')
+            fig_3do = plot_system_3D(trajectories=obs_state_traj, secondary_trajectories=pred_obs_state_traj,
+                                     title='obs_state')
+            figs = dict(prediction=fig, state=fig_3ds, obs_state=fig_3do)
+        else:
+            figs = dict(prediction=fig)
 
-        fig_3ds = plot_system_3D(trajectories=state_traj[:20], secondary_trajectories=pred_state_traj[:20], title='state_traj')
-        fig_3do = plot_system_3D(trajectories=obs_state_traj[:20], secondary_trajectories=pred_obs_state_traj[:20],
-                                 title='obs_state')
-        figs = dict(prediction=fig, state=fig_3ds, obs_state=fig_3do)
         metrics = None
         return figs, metrics
 
@@ -454,7 +462,7 @@ if __name__ == "__main__":
 
         # Test loss and metrics
         loss, metrics = dp_net.compute_loss_and_metrics(**batch, **out)
-        if i > 1:
+        if i > 50:
             break
     profiler.disable()
 

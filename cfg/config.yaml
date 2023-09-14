@@ -8,7 +8,7 @@ defaults:
 
 # Running hyperparameters
 exp_name: test
-seed: 0
+seed: -1
 device: 0
 num_workers: 0           # Dataloader workers
 debug: False
@@ -38,6 +38,7 @@ hydra:
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: 'false'
       HYDRA_FULL_ERROR: '1'
+#      CUDA_VISIBLE_DEVICES: ${.device}
     config:
       override_dirname:
         kv_sep: "="
@@ -56,7 +57,7 @@ hydra:
           - model.lr
           - model.batch_norm
           - model.bias
-          - model.single_obs_space
+          - model.aux_obs_space
           - model.use_spectral_score
           - system.state_dim     # Metrics included in system.summary
           - system.obs_state_dim

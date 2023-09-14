@@ -27,7 +27,7 @@ class LightningModel(LightningModule):
                  batch_size: int,
                  test_epoch_metrics_fn=None,
                  val_epoch_metrics_fn=None,
-                 log_preact=False,
+                 log_figs_every_n_epochs=10,
                  log_w=False,
                  run_hps: Optional[dict] = None):
         super().__init__()
@@ -42,7 +42,7 @@ class LightningModel(LightningModule):
         self.test_metrics_fn = test_epoch_metrics_fn
         self.val_metrics_fn = val_epoch_metrics_fn
         self._log_w = log_w
-        self._log_preact = log_preact
+        self.log_figs_every_n_epochs = log_figs_every_n_epochs
         self._run_hps = dict(run_hps)
         # Save hyperparams in model checkpoint.
         self.save_hyperparameters()
@@ -65,7 +65,7 @@ class LightningModel(LightningModule):
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/train", loss, prog_bar=False)
-        self.log_metrics(scalar_metrics, sufix="train", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, suffix="train", batch_size=self._batch_size)
         self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
         return loss
 
@@ -76,7 +76,7 @@ class LightningModel(LightningModule):
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/val", loss, prog_bar=False)
-        self.log_metrics(scalar_metrics, sufix="val", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, suffix="val", batch_size=self._batch_size)
         self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
@@ -88,7 +88,7 @@ class LightningModel(LightningModule):
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
         self.log("loss/test", loss, prog_bar=False)
-        self.log_metrics(scalar_metrics, sufix="test", batch_size=self._batch_size)
+        self.log_metrics(scalar_metrics, suffix="test", batch_size=self._batch_size)
         self.log_vector_metrics(vector_metrics, type_sufix="test", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
@@ -100,18 +100,6 @@ class LightningModel(LightningModule):
 
     def on_train_epoch_end(self) -> None:
         self.log('time_per_epoch', time.time() - self._epoch_start_time, prog_bar=False, on_epoch=True)
-
-        if self.val_metrics_fn is not None:
-            with torch.no_grad():
-                batch = next(iter(self.trainer.datamodule.train_dataloader()))
-                n_steps = batch['next_state'].shape[1]
-                outputs = self.model(**batch, n_steps=n_steps)
-                figs, metrics = self.val_metrics_fn(**outputs, **batch)
-
-                if metrics is not None:
-                    self.log_metrics(metrics, sufix="train", batch_size=self._batch_size)
-                if figs is not None:
-                    self.log_figures(figs, sufix="train")
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         # Distributions have to be logged manually. Why keep using Lightning ? :(
@@ -137,6 +125,9 @@ class LightningModel(LightningModule):
         if hasattr(self.model, "get_hparams"):
             hparams.update(flatten_dict(self.model.get_hparams()))
 
+        if self.val_metrics_fn is not None:
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
+
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
         self.log_vector_metrics(flush=True)
@@ -151,6 +142,10 @@ class LightningModel(LightningModule):
                 ckpt_path.unlink()
                 log.info(f"Removing last ckpt {ckpt_path} from successful training run.")
 
+        # Save train plots.
+        if self.val_metrics_fn is not None:
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
+
     def on_validation_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):
             self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
@@ -158,17 +153,8 @@ class LightningModel(LightningModule):
     def on_validation_end(self) -> None:
         self.log_vector_metrics(flush=True)
 
-        if self.val_metrics_fn is not None and self.global_step > 0:
-            with torch.no_grad():
-                batch = next(iter(self.trainer.datamodule.val_dataloader()))
-                n_steps = batch['next_state'].shape[1]
-                val_outputs = self.model(**batch, n_steps=n_steps)
-                figs, metrics = self.val_metrics_fn(**val_outputs, **batch)
-
-                if metrics is not None:
-                    self.log_metrics(metrics, sufix="val", batch_size=self._batch_size)
-                if figs is not None:
-                    self.log_figures(figs, sufix="val")
+        if self.val_metrics_fn is not None and self.trainer.current_epoch % self.log_figs_every_n_epochs == 0:
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="val")
 
     def on_test_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):
@@ -177,26 +163,17 @@ class LightningModel(LightningModule):
     def on_test_end(self) -> None:
         self.log_vector_metrics(flush=True)
 
-        if self.test_metrics_fn is not None and self.global_step > 0:
-            with torch.no_grad():
-                batch = next(iter(self.trainer.datamodule.test_dataloader()))
-                n_steps = batch['next_state'].shape[1]
-                outputs = self.model(**batch, n_steps=n_steps)
-                figs, metrics = self.test_metrics_fn(**outputs, **batch)
-
-                if metrics is not None:
-                    self.log_metrics(metrics, sufix="test", batch_size=self._batch_size)
-                if figs is not None:
-                    self.log_figures(figs, sufix="test")
+        if self.test_metrics_fn is not None:
+            self.compute_figure_metrics(self.test_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="test")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
 
-    def log_metrics(self, metrics: dict, sufix='', batch_size=None):
+    def log_metrics(self, metrics: dict, suffix='', batch_size=None):
         flat_metrics = flatten_dict(metrics)
         for k, v in flat_metrics.items():
-            name = f"{k}/{sufix}"
+            name = f"{k}/{suffix}"
             self.log(name, v, prog_bar=False, batch_size=batch_size)
 
     @torch.no_grad()
@@ -255,11 +232,24 @@ class LightningModel(LightningModule):
 
                     self._log_cache.pop(metric_log_name)
 
-    def log_figures(self, figs: dict[str, plotly.graph_objs.Figure], sufix=''):
+    def log_figures(self, figs: dict[str, plotly.graph_objs.Figure], suffix=''):
         """Log plotly figures to wandb."""
         wandb_logger = self.logger.experiment
         for fig_name, fig in figs.items():
-            wandb_logger.log({f"{fig_name}/{sufix}": fig, 'trainer/global_step': self.trainer.global_step})
+            wandb_logger.log({f"{fig_name}/{suffix}": fig, 'trainer/global_step': self.trainer.global_step})
+
+    @torch.no_grad()
+    def compute_figure_metrics(self, metrics_fn: Callable, dataloader, suffix=''):
+        batch = next(iter(dataloader))
+        n_steps = batch['next_state'].shape[1]
+        outputs = self.model(**batch, n_steps=n_steps)
+
+        figs, metrics = metrics_fn(**outputs, **batch)
+
+        if metrics is not None:
+            self.log_metrics(metrics, suffix=suffix, batch_size=self._batch_size)
+        if figs is not None:
+            self.log_figures(figs, suffix=suffix)
 
     # def on_s
     def get_metrics(self):

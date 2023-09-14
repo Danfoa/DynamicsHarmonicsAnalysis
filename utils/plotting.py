@@ -82,10 +82,10 @@ def plot_system_2D(A, trajectories: Union[list, np.ndarray], P=None, z_constrain
 
 
 def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint_matrix=None, constraint_offset=None, fig=None, initial_call=False,
-                   flow_field_colorscale='Blues', traj_colorscale='Viridis',
+                   flow_field_colorscale='Blues', traj_colorscale='Viridis', num_trajs_to_show=20,
                    init_state_color='red', initial_point_radius=3, title=''):
-    trajs = np.asarray(trajectories)
-    assert trajs.shape[-1] == 3, "Trajectories must be 3D"
+    trajs = np.asarray(trajectories[:num_trajs_to_show])
+    assert trajs.shape[-1] == 3, f"Trajectories {trajs.shape} must be 3D"
     if trajs.ndim == 2:  # Add a trajectory index dimension if it is missing
         trajs = np.expand_dims(trajs, axis=0)
 
@@ -139,24 +139,26 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
     for traj_num, traj in enumerate(trajs):
         alpha_scale = np.linspace(0.3, 1, traj_len)
         fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines', opacity=0.5,
-                                   showlegend=False, name=f'traj{traj_num}',
+                                   showlegend=True, name=f'traj{traj_num}', legendgroup=f'traj{traj_num}',
                                    line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6, )))
 
         # Initial point with customizable color and radius
-        fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers', showlegend=False,
+        fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers',
+                                   showlegend=False, legendgroup=f'traj{traj_num}',
                                    marker=dict(size=initial_point_radius, color=init_state_color)))
 
         if secondary_trajectories is not None:
-            traj = secondary_trajectories[traj_num]
+            traj = secondary_trajectories[:num_trajs_to_show][traj_num]
             alpha_scale = np.linspace(0.3, 1, traj_len)
             fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines+markers', opacity=0.2,
-                                       showlegend=False, name=f'pred{traj_num}',
+                                       showlegend=False, name=f'pred{traj_num}', legendgroup=f'traj{traj_num}',
                                        line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6),
                                        marker=dict(size=initial_point_radius/2)))
 
             # Initial point with customizable color and radius
             fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers', showlegend=False,
-                                       opacity=0.5, marker=dict(size=initial_point_radius, color=init_state_color)))
+                                       legendgroup=f'traj{traj_num}', opacity=0.3,
+                                       marker=dict(size=initial_point_radius, color=init_state_color)))
 
 
     # Layout
