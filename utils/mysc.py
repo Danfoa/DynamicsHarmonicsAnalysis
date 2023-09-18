@@ -290,3 +290,68 @@ def states_from_traj(state_trajectory: Tensor) -> Tensor:
     state = state_trajectory[:, 0, :]
     next_state = state_trajectory[:, 1:, :]
     return state, next_state
+
+
+def batched_to_flat_trajectory(x):
+    """
+    Converts a 3D tensor of shape (batch, time, dim) to a 2D tensor (batch * time, dim).
+    Ensures that the ordering of samples in time is not shuffled. The tensor is first made contiguous
+    in memory to ensure that reshaping does not affect the data order.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (batch, time, dim).
+
+    Returns:
+        torch.Tensor: Reshaped tensor of shape (batch * time, dim).
+    """
+    x_contiguous = x.contiguous()  # Needed for reshaping not to mess with the time order.
+    x_reshaped = x_contiguous.view(-1, x_contiguous.size(-1))
+    return x_reshaped
+
+
+def flat_to_batched_trajectory(x_reshaped, batch_size, state_dim):
+    """
+    Reshapes a 2D tensor back to a 3D tensor with potentially new feature dimension.
+    Infers the time dimension from the shape of the 2D tensor.
+
+    Args:
+        x_reshaped (torch.Tensor): Input tensor of shape (batch * time, new_dim).
+        batch_size (int): The original batch size.
+        state_dim (int): The new feature dimension size.
+
+    Returns:
+        torch.Tensor: Reshaped tensor of shape (batch, time, new_dim).
+
+    The time dimension is inferred from the total number of elements in the 2D tensor
+    and the known batch size. The tensor is reshaped back to its original 3D form.
+    """
+    total_elements = x_reshaped.size(0)
+    assert total_elements % batch_size == 0, f"Total elements {total_elements} not divisible by batch size {batch_size}"
+    time_dim = total_elements // batch_size
+    new_shape = (batch_size, time_dim, state_dim)
+    x_original = x_reshaped.view(new_shape)
+    return x_original
+
+
+# Test the utility functions with emphasis on time order preservation
+batch_size, time_steps, old_dim = 3, 5, 4
+new_dim = 6
+
+# Create a sequential tensor to easily check time order
+x = torch.Tensor([[[i for _ in range(old_dim)] for i in range(time_steps)] for _ in range(batch_size)])
+
+# Convert 3D -> 2D
+x_reshaped = batched_to_flat_trajectory(x)
+
+# Simulate some transformation
+transformation = torch.nn.Linear(old_dim, new_dim)
+x_transformed = transformation(x_reshaped)
+
+# Convert 2D -> 3D
+x_reconstructed = flat_to_batched_trajectory(x_transformed, batch_size, new_dim)
+
+# Check if time order is preserved
+time_order_preserved = all(
+    (x[i, j, 0] == x_reconstructed[i, j, 0]).item() for i in range(batch_size) for j in range(time_steps))
+
+x, x_reconstructed, time_order_preserved

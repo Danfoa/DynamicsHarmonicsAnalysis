@@ -57,25 +57,28 @@ def main(cfg: DictConfig):
                                         frames_per_step=cfg.system.frames_per_state,
                                         pred_horizon=cfg.system.pred_horizon,
                                         eval_pred_horizon=cfg.system.eval_pred_horizon,
+                                        system_cfg=cfg.system,
                                         num_workers=cfg.num_workers,
                                         device=device,
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
         obs_state_dim = math.ceil(cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
-        num_hidden_neurons = max(32, 2 * obs_state_dim)
+        num_hidden_neurons = max(cfg.model.num_hidden_units, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
-        if cfg.model.equivariant and cfg.model.activation == 'Identity':
-            cfg.model.activation = 'IdentityModule'  # unnecessary change from ESCNN
-        activation = class_from_name('escnn.nn' if cfg.model.equivariant else 'torch.nn', cfg.model.activation)
+        if cfg.model.equivariant:
+            activation = cfg.model.activation
+        else:
+            activation = class_from_name('torch.nn', cfg.model.activation)
 
         model_agnostic_params = dict(obs_state_dim=obs_state_dim,
-                                     num_layers=cfg.model.n_layers,
+                                     num_layers=cfg.model.num_layers,
                                      num_hidden_units=num_hidden_neurons,
                                      dt=datamodule.dt,
                                      activation=activation,
                                      bias=cfg.model.bias,
-                                     batch_norm=cfg.model.batch_norm,)
+                                     batch_norm=cfg.model.batch_norm)
+
         if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
                 model = EquivDynamicsAutoEncoder(**model_agnostic_params,
@@ -88,7 +91,9 @@ def main(cfg: DictConfig):
                                    state_type=datamodule.state_field_type,
                                    max_ck_window_length=cfg.model.max_ck_window_length,
                                    ck_w=cfg.model.ck_w,
-                                   orth_w=cfg.model.orth_w)
+                                   orth_w=cfg.model.orth_w,
+                                   group_avg_trick=cfg.model.group_avg_trick,
+                                   )
             else:
                 model = DPNet(**model_agnostic_params,
                               state_dim=datamodule.state_field_type.size,
@@ -154,7 +159,12 @@ def main(cfg: DictConfig):
         trainer.fit(model=pl_model, datamodule=datamodule)
         log.info("\nTraining Done\n")
 
-        # profiler.disable()
+        if cfg.model == "dpnet":
+            # Train non-linear inverse observable function
+            log.info("\nTraining Inverse Observable\n")
+            pl_model.model.train_mode = DPNet.INV_PROJECTION
+            trainer.fit(model=pl_model, datamodule=datamodule)
+            log.info("\nTraining Done\n")
 
         # # Create a pstats object
         # stats = pstats.Stats(profiler)

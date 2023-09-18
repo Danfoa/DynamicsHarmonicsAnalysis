@@ -37,7 +37,7 @@ hydra:
     chdir: True
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: 'false'
-      HYDRA_FULL_ERROR: '1'
+      HYDRA_FULL_ERROR: 1
 #      CUDA_VISIBLE_DEVICES: ${.device}
     config:
       override_dirname:
@@ -54,6 +54,8 @@ hydra:
           - model.equivariant
           - model.max_ck_window_length
           - model.activation
+          - model.num_layers
+          - model.num_hidden_units
           - model.lr
           - model.batch_norm
           - model.bias

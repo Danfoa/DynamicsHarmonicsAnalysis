@@ -4,6 +4,7 @@ from typing import Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly
 import torch
 from matplotlib.figure import Figure
 from plotly import figure_factory as ff, graph_objects as go
@@ -12,89 +13,135 @@ from plotly.subplots import make_subplots
 from utils.mysc import best_rectangular_grid
 
 
-def plot_system_2D(A, trajectories: Union[list, np.ndarray], P=None, z_constraint=None):
-    trajs = np.asarray(trajectories)
+def get_plotting_bounds(trajectories: np.ndarray) -> float:
+    """Compute the min and max along the state dimension (-1) and return the max abs value of the two
+    Args:
+        trajectories: (traj_idx, time, state_dim)
+    Returns:
+        float: max(abs(min(state), abs(max(state))) per dimension.
+    """
+    return np.max(np.abs(np.array([np.min(trajectories, axis=(0, 1)), np.max(trajectories, axis=(0, 1))])))
+
+
+def plot_system_2D(trajs, secondary_trajs=None, P=None, z_constraint=None, fig=None, grid_offset=None,
+                   num_trajs_to_show=-1, alpha=0.5, initial_point_size=8,
+                   legendgroup='trajs', secondary_legend_group='preds',
+                   colorscale=plotly.express.colors.qualitative.Alphabet):
+    trajs = np.asarray(trajs[:num_trajs_to_show])
     if trajs.ndim == 2:
         trajs = np.expand_dims(trajs, axis=0)
+    n_trajs = trajs.shape[0]
 
-    x_min, x_max = np.min(trajs[:, :, 0]), np.max(trajs[:, :, 0])
-    y_min, y_max = np.min(trajs[:, :, 1]), np.max(trajs[:, :, 1])
+    if secondary_trajs is not None:
+        secondary_trajs = np.asarray(secondary_trajs[:num_trajs_to_show])
+        if secondary_trajs.ndim == 2:
+            secondary_trajs = np.expand_dims(secondary_trajs, axis=0)
+        secondary_legend_group = f"{legendgroup}_pred" if secondary_legend_group is None else secondary_legend_group
 
-    bound = max(np.abs(max(y_max, x_max)), np.abs(min(y_min, x_min)))
-    traj_len = trajs.shape[1]
-    x = np.linspace(x_min, x_max, 20)
-    y = np.linspace(y_min, y_max, 20)
+    fig_row, fig_col = grid_offset if grid_offset is not None else (1, 1)
+    bound = get_plotting_bounds(trajs)
 
-    X, Y = np.meshgrid(x, y)
-    UV = np.array([A @ np.array([xi, yi]) for xi, yi in zip(X.ravel(), Y.ravel())])
-    U = UV[:, 0].reshape(X.shape)
-    V = UV[:, 1].reshape(Y.shape)
-    # Normalize U and V for adjustable arrow size based on desired maximum length
-    norm = np.sqrt(U ** 2 + V ** 2)
-    max_length = 0.05 * bound
-    scale_factor = max_length / np.max(norm)
-    U = (U / (norm + 1e-10)) * scale_factor
-    V = (V / (norm + 1e-10)) * scale_factor
+    initial_call = True if fig is None else False
+    fig = make_subplots(rows=1, cols=1) if fig is None else fig
 
-    # Gradient field
-    fig = ff.create_quiver(X, Y, U, V,
-                           name='Deterministic dynamics',
-                           opacity=0.3,
-                           line_width=1)
+    colorscale = colorscale * (n_trajs // len(colorscale)) + colorscale[:n_trajs % len(colorscale)]
 
-    # Hyperplanes
     # Constraint hyperplanes
     if P is not None:
-        # Hyperplanes
         for i, row in enumerate(P):
-            # y(x) = mx + b
             m = -row[0] / row[1] if row[1] != 0 else 0
             b = (z_constraint[i] / row[1]) if row[1] != 0 else 0
             y_constraint = lambda x: float(m * x + b)
-            a = [[-bound, y_constraint(-bound)], [bound, y_constraint(bound)]]
             constraint_line = np.array([[-bound, y_constraint(-bound)], [bound, y_constraint(bound)]])
-            # Plot the constraint line in red
             fig.add_trace(go.Scatter(x=constraint_line[:, 0], y=constraint_line[:, 1], mode='lines',
-                                     line=dict(color='red'), name=f'constraint:{i}'))
+                                     line=dict(color='red'), name=f'constraint:{i}'),
+                          row=fig_row, col=fig_col)
 
-    # Trajectories
-    for traj in trajs:
-        # Create a gradient based on the progression of time
-        alpha_scale = np.linspace(0.0, 1, traj_len)  # Values from 0.1 (10% opacity) to 1 (100% opacity)
-        # Define the colormap with a gradient in alpha
-        fig.add_trace(go.Scatter(x=traj[:, 0], y=traj[:, 1], mode='markers+lines', opacity=0.8, showlegend=False,
-                                 marker=dict(color=alpha_scale, size=2, colorscale='Viridis')))
-    # Make plot square and axis equal
-    fig.update_layout(
-        plot_bgcolor='rgba(245, 245, 245, 1)',
-        paper_bgcolor='rgba(245, 245, 245, 1)',
-        xaxis=dict(
-            range=[-bound * 1.1, bound * 1.1],
-            scaleratio=1,
-            scaleanchor="y"
-            ),
-        yaxis=dict(
-            range=[-bound * 1.1, bound * 1.1],
-            scaleratio=1
+    for i, (traj, color) in enumerate(zip(trajs, colorscale)):
+        fig.add_trace(
+            go.Scatter(
+                x=traj[:, 0],
+                y=traj[:, 1],
+                mode='lines',
+                line=dict(color=color, width=2),
+                name=f"traj_{i}" if legendgroup == 'trajs' else legendgroup,
+                showlegend=i == 0,
+                legendgroup=legendgroup,
+                ),
+            row=fig_row, col=fig_col
             )
-        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[traj[0, 0]],
+                y=[traj[0, 1]],
+                mode='markers',
+                marker=dict(color=color, size=initial_point_size),
+                showlegend=False,
+                legendgroup=legendgroup,
+                ),
+            row=fig_row, col=fig_col,
+            )
+
+        if secondary_trajs is not None:
+            secondary_traj = secondary_trajs[i]
+            fig.add_trace(
+                go.Scatter(
+                    x=secondary_traj[:, 0],
+                    y=secondary_traj[:, 1],
+                    mode='lines',
+                    line=dict(color=color, width=2),
+                    opacity=alpha,
+                    name=f"pred_{i}" if secondary_legend_group == 'preds' else secondary_legend_group,
+                    showlegend=i == 0,
+                    legendgroup=secondary_legend_group,
+                    ),
+                row=fig_row, col=fig_col
+                )
+
+            # Complementary color; here just a dummy example, you can set a real complementary color
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[secondary_traj[0, 0]],
+                    y=[secondary_traj[0, 1]],
+                    mode='markers',
+                    marker=dict(color=color, size=initial_point_size*1.1),
+                    opacity=alpha,
+                    showlegend=False,
+                    legendgroup=secondary_legend_group,
+                    ),
+                row=fig_row, col=fig_col,
+                )
+
+    if initial_call:
+        fig.update_layout(
+            plot_bgcolor='rgba(245, 245, 245, 1)',
+            paper_bgcolor='rgba(245, 245, 245, 1)',
+            xaxis=dict(
+                range=[-bound * 1.1, bound * 1.1],
+                scaleratio=1,
+                scaleanchor="y"
+                ),
+            yaxis=dict(
+                range=[-bound * 1.1, bound * 1.1],
+                scaleratio=1
+                )
+            )
     return fig
 
 
-def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint_matrix=None, constraint_offset=None, fig=None, initial_call=False,
-                   flow_field_colorscale='Blues', traj_colorscale='Viridis', num_trajs_to_show=20,
-                   init_state_color='red', initial_point_radius=3, title=''):
+def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint_matrix=None, constraint_offset=None,
+                   fig=None, initial_call=False,
+                   flow_field_colorscale='Blues', traj_colorscale='Viridis', num_trajs_to_show=-1,
+                   init_state_color='red', initial_point_radius=3, title='', legendgroup=None):
     trajs = np.asarray(trajectories[:num_trajs_to_show])
     assert trajs.shape[-1] == 3, f"Trajectories {trajs.shape} must be 3D"
     if trajs.ndim == 2:  # Add a trajectory index dimension if it is missing
         trajs = np.expand_dims(trajs, axis=0)
 
     # Compute bounds of the plot
-    # assert trajs.shape[-1] == A.shape[0]
-    x_min, x_max = np.min(trajs[:, :, 0]), np.max(trajs[:, :, 0])
-    y_min, y_max = np.min(trajs[:, :, 1]), np.max(trajs[:, :, 1])
-    z_min, z_max = np.min(trajs[:, :, 2]), np.max(trajs[:, :, 2])
-    bound = max(abs(x_max), abs(x_min), abs(y_max), abs(y_min), abs(z_max), abs(z_min))
+    bound = get_plotting_bounds(trajs)
     traj_len = trajs.shape[1]
 
     if fig is None:
@@ -102,25 +149,6 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
         fig = go.Figure()
 
     if initial_call:
-        if A is not None:
-            x = np.linspace(-bound, bound, 10)
-            y = np.linspace(-bound, bound, 10)
-            z = np.linspace(-bound, bound, 10)
-
-            X, Y, Z = np.meshgrid(x, y, z)
-            UVW = np.array([A @ np.array([xi, yi, zi]) for xi, yi, zi in zip(X.ravel(), Y.ravel(), Z.ravel())])
-            U = UVW[:, 0].reshape(X.shape)
-            V = UVW[:, 1].reshape(Y.shape)
-            W = UVW[:, 2].reshape(Z.shape)
-            scale_factor = 0.5 * bound / np.max(np.sqrt(U ** 2 + V ** 2 + W ** 2))
-            U *= scale_factor
-            V *= scale_factor
-            W *= scale_factor
-            # Gradient field (quiver)
-            fig.add_trace(go.Cone(x=X.ravel(), y=Y.ravel(), z=Z.ravel(),
-                                  u=U.ravel(), v=V.ravel(), w=W.ravel(), opacity=0.2,
-                                  sizemode="absolute", colorscale=flow_field_colorscale, showscale=False))
-        # Constraint hyperplanes
         if constraint_matrix is not None:
             for i, row in enumerate(constraint_matrix):
                 if row[2] != 0:  # Ensure z-coefficient isn't zero
@@ -138,28 +166,32 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
     # Trajectory plotting (for both initial and subsequent calls)
     for traj_num, traj in enumerate(trajs):
         alpha_scale = np.linspace(0.3, 1, traj_len)
+
         fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines', opacity=0.5,
-                                   showlegend=True, name=f'traj{traj_num}', legendgroup=f'traj{traj_num}',
+                                   showlegend=traj_num == 0,
+                                   name=f'traj{traj_num}' if legendgroup is None else legendgroup,
+                                   legendgroup='trajs' if legendgroup is None else legendgroup,
                                    line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6, )))
 
         # Initial point with customizable color and radius
         fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers',
-                                   showlegend=False, legendgroup=f'traj{traj_num}',
+                                   showlegend=False, legendgroup='trajs' if legendgroup is None else legendgroup,
                                    marker=dict(size=initial_point_radius, color=init_state_color)))
 
         if secondary_trajectories is not None:
             traj = secondary_trajectories[:num_trajs_to_show][traj_num]
             alpha_scale = np.linspace(0.3, 1, traj_len)
             fig.add_trace(go.Scatter3d(x=traj[:, 0], y=traj[:, 1], z=traj[:, 2], mode='lines+markers', opacity=0.2,
-                                       showlegend=False, name=f'pred{traj_num}', legendgroup=f'traj{traj_num}',
+                                       showlegend=traj_num == 0, name=f'pred{traj_num}',
+                                       legendgroup='pred' if legendgroup is None else f"{legendgroup}_pred",
                                        line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6),
-                                       marker=dict(size=initial_point_radius/2)))
+                                       marker=dict(size=initial_point_radius / 2)))
 
             # Initial point with customizable color and radius
             fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers', showlegend=False,
-                                       legendgroup=f'traj{traj_num}', opacity=0.3,
+                                       opacity=0.3,
+                                       legendgroup='pred' if legendgroup is None else f"{legendgroup}_pred",
                                        marker=dict(size=initial_point_radius, color=init_state_color)))
-
 
     # Layout
     # current_bound = fig.layout.scene.xaxis.range[1]
@@ -167,6 +199,8 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
         # Update layout only if the new bound is larger than the current bound
         fig.update_layout(
             title=title,
+            plot_bgcolor='rgba(245, 245, 245, 1)',
+            paper_bgcolor='rgba(245, 245, 245, 1)',
             scene=dict(
                 xaxis=dict(range=[-bound * 1.1, bound * 1.1]),
                 yaxis=dict(range=[-bound * 1.1, bound * 1.1]),

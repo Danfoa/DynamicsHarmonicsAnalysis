@@ -156,7 +156,10 @@ def empirical_cov_cross_cov(state_traj: Tensor,
         # Furthermore, we can apply this operation in parallel to all Cov Ops for numerical efficiency in GPU.
         orbit_cross_Cov = [CCov]
         orbit_Cov, orbit_Cov_prime = [Cov], [Cov_prime]
-        for h in representation.group.generators:  # Generators of the symmetry group. We only need these.
+
+        group = representation.group
+        elements = group.generators if not group.continuous else group.grid(type='rand', N=10)
+        for h in elements:  # Generators of the symmetry group. We only need these.
             # Compute each:      ρ(g) Cov(X,Y) ρ(g)^T   | ρ(g)^T = ρ(~g) = ρ(g^-1)
             rep_g = torch.tensor(representation(h), dtype=dtype, device=device)
             rep_g_inv = torch.tensor(representation(~h), dtype=dtype, device=device)
@@ -249,7 +252,7 @@ def chapman_kolmogorov_regularization(CCov: Tensor, ck_window_length: int = 3, d
             # || Cov(ts, te) - Cov(ts, ts+1), Cov(ts+1, ts+2), ... Cov(te-1, te) ||_2
             ck_reg[ts, te] = torch.linalg.matrix_norm(chain_cov - target_cov, ord='fro')
 
-    # a = ck_reg.detach().cpu().numpy()
+    a = ck_reg.detach().cpu().numpy()
     if debug:
         # Test largest chain scenario
         target_cov = CCov[0, ck_window_length]
@@ -499,11 +502,9 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
                 )
 
 
-def forecasting_loss_and_metrics(
-        state_gt: Tensor, state_pred: Tensor) -> (Tensor, dict[str, Tensor]):
+def forecasting_loss_and_metrics(gt: Tensor, pred: Tensor) -> (Tensor, dict[str, Tensor]):
     # Compute state squared error over time and the infinite norm of the state dimension over time.
-    l2_loss = torch.norm(state_gt - state_pred, p=2, dim=-1)
-    time_steps = state_gt.shape[1]
+    l2_loss = torch.norm(gt - pred, p=2, dim=-1)
     metrics = {}
     metrics['pred_loss_t'] = l2_loss
     return l2_loss.mean(), metrics

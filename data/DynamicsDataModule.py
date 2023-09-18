@@ -25,6 +25,7 @@ class DynamicsDataModule(LightningDataModule):
                  data_path: Path,
                  pred_horizon: Union[int, float] = 0.25,
                  eval_pred_horizon: Union[int, float] = 0.5,
+                 system_cfg: Optional[dict] = None,
                  batch_size: int = 256,
                  frames_per_step: int = 1,
                  num_workers: int = 0,
@@ -34,8 +35,11 @@ class DynamicsDataModule(LightningDataModule):
                  action_measurements: Optional[list[str]] = None,
                  ):
         super().__init__()
+        if system_cfg is None:
+            system_cfg = {}
         assert data_path.exists(), f"Data folder not found {data_path.absolute()}"
         self._data_path = data_path
+        self.system_cfg = system_cfg
         self.augment = augment
         self.frames_per_step = frames_per_step
         if isinstance(pred_horizon, float):
@@ -74,11 +78,12 @@ class DynamicsDataModule(LightningDataModule):
         start_time = time.time()
         log.info(f"Preparing datasets {self._data_path}")
 
-        path_to_dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
-        # TODO: Handle multiple files from
-        system_data_path = path_to_dyn_sys_data.pop()
-        if len(path_to_dyn_sys_data) > 1:
-            raise NotImplementedError("Multiple dynamical systems not supported yet")
+        dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
+        noise_level = self.system_cfg.get('noise_level', 0)
+        system_data_path = [path for path in dyn_sys_data if f"noise_level={noise_level}" in str(path)]
+        if len(system_data_path) > 1:
+            raise RuntimeError(f"Multiple potential paths {system_data_path} found")
+        system_data_path = system_data_path.pop()
 
         train_data, test_data, val_data = get_train_test_val_file_paths(system_data_path)
         # Obtain hugging face Iterable datasets instances

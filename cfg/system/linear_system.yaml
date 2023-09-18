@@ -10,6 +10,10 @@ frames_per_state: 1          # Number of time-frames to use as a Markov Process 
 pred_horizon: 10             # Number (or percentage) of Markov Process state time steps to predict into the future
 eval_pred_horizon: 100       # Number (or percentage) of Markov Process state time steps to predict into the future
 
-data_path: '${system.name}/${system.state_dim}-dim/'
+group: C3
+noise_level: 0
+n_constraints: 0
 
-summary: S:${system.state_dim}-OS:${system.obs_state_dim}-H:${system.pred_horizon}-Hv:${system.eval_pred_horizon}-F:${system.frames_per_state}
+data_path: '${system.name}/group=${system.group}-dim=${system.state_dim}/'
+
+summary: S:${system.state_dim}-OS:${system.obs_state_dim}-H:${system.pred_horizon}-G:${system.group}-N:${system.noise_level}

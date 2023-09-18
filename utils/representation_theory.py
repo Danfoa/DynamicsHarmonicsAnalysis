@@ -2,10 +2,11 @@ import functools
 from collections import OrderedDict
 
 import numpy as np
+import scipy
 from escnn.group import Group, Representation, directsum
 from morpho_symm.groups.isotypic_decomposition import cplx_isotypic_decomposition
 
-def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Representation]:
+def identify_isotypic_spaces(rep: Representation) -> [OrderedDict[tuple: Representation], np.ndarray]:
     """
     Identify the isotypic subspaces of a representation. See Isotypic Basis for more details (TODO).
     Args:
@@ -20,11 +21,14 @@ def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Represen
     symm_group = rep.group
     potential_irreps = rep.group.irreps()
     isotypic_subspaces_indices = {irrep.id: [] for irrep in potential_irreps}
-    rep.irreps[0] == rep.irreps[0]
+
     for irrep in potential_irreps:
         for index, rep_irrep_id in enumerate(rep.irreps):
             if symm_group.irrep(*rep_irrep_id) == irrep:
                 isotypic_subspaces_indices[rep_irrep_id].append(index)
+        # If irreps of the same type are not consecutive numbers raise an error
+        if not np.all(np.diff(isotypic_subspaces_indices[irrep.id]) == 1):
+            raise NotImplementedError("TODO: Add permutations needed to handle this case")
 
     # Remove inactive Isotypic Spaces
     for irrep in potential_irreps:
@@ -55,12 +59,12 @@ def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Represen
 
     # Compute the decomposition of Real Irreps into Complex Irreps and store this information in irrep.attributes
     # cplx_irrep_i(g) = Q_re2cplx @ re_irrep_i(g) @ Q_re2cplx^-1`
-    for irrep_id in ordered_isotypic_reps.keys():
-        re_irrep = symm_group.irrep(*irrep_id)
-        cplx_subreps, Q_re2cplx = cplx_isotypic_decomposition(symm_group, re_irrep)
-        re_irrep.is_cplx_irrep = len(cplx_subreps) == 1
-        symm_group.irrep(*irrep_id).attributes['cplx_irreps'] = cplx_subreps
-        symm_group.irrep(*irrep_id).attributes['Q_re2cplx'] = Q_re2cplx
+    # for irrep_id in ordered_isotypic_reps.keys():
+    #     re_irrep = symm_group.irrep(*irrep_id)
+    #     cplx_subreps, Q_re2cplx = cplx_isotypic_decomposition(symm_group, re_irrep)
+    #     re_irrep.is_cplx_irrep = len(cplx_subreps) == 1
+    #     symm_group.irrep(*irrep_id).attributes['cplx_irreps'] = cplx_subreps
+    #     symm_group.irrep(*irrep_id).attributes['Q_re2cplx'] = Q_re2cplx
 
     new_rep = directsum(list(ordered_isotypic_reps.values()),
                         name=rep.name + '-Iso',
@@ -73,10 +77,14 @@ def identify_isotypic_spaces(rep: Representation) -> OrderedDict[tuple: Represen
 
 
 def isotypic_basis(representation: Representation, multiplicity: int = 1, prefix=''):
-    rep, _ = identify_isotypic_spaces(representation)
+    rep, Q_iso = identify_isotypic_spaces(representation)
 
     iso_reps = OrderedDict()
     for iso_irrep_id, reg_rep_iso in rep.attributes['isotypic_reps'].items():
         iso_reps[iso_irrep_id] = directsum([reg_rep_iso] * multiplicity,
                                            name=f"{prefix}_IsoSpace{iso_irrep_id}")
-    return iso_reps  # Dict[key:id_space -> value: rep_iso_space]
+
+    if multiplicity > 1:
+        Q_iso = None  # We need to handle this case. For now we just ignore the change of basis.
+
+    return iso_reps, Q_iso  # Dict[key:id_space -> value: rep_iso_space]

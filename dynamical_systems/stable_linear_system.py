@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -71,7 +72,7 @@ def stable_lin_dynamics(rep: Optional[Representation] = None,
     assert min_period > 0, f"Negative minimum period {min_period}"
     assert max_period is None or max_period > min_period, f"Negative maximum period {max_period}"
     if max_period is None:
-        max_period = 2 * time_constant
+        max_period = time_constant
 
     irreps_space_dyn = []
     max_freq = (1 / min_period) / (2 * np.pi)
@@ -148,16 +149,16 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     # Isotypic subspace of the observable state space.
     iso_space_dyn = []
     for isotypic_id, rep_iso in isotypic_reps.items():
+        iso_state_dim = rep_iso.size
         A_iso = stable_lin_dynamics(rep_iso,
-                                    time_constant=5,
-                                    stable_eigval_prob=1 ,#/ (state_dim + 1),
+                                    time_constant=time_constant,
+                                    stable_eigval_prob=1 / (iso_state_dim) if state_dim > 1 else 0.0,
                                     min_period=min_period,
                                     max_period=max_period)
         # Enforce G-equivariance
-        A_G_iso = matrix_average_trick(A_iso, [rep_iso(g) for g in G.elements])
-
-        # Test commutativity / G-equivariance
-        for g in G.generators:
+        elements = G.elements if not G.continuous else G.testing_elements(len(G.representations))
+        A_G_iso = matrix_average_trick(A_iso, [rep_iso(g) for g in elements])
+        for g in elements:
             assert np.allclose(rep_iso(g) @ A_G_iso, A_G_iso @ rep_iso(g))
         iso_space_dyn.append(A_G_iso)
 
@@ -169,7 +170,8 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     rep_X = Representation(G, irreps=rep_X.irreps, name=rep_X.name, change_of_basis=T @ rep_X.change_of_basis)
 
     # Test commutativity / G-equivariance
-    for g in G.generators:
+    elements = G.elements if not G.continuous else G.testing_elements(len(G.representations))
+    for g in elements:
         assert np.allclose(rep_X(g) @ A_G, A_G @ rep_X(g)), f"G-equiv err:{np.max((rep_X(g) @ A_G) - (A_G @ rep_X(g)))}"
 
     # Ensure stability
@@ -179,9 +181,12 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     assert np.all(np.real(transient_eigvals) <= 0), f"Unstable eigenvalues: {eigvals}"
     # Compute the empirical time constant of the system:
     time_constants = [1 / np.abs(eigval) for eigval in transient_eigvals]
-    slowest_time_constant = np.max(time_constants) if len(transient_eigvals) > 0 else np.inf
+    fastest_time_constant = np.min(time_constants) if len(transient_eigvals) > 0 else np.inf
+    # Compute the longest period of oscillation of the system:
+    periods = [2 * np.pi / np.abs(np.imag(eigval)) for eigval in eigvals if not np.isinf(eigval)]
+    fastest_period = np.min(periods)
     # print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
-    return A_G, rep_X, slowest_time_constant
+    return A_G, rep_X, fastest_period, fastest_time_constant
 
 
 def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim_time: float, noise_std=0.1,
@@ -238,8 +243,6 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 
     return t, np.array(trajectory)
 
-# def gen_recordings_stable_equiv_lin_system():
-#     pass
 
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
@@ -251,28 +254,37 @@ if __name__ == '__main__':
                          Icosahedral=(True, 'ico',),
                          Cyclic=(False, False, order),
                          Dihedral=(False, True, order),
+                         SO2=(False, False, -1),
                          )
 
     # Select the group of the domain
-    G_domain = escnn.group.O3()
+    G_domain = escnn.group.O3(maximum_frequency=10)
     # Select the subgroup  of the dynamics of the system
-    G_id = subgroups_ids['Cyclic']
+    G_id = subgroups_ids['SO2']
     G, g_dynamics_2_Gsub_domain, g_domain_2_g_dynamics = G_domain.subgroup(G_id)
 
     # Define the state representation.
-    # rep_X = G.regular_representation # + G.irrep(1)
-    rep_X = G.irrep(1) + G.irrep(0)
-
+    rep_X = G.standard_representation()  # + G.irrep(1)
+    # rep_X = G.irrep(1) + G.irrep(2) #+ G.irrep(1) #+ G.irrep(0)
+    #
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
-    max_time_constant = 6  # [s] Maximum time constant of the system.
-    A_G, rep_X, time_constant = stable_equivariant_lin_dynamics(rep_X,
-                                                                time_constant=max_time_constant,
-                                                                min_period=max_time_constant / 3,
-                                                                max_period=max_time_constant * 2)
-    time_constant = max_time_constant * 2 if np.isinf(time_constant) else time_constant
-    # Generate hyperplanes that constraint outer region of space
+    max_time_constant = 5  # [s] Maximum time constant of the system.
+    min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.
+    max_period = max_time_constant * 2  # [s] Maximum period of oscillation of the slowest transient mode.
+    A_G, rep_X, fastest_period, fastest_time_constant = stable_equivariant_lin_dynamics(
+        rep_X, time_constant=max_time_constant, min_period=min_period, max_period=max_period)
+    # Fastest time constants determines the fastest transient dynamics of the system. We want to capture it.
+    if np.isinf(fastest_time_constant):             # Stable system on limit cycle. no transient dynamics.
+        T = fastest_period   # Simulate until the slowest stable mode has completed a full period.
+    else:  # System has transient dynamics that vanish to 36.8% in fastest_time_constant seconds.
+        T = 6 * fastest_time_constant        # Required time for this transient dynamics to vanish.
+    dt = T * 0.005  # Sample time to obtain 200 samples per trajectory
+
+    # Generate trajectories of the system dynamics
     n_constraints = 0
+    n_trajs = 100
+    # Generate hyperplanes that constraint outer region of space
     P_symm, offset = None, None
     if n_constraints > 0:
         normal_planes = np.random.rand(state_dim, n_constraints)
@@ -280,83 +292,97 @@ if __name__ == '__main__':
         normal_planes = scipy.linalg.orth(normal_planes).T
         for normal_plane in normal_planes:
             normal_orbit = np.vstack([np.linalg.det(rep_X(g)) * (rep_X(g) @ normal_plane) for g in G.elements])
-            offset_orbit = np.asarray([-np.random.uniform(0.0, 0.8)] * normal_orbit.shape[0])
+            # Fix point of linear systems is the origin
+            offset_orbit = np.asarray([-np.random.uniform(-0.05, 0.6)] * normal_orbit.shape[0])
             P_symm = np.vstack((P_symm, normal_orbit)) if P_symm is not None else normal_orbit
             offset = np.concatenate((offset, offset_orbit)) if offset is not None else offset_orbit
 
-    # Generate trajectories of the system dynamics
-    dt = 0.1
-    T = 4 * time_constant
-    sigma = 0.0
-    n_trajs = 30
-    state_trajs = []
-    for _ in range(n_trajs):
-        # Sample initial condition
-        x0 = sample_initial_condition(state_dim, P_symm, offset)
-        t, state_traj = evolve_linear_dynamics(A_G, x0, dt, T, sigma, constraint_matrix=P_symm,
-                                               constraint_offset=offset)
-        state_trajs.append(state_traj)
+    trajs_per_noise_level = []
+    for noise_level in range(10):
+        sigma = T * 0.005 * noise_level
+        state_trajs = []
+        for _ in range(n_trajs):
+            # Sample initial condition
+            x0 = sample_initial_condition(state_dim, P_symm, offset)
+            t, state_traj = evolve_linear_dynamics(
+                A_G, x0, dt, T, sigma, constraint_matrix=P_symm, constraint_offset=offset)
+            state_trajs.append(state_traj)
+        trajs_per_noise_level.append(np.asarray(state_trajs))
 
-    state_trajs = np.asarray(state_trajs)
+    for noise_level, state_trajs in enumerate(trajs_per_noise_level):
+        # Save the recordings to train test val splits
+        path_2_system = Path(__file__).parents[1] / 'data'
+        assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
+        path_2_system = (path_2_system / 'linear_system' / f"group={G.name}-dim={state_dim:d}" /
+                         f"n_constraints={n_constraints:d}" /
+                         f"f_time_constant={fastest_time_constant:.1f}[s]-frames={state_trajs.shape[1]:d}"
+                         f"-horizon={state_trajs.shape[1] * dt:.1f}[s]" /
+                         f"noise_level={noise_level:d}")
+        if path_2_system.exists():
+            shutil.rmtree(path_2_system)
 
-    # Save the recordings to train test val splits
-    path_2_system = Path(__file__).parents[1] / 'data'
-    assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
-    path_2_system = (path_2_system / 'linear_system' / f"{state_dim:d}-dim" / f"{G.name}" /
-                     f"{n_constraints:d}-constraints" /
-                     f"noise_std={sigma}_time-constant={max_time_constant:.1f}_T-dt={T:.1f}s-{dt:.3f}s")
-    if path_2_system.exists():
-        import shutil
+        path_2_system.mkdir(parents=True, exist_ok=True)
 
-        shutil.rmtree(path_2_system)
-    path_2_system.mkdir(parents=True, exist_ok=True)
+        # Split the trajectories into train (70%) test (15%) and validation (15%) sets.
+        train_idx = range(0, int(0.7 * n_trajs))
+        val_idx = range(int(0.7 * n_trajs), int(0.85 * n_trajs))
+        test_idx = range(int(0.85 * n_trajs), n_trajs)
 
-    # Split the trajectories into train (70%) test (15%) and validation (15%) sets.
-    train_idx = range(0, int(0.7 * n_trajs))
-    val_idx = range(int(0.7 * n_trajs), int(0.85 * n_trajs))
-    test_idx = range(int(0.85 * n_trajs), n_trajs)
+        for partition, idx in zip(['train', 'val', 'test'], [train_idx, val_idx, test_idx]):
+            # Save DynamicsDataset
+            data = DynamicsRecording(
+                description="Stable linear system with stochastic additive noise",
+                info=dict(num_traj=len(state_trajs[idx]),
+                          trajectory_length=state_trajs[idx].shape[1]),
+                dynamics_parameters=dict(
+                    transition_matrix=A_G,
+                    constraint_matrix=P_symm,
+                    constraint_vector=offset,
+                    noise_std=sigma,
+                    dt=dt,
+                    time_constant=max_time_constant,
+                    time_constant_dt_ratio=max_time_constant / dt,
+                    n_constraints=n_constraints,
+                    group=dict(subgroup_id=G_id, group_name=G.name, group_order=G.order()),
+                    ),
+                measurements=dict(state=state_trajs[0].shape[-1]),
+                state_measurements=['state'],
+                reps_irreps=dict(state=rep_X.irreps),  # Store the irreps composing the measurements representations
+                reps_change_of_basis=dict(state=rep_X.change_of_basis),  # Store the change of basis matrices
+                measurements_representations=dict(state='state'),
+                recordings=dict(state=np.asarray(state_trajs[idx], dtype=np.float32)))
 
-    for partition, idx in zip(['train', 'val', 'test'], [train_idx, val_idx, test_idx]):
-        # Save DynamicsDataset
-        data = DynamicsRecording(
-            description="Stable linear system with stochastic additive noise",
-            info=dict(num_traj=len(state_trajs[idx]),
-                      trajectory_length=state_trajs[idx].shape[1]),
-            dynamics_parameters=dict(
-                transition_matrix=A_G,
-                constraint_matrix=P_symm,
-                constraint_vector=offset,
-                noise_std=sigma,
-                dt=dt,
-                time_constant=max_time_constant,
-                time_constant_dt_ratio=max_time_constant / dt,
-                n_constraints=n_constraints,
-                group=dict(subgroup_id=G_id, group_name=G.name, group_order=G.order()),
-                ),
-            measurements=dict(state=state_trajs[0].shape[-1]),
-            state_measurements=['state'],
-            reps_irreps=dict(state=rep_X.irreps),  # Store the irreps composing the measurements representations
-            reps_change_of_basis=dict(state=rep_X.change_of_basis),  # Store the change of basis matrices
-            measurements_representations=dict(state='state'),
-            recordings=dict(state=np.asarray(state_trajs[idx], dtype=np.float32)))
+            path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"
 
-        path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"
+            data.save_to_file(path_to_file)
+            # data2 = MarkovDynamicsRecording.load_from_file(path_to_file)
 
-        data.save_to_file(path_to_file)
-        # data2 = MarkovDynamicsRecording.load_from_file(path_to_file)
+            fig = None
+            if state_dim == 2:
+                fig = plot_system_2D(state_trajs[train_idx], P=P_symm, z_constraint=offset,
+                                     num_trajs_to_show=-1, legendgroup="train")
+                fig = plot_system_2D(state_trajs[test_idx], fig=fig,
+                                     num_trajs_to_show=-1, legendgroup="test")
+                fig = plot_system_2D(state_trajs[val_idx], fig=fig,
+                                     num_trajs_to_show=-1, legendgroup="val")
+            elif state_dim == 3:
+                # ['Gray', 'Agsunset', 'Viridis']
+                fig = plot_system_3D(A=A_G, trajectories=state_trajs[train_idx], fig=fig, constraint_matrix=P_symm,
+                                     constraint_offset=offset, traj_colorscale='Viridis', init_state_color='red',
+                                     legendgroup="train")
+                fig = plot_system_3D(A=A_G, trajectories=state_trajs[test_idx], fig=fig, constraint_matrix=P_symm,
+                                     constraint_offset=offset, traj_colorscale='Gray', init_state_color='black',
+                                     legendgroup="test")
+                g = G.sample()
+                aug_val_trajs = np.einsum('ij, ...j->...i', rep_X(g), state_trajs[val_idx])
 
-    fig = None
-    if state_dim == 2:
-        fig = plot_system_2D(A_G, state_trajs[train_idx], P=P_symm, z_constraint=offset)
-    elif state_dim == 3:
-        # ['Gray', 'Agsunset', 'Viridis']
-        fig = plot_system_3D(A_G, trajectories=state_trajs[train_idx], fig=fig, constraint_matrix=P_symm,
-                             constraint_offset=offset, traj_colorscale='Viridis', init_state_color='red')
-        fig = plot_system_3D(A_G, trajectories=state_trajs[test_idx], fig=fig, constraint_matrix=P_symm,
-                             constraint_offset=offset, traj_colorscale='Gray', init_state_color='black')
-        fig = plot_system_3D(A_G, trajectories=state_trajs[val_idx], fig=fig, constraint_matrix=P_symm,
-                             constraint_offset=offset, traj_colorscale='Agsunset', init_state_color='yellow')
+                fig = plot_system_3D(A=A_G, trajectories=state_trajs[val_idx], secondary_trajectories=aug_val_trajs,
+                                     fig=fig, constraint_matrix=P_symm, constraint_offset=offset,
+                                     traj_colorscale='Agsunset', init_state_color='yellow',
+                                     legendgroup="val")
 
-    fig.write_html(path_2_system / 'test_trajectories.html')
-
+            fig.write_html(path_2_system / 'test_trajectories.html')
+        if noise_level == 0 and fig is not None:
+            fig.show()
+    # fig.show()
     print(f"Recordings saved to {path_2_system}")

@@ -3,20 +3,25 @@ defaults:
 
 name: DPNet
 # Model hyperparameters
+
+# Symmetry exploitation parameters
 equivariant: False
-activation: Identity
-n_layers: 2             # Number MLPs' layers (including input and output layers)
-batch_norm: False       # Something wrong happens when we turn batch norm on. Performance goes to hell.
+group_avg_trick: True
+
+activation: ELU
+num_layers: 4             # Number MLPs' layers (including input and output layers)
+num_hidden_units: 128      # Number of hidden units in each layer
+batch_norm: ${model.equivariant}       # Something wrong happens when we turn batch norm on. Performance goes to hell.
 bias: False
 # Optimization hyperparameters parameters
 lr: 1e-3
 batch_size: 1024
 
 max_ck_window_length: ${system.pred_horizon}    # Maximum length of the Chapman-Kolmogorov window
-ck_w: 0.0                                   # Weight of the Chapman-Kolmogorov regularization term in the loss function
-orth_w: 0.1                                 # Weight of the orthonormal regularization term in the loss function
-aux_obs_space: False                     # Whether to use an auxiliary observable space.
-use_spectral_score: True                    # Whether to use the spectral or the correlation score
+ck_w: 0.0                                       # Weight of the Chapman-Kolmogorov regularization term in the loss function
+orth_w: 0.5                                     # Weight of the orthonormal regularization term in the loss function
+aux_obs_space: False                            # Whether to use an auxiliary observable space.
+use_spectral_score: True                        # Whether to use the spectral or the correlation score
 
-summary: ${model.name}-Equiv:${model.equivariant}-CK_w:${model.ck_w}-Orth_w:${model.orth_w}-Win:${model.max_ck_window_length}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.n_layers}-AOS:${model.aux_obs_space}-SS:${model.use_spectral_score}
+summary: ${model.name}-Equiv:${model.equivariant}-CK_w:${model.ck_w}-Orth_w:${model.orth_w}-Win:${model.max_ck_window_length}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.num_layers}-${model.num_hidden_units}-AOS:${model.aux_obs_space}-SS:${model.use_spectral_score}
 

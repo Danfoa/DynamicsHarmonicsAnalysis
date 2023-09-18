@@ -6,7 +6,7 @@ augment: False          # Weather to use data-augmentation of the dataset if the
 # Architectural and Task parameters
 equivariant: True      # Impose equivariance constraints on NNs
 activation: ReLU
-n_layers: 4             # Number MLPs' layers (including input and output layers)
+num_layers: 4             # Number MLPs' layers (including input and output layers)
 bias: True              # Use bias in the MLPs
 batch_norm: True        # Use batch normalization layers before activation functions in MLPs
 

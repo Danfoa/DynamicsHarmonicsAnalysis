@@ -148,23 +148,29 @@ class LightningModel(LightningModule):
 
     def on_validation_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):
-            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+            metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+            vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
+            self.log_metrics(scalar_metrics, suffix='')
+            self.log_vector_metrics(vector_metrics, type_sufix='')
 
     def on_validation_end(self) -> None:
         self.log_vector_metrics(flush=True)
 
         if self.val_metrics_fn is not None and self.trainer.current_epoch % self.log_figs_every_n_epochs == 0:
-            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="val")
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
 
     def on_test_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):
-            self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+            metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
+            vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
+            self.log_metrics(scalar_metrics, suffix='')
+            self.log_vector_metrics(vector_metrics, type_sufix='')
 
     def on_test_end(self) -> None:
         self.log_vector_metrics(flush=True)
 
         if self.test_metrics_fn is not None:
-            self.compute_figure_metrics(self.test_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="test")
+            self.compute_figure_metrics(self.test_metrics_fn, self.trainer.datamodule.test_dataloader(), suffix="test")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)

@@ -8,7 +8,8 @@ from escnn.nn import FieldType, GeometricTensor
 
 from nn.LinearDynamics import EquivariantLinearDynamics
 from nn.markov_dynamics import MarkovDynamicsModule
-from nn.mlp import EMLP, MLP
+from nn.mlp import MLP
+from nn.emlp import EMLP
 from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
