@@ -423,7 +423,7 @@ def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor
 
 
 def obs_state_space_metrics(obs_state_traj: Tensor,
-                            obs_state_traj_prime: Optional[Tensor],
+                            obs_state_traj_aux: Optional[Tensor],
                             representation: Optional[Representation] = None,
                             max_ck_window_length: int = 2):
     """ Compute the metrics of an observable space with expected linear dynamics.
@@ -431,7 +431,7 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
     This function computes the metrics of an observable space with expected linear dynamics. Specifically,
     Args:
         obs_state_traj (batch, time_horizon, obs_state_dim): trajectory of states
-        obs_state_traj_prime (batch, time_horizon, obs_state_dim): Auxiliary trajectory of states
+        obs_state_traj_aux (batch, time_horizon, obs_state_dim): Auxiliary trajectory of states
         representation: Symmetry representation on the observable space. If provided, the empirical covariance and
             cross-covariance operators will be improved using the group average trick
         max_ck_window_length: Maximum window length to compute the Chapman-Kolmogorov regularization term.
@@ -459,7 +459,7 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
     # CCov[i, j] := Cov(x_i, x'_j)     | i,j in [time_horizon], j > i  # Upper triangular tensor
     # Cov[t] := Cov(x_t, x_t)          | t in [time_horizon]
     # Cov_prime[t] := Cov(x'_t, x'_t)  | t in [time_horizon]
-    CCov, Cov, Cov_prime = empirical_cov_cross_cov(state_traj=obs_state_traj, state_traj_prime=obs_state_traj_prime,
+    CCov, Cov, Cov_prime = empirical_cov_cross_cov(state_traj=obs_state_traj, state_traj_prime=obs_state_traj_aux,
                                                    representation=representation, cov_window_size=max_ck_window_length,
                                                    debug=debug)
 

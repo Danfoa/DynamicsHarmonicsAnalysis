@@ -15,13 +15,17 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
+from nn.LinearDynamics import LinearDynamics
 from nn.TwinMLP import TwinMLP
+from nn.latent_markov_dynamics import LatentMarkovDynamics
+from nn.markov_dynamics import MarkovDynamics
 from nn.mlp import MLP
 from utils.losses_and_metrics import (
     forecasting_loss_and_metrics,
     obs_state_space_metrics,
     )
-from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, print_dict, random_orthogonal_matrix,
+from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, full_rank_lstsq, print_dict,
+                        random_orthogonal_matrix,
                         states_from_traj,
                         traj_from_states)
 from utils.plotting import (combine_side_by_side, plot_system_2D, plot_system_3D, plot_trajectories,
@@ -30,168 +34,91 @@ from utils.plotting import (combine_side_by_side, plot_system_2D, plot_system_3D
 log = logging.getLogger(__name__)
 
 
-class DmdSolver(Protocol):
-    def __call__(
-            self, X: Tensor, X_prime: Tensor, **kwargs
-            ) -> Tensor:
-        """Compute the least squares solution of the linear system X' = X·A.
-        Args:
-            X: (state_dim, n_samples) Data matrix of the initial states.
-            X_prime: (state_dim, n_samples) Data matrix of the next states.
-        Returns:
-            A: (state_dim, state_dim) Least squares solution of the least square problem min_A ||X_prime - A·X||_F
-        """
-        ...
-
-
-class DPNet(torch.nn.Module):
-
-    PROJECTION = 0
-    INV_PROJECTION = 1
-    FORECAST = 2
+class DPNet(LatentMarkovDynamics):
+    _default_obs_fn_params = dict(
+        num_layers=4,
+        num_hidden_units=128,
+        activation=torch.nn.ReLU,
+        batch_norm=True,
+        bias=False,
+        init_mode='fan_in',
+        backbone_layers=-2  # num_layers - 2
+        )
 
     def __init__(
             self,
             state_dim: int,
             obs_state_dim: int,
-            num_layers: int = 4,
-            num_hidden_units: int = 128,
-            activation=torch.nn.ReLU,
+            dt: Union[float, int] = 1,
             max_ck_window_length: int = 6,
             ck_w: float = 0.1,
             orth_w: float = 0.1,
             use_spectral_score: bool = True,
             aux_obs_space: bool = False,
-            dmd_algorithm: Optional[DmdSolver] = None,
-            dt: float = 1.0,
-            batch_norm: bool = True,
-            bias: bool = True,
-            init_mode: Optional[str] = 'fan_in',
-            backbone_layers: Optional[int] = None,
+            obs_fn_params: Optional[dict] = None,
+            linear_decoder: bool = True,
+            **markov_dyn_params
             ):
-        super().__init__()
-        self.state_dim = state_dim
-        self.dt = dt
-        self.obs_state_dim = obs_state_dim
         assert ck_w == 0 or max_ck_window_length >= 1, "Minimum window_size of Chapman-Kolmogorov reg is 2 steps"
+        self.state_dim, self.obs_state_dim = state_dim, obs_state_dim
+        self.dt = dt
         self.max_ck_window_length = max_ck_window_length
         self.ck_w = ck_w
         self.orth_w = orth_w
-        self.dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else self._full_rank_lstsq
         self.use_spectral_score = use_spectral_score
         self.aux_obs_space = aux_obs_space
+        self.inverse_projector = None  # if linear decoder is true, this is the map between obs to states.
+        self.linear_decoder = linear_decoder
 
-        self.obs_state_fn = self.build_obs_fn(num_layers=num_layers,
-                                              activation=activation,
-                                              num_hidden_units=num_hidden_units,
-                                              with_bias=bias,
-                                              batch_norm=batch_norm,
-                                              init_mode=init_mode,
-                                              backbone_layers=backbone_layers)
-        # if self.non_linear_inv_obs_fn:
-        #     self.inv_obs_state_fn = self.build_inv_obs_fn(num_layers=num_layers,
-        #                                                   activation=activation,
-        #                                                   num_hidden_units=num_hidden_units,
-        #                                                   with_bias=bias,
-        #                                                   batch_norm=batch_norm,
-        #                                                   init_mode=init_mode)
-
+        _obs_fn_params = self._default_obs_fn_params.copy()
+        if obs_fn_params is not None:
+            _obs_fn_params.update(obs_fn_params)
+        # Build the observation function and its inverse
+        obs_fn = self.build_obs_fn(**_obs_fn_params)
+        inv_obs_fn = self.build_inv_obs_fn(linear_decoder=linear_decoder, **_obs_fn_params)
+        # Define the linear dynamics of the observable state space
+        obs_state_dym = self.build_obs_dyn_module()
         # Variable holding the transfer operator used to evolve the observable state in time.
-        self.transfer_op = None
-        self.inverse_projector = None
 
-        self.train_mode = DPNet.PROJECTION
+        # Initialize the base class
+        super(DPNet, self).__init__(obs_fn=obs_fn,
+                                    inv_obs_fn=inv_obs_fn,
+                                    obs_state_dynamics=obs_state_dym,
+                                    state_dim=state_dim,
+                                    obs_state_dim=obs_state_dim,
+                                    dt=dt,
+                                    **markov_dyn_params)
 
-    def project(self, state_trajectory: Tensor, **kwargs) -> [dict[str, Tensor]]:
 
-        obs_state_traj, obs_state_traj_prime = self.obs_state_fn(state_trajectory)
-
-        return obs_state_traj, obs_state_traj_prime
-
-    def pre_process_state(self, state: Tensor, next_state: Tensor) -> Tensor:
-        state_trajectory = traj_from_states(state=state, next_state=next_state)
-        self._batch_size = state_trajectory.shape[0]
-        flat_state_trajectory = batched_to_flat_trajectory(state_trajectory)
-        return flat_state_trajectory
-
-    def post_process_projections(self, obs_state_traj: Tensor, obs_state_traj_prime: Tensor) -> [Tensor, Tensor]:
-        # Reshape to (batch, time, obs_state_dim)
-        obs_state_traj_p = flat_to_batched_trajectory(obs_state_traj,
-                                                      batch_size=self._batch_size, state_dim=self.obs_state_dim)
-        obs_state_traj_pp = flat_to_batched_trajectory(obs_state_traj_prime,
-                                                       batch_size=self._batch_size, state_dim=self.obs_state_dim)
-
-        # Get view of initial and next state
-        return obs_state_traj_p, obs_state_traj_pp
-
-    def post_process_state(self, state_traj: Tensor) -> Tensor:
-        return state_traj
-
-    def forward(self, state: Tensor, next_state: Optional[Tensor], n_steps: int = 0) -> [dict[str, Tensor]]:
+    def forecast(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
+
+        This function uses the empirical transfer operator to compute forcast the observable state.
         Args:
-            state: (batch, state_dim) Initial state of the system.
-            next_state: (batch, time - 1, state_dim) Next `time-1` states of the system.
-            n_steps: Number of steps to predict.
-        Returns:
-            predictions (dict): A dictionary containing the predicted states under the key 'state' and
-            potentially other auxiliary measurements.
-        """
-        # Apply pre-processing to the initial state `w0` and state trajectory `[w1, w2, ..., wH]`
-        # obtaining a stare trajectory of shape: (batch * time, state_dim) tensor
-        state_traj = self.pre_process_state(state=state, next_state=next_state)
-        # Compute the projection of the state trajectory in the main and auxiliary observable states
-        obs_state_traj, obs_state_traj_prime = self.project(state_trajectory=state_traj)
-        # Post-process observation state trajectories to get (batch, time, obs_state_dim) tensors
-        obs_state_traj, obs_space_traj_prime = self.post_process_projections(obs_state_traj, obs_state_traj_prime)
-
-        output = dict(obs_state_traj=obs_state_traj, obs_state_traj_prime=obs_space_traj_prime)
-
-        if n_steps > 0 and self.transfer_op is not None:
-            # Compute prediction of state and observable state trajectproes
-            pred_state_traj, pred_obs_state_traj = self.forecast(init_obs_state=obs_state_traj[:, 0, :],
-                                                                 n_steps=n_steps)
-            pred_state_traj = self.post_process_state(state_traj=pred_state_traj)
-
-            pred_output = dict(pred_state_traj=pred_state_traj, pred_obs_state_traj=pred_obs_state_traj)
-            output.update(pred_output)
-
-        return output
-
-    @torch.no_grad()
-    def forecast(
-            self, init_obs_state: Tensor, n_steps: int = 1, **kwargs
-            ) -> [dict[str, Tensor]]:
-        """This function uses the empirical transfer operator to compute forcast the observable state.
-
-        Because in DP nets the forcasting error is not used in the loss term, this function is by construction
-        not generating the computational graph needed for gradient propagation.
-        Args:
-            init_obs_state: (batch_dim, obs_state_dim) Initial observable state of the system.
+            state: (batch_dim, obs_state_dim) Initial observable state of the system.
             n_steps: Number of steps to predict.
             **kwargs:
         Returns:
             pred_next_obs_state: (batch_dim, n_steps, obs_state_dim) Predicted observable state.
         """
+        assert state.shape[-1] == self.state_dim, f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
+        time_horizon = n_steps + 1
 
+        obs_state = self.obs_fn(state)
+        pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state, n_steps=n_steps)
+        pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
         if self.transfer_op is None:
             raise RuntimeError("The transfer operator not approximated yet. Call `approximate_transfer_operator`")
 
-        # Use the empirical transfer operator to compute the maximum likelihood prediction of the trajectory
-        pred_obs_state_traj = [init_obs_state]
-        # The transfer operator of this Isotypic subspace
-        for step in range(n_steps):
-            # Compute the next state prediction s_t+1 = K @ s_t
-            next_obs_state = (self.transfer_op @ pred_obs_state_traj[-1].T).T
-            pred_obs_state_traj.append(next_obs_state)
-
-        pred_obs_state_traj = torch.stack(pred_obs_state_traj, dim=1)
-        pred_state_traj = torch.einsum('so, bto -> bts', self.inverse_projector, pred_obs_state_traj)
+        assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), \
+            f"{pred_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.state_dim})"
+        assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), \
+            f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
         return pred_state_traj, pred_obs_state_traj
 
     def compute_loss_and_metrics(self,
                                  obs_state_traj: Tensor,
-                                 obs_state_traj_prime: Tensor,
+                                 obs_state_traj_aux: Tensor,
                                  pred_obs_state_traj: Optional[Tensor] = None,
                                  state: Optional[Tensor] = None,
                                  next_state: Optional[Tensor] = None,
@@ -200,7 +127,7 @@ class DPNet(torch.nn.Module):
 
         state_traj = traj_from_states(state, next_state)
 
-        obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, obs_state_traj_prime)
+        obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, obs_state_traj_aux)
 
         loss = self.compute_loss(spectral_score=obs_space_metrics["spectral_score"],
                                  corr_score=obs_space_metrics["corr_score"],
@@ -225,13 +152,13 @@ class DPNet(torch.nn.Module):
 
         return loss, obs_space_metrics
 
-    def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_prime: Optional[Tensor] = None) -> dict:
-        if obs_state_traj_prime is None and self.aux_obs_space:
-            raise ValueError("aux_obs_space is True but obs_state_traj_prime is None")
+    def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None) -> dict:
+        if obs_state_traj_aux is None and self.aux_obs_space:
+            raise ValueError("aux_obs_space is True but obs_state_traj_aux is None")
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
         obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
-                                                    obs_state_traj_prime=obs_state_traj_prime,
+                                                    obs_state_traj_aux=obs_state_traj_aux,
                                                     max_ck_window_length=self.max_ck_window_length)
         return obs_space_metrics
 
@@ -257,17 +184,14 @@ class DPNet(torch.nn.Module):
             loss: Scalar tensor containing the DPNet loss.
         """
 
-        transfer_inv_score = spectral_score if self.use_spectral_score else corr_score
+        transfer_op_inv_score = spectral_score if self.use_spectral_score else corr_score
 
-        # normalize score by dimension of the observable state. This way the weights of the loss terms remain
-        # approximately invariant to the dimension of the observable state.
-        transfer_inv_score = torch.mean(transfer_inv_score) #/ self.obs_state_dim
-        ck_regularization = self.ck_w * torch.mean(ck_reg) #/ self.obs_state_dim
-        orth_regularization = self.orth_w * torch.mean(orth_reg) #/ self.obs_state_dim
+        transfer_op_inv_score = torch.mean(transfer_op_inv_score)  # / self.obs_state_dim
+        ck_regularization = self.ck_w * torch.mean(ck_reg)  # / self.obs_state_dim
+        orth_regularization = (self.orth_w * self.obs_state_dim) * torch.mean(orth_reg)  # / self.obs_state_dim
 
-        score = transfer_inv_score - ck_regularization - orth_regularization
+        score = transfer_op_inv_score - ck_regularization - orth_regularization
 
-        # Apply the orthogonal regularization term
         loss = -score  # Change sign to minimize the loss and maximize the score.
         assert not torch.isnan(loss), f"Loss is NaN."
         return loss
@@ -277,7 +201,7 @@ class DPNet(torch.nn.Module):
                      state: Tensor,
                      next_state: Tensor,
                      obs_state_traj: Tensor,
-                     obs_state_traj_prime: Optional[Tensor] = None,
+                     obs_state_traj_aux: Optional[Tensor] = None,
                      pred_state_traj: Optional[Tensor] = None,
                      pred_obs_state_traj: Optional[Tensor] = None,
                      ) -> (dict[str, Figure], dict[str, Tensor]):
@@ -287,8 +211,8 @@ class DPNet(torch.nn.Module):
         # Detach all arguments and ensure they are in CPU
         state_traj = state_traj.detach().cpu().numpy()
         obs_state_traj = obs_state_traj.detach().cpu().numpy()
-        if obs_state_traj_prime is not None:
-            obs_state_traj_prime = obs_state_traj_prime.detach().cpu().numpy()
+        if obs_state_traj_aux is not None:
+            obs_state_traj_aux = obs_state_traj_aux.detach().cpu().numpy()
         if pred_state_traj is not None:
             pred_state_traj = pred_state_traj.detach().cpu().numpy()
         if pred_obs_state_traj is not None:
@@ -307,10 +231,12 @@ class DPNet(torch.nn.Module):
                                      title='obs_state', num_trajs_to_show=20)
             figs = dict(prediction=fig, state=fig_3ds, obs_state=fig_3do)
         elif self.obs_state_dim == 2:
-            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.25, num_trajs_to_show=10)
-            fig_2do = plot_system_2D(trajs=obs_state_traj, secondary_trajs=pred_obs_state_traj, num_trajs_to_show=10)
+            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.2,
+                                     num_trajs_to_show=10)
+            fig_2do = plot_system_2D(trajs=obs_state_traj, secondary_trajs=pred_obs_state_traj, alpha=0.2,
+                                     num_trajs_to_show=10)
             if self.aux_obs_space:
-                plot_system_2D(trajs=obs_state_traj_prime, legendgroup='aux', num_trajs_to_show=10, fig=fig_2ds)
+                plot_system_2D(trajs=obs_state_traj_aux, legendgroup='aux', num_trajs_to_show=10, fig=fig_2ds)
             figs = dict(prediction=fig, state=fig_2ds, obs_state=fig_2do)
         else:
             figs = dict(prediction=fig)
@@ -345,68 +271,46 @@ class DPNet(torch.nn.Module):
         for key, value in train_data.items():
             train_data[key] = value[:6]
 
-        self.eval()
-        pred = self(**train_data)
-        self.train()
-
-        state = train_data["state"]
-        obs_state_traj = pred["obs_state_traj"]
-        # obs_state_traj_prime = pred["obs_space_traj_prime"]
+        # Apply any pre-processing to the state and next state
+        state, next_state = train_data["state"], train_data["next_state"]
+        state_traj = self.pre_process_state(state, next_state)
+        # Obtain the observable state
+        obs_fn_output = self.obs_fn(state_traj)
+        # Post process observable state
+        obs_state_trajs = self.post_process_obs_state(*obs_fn_output)
+        obs_state_traj = obs_state_trajs.pop('obs_state_traj')
 
         assert obs_state_traj.shape[1] == 2, f"Expected single step datapoints, got {obs_state_traj.shape[1]} steps."
-        obs_state, next_obs_state = obs_state_traj[:, 0, :], obs_state_traj[:, 1, :]
-
+        obs_state, next_obs_state = states_from_traj(obs_state_traj)
+        next_obs_state = next_obs_state.squeeze(1)
         # Generate the data matrices of x(w_t) and x(w_t+1)
         X = obs_state.T  # (obs_state_dim, n_samples)
         X_prime = next_obs_state.T  # (obs_state_dim, n_samples)
-        empirical_transfer_op = self.dmd_algorithm(X, X_prime)
-        self.transfer_op = empirical_transfer_op
-        # Approximate a linear decoder from "main" observable space to state space.
-        X = obs_state.T  # (obs_state_dim, n_samples)
-        Y = state.T  # (state_dim, n_samples)
-        self.inverse_projector = self._full_rank_lstsq(X, Y)
+        solution_op_metrics = self.obs_state_dynamics.update_transfer_op(X=X, X_prime=X_prime)
 
-        obs_one_step_error = torch.mean(torch.abs(next_obs_state.T - self.transfer_op @ obs_state.T))
+        metrics = solution_op_metrics
+        metrics['rank_obs_state'] = torch.linalg.matrix_rank(X).detach().to(torch.float)
 
-        rec_error = torch.mean(torch.abs(state.T - self.inverse_projector @ obs_state.T))
+        if self.linear_decoder:
+            inv_projector, inv_projector_metrics = self.empirical_lin_inverse_projector(state, obs_state)
+            metrics.update(inv_projector_metrics)
+            self.inverse_projector = inv_projector
 
-        return dict(solution_op_rank=torch.linalg.matrix_rank(self.transfer_op).to(dtype=torch.float),
-                    solution_op_cond_num=torch.linalg.cond(self.transfer_op).to(dtype=torch.float),
-                    solution_op_error=obs_one_step_error.to(dtype=torch.float),
-                    inverse_projector_rank=torch.linalg.matrix_rank(self.inverse_projector),
-                    inverse_projector_cond_num=torch.linalg.cond(self.inverse_projector),
-                    inverse_projector_error=rec_error,
-                    rank_obs_state=torch.linalg.matrix_rank(obs_state))
+        return metrics
 
-    @staticmethod
-    def _full_rank_lstsq(X: Tensor, Y: Tensor, driver='gelsd', **kwargs) -> Tensor:
-        """Compute the least squares solution of the linear system `X' = A·X`. Assuming full rank X and A.
-        Args:<
-            X: (|x|, n_samples) Data matrix of the initial states.
-            Y: (|y|, n_samples) Data matrix of the next states.
-        Returns:
-            A: (|y|, |x|) Least squares solution of the linear system `X' = A·X`.
-        """
-        assert (
-                X.ndim == 2 and Y.ndim == 2 and X.shape[1] == Y.shape[1]
-        ), f"X: {X.shape}, Y: {Y.shape}. Expected (|x|, n_samples) and (|y|, n_samples) respectively."
+    def build_obs_fn(self, num_layers, identity=False, **kwargs):
+        if identity:
+            return lambda x: (x, x)
 
-        # Torch convention uses Y:(n_samples, |y|) and X:(n_samples, |x|) to solve the least squares
-        # problem for `Y = X·A`, instead of our convention `Y = A·X`. So we have to do the appropriate transpose.
-        result = torch.linalg.lstsq(X.T.detach().cpu().to(dtype=torch.double),
-                                    Y.T.detach().cpu().to(dtype=torch.double), rcond=None, driver=driver)
-        A = result.solution.T.to(device=X.device, dtype=X.dtype)
-        # y_hat = A @ X
-        return A
-
-    def build_obs_fn(self, num_layers, **kwargs):
         num_backbone_layers = kwargs.pop('backbone_layers', num_layers - 2 if self.aux_obs_space else 0)
+        if num_backbone_layers < 0:
+            num_backbone_layers = num_layers - num_backbone_layers
         backbone_params = None
         if num_backbone_layers > 0 and self.aux_obs_space:
             backbone_feat_dim = kwargs.get('num_hidden_units')
             backbone_params = dict(in_dim=self.state_dim, out_dim=backbone_feat_dim,
                                    num_layers=num_backbone_layers, head_with_activation=True, **copy.copy(kwargs))
-            kwargs['with_bias'] = False
+            kwargs['bias'] = False
             kwargs['batch_norm'] = False
             obs_fn_params = dict(in_dim=backbone_feat_dim, out_dim=self.obs_state_dim,
                                  num_layers=num_layers - num_backbone_layers, head_with_activation=False, **kwargs)
@@ -416,8 +320,46 @@ class DPNet(torch.nn.Module):
 
         return TwinMLP(net_kwargs=obs_fn_params, backbone_kwargs=backbone_params, fake_aux_fn=not self.aux_obs_space)
 
-    def build_inv_obs_fn(self, num_layers, **kwargs):
-        return MLP(in_dim=self.obs_state_dim, out_dim=self.state_dim, num_layers=num_layers, **kwargs)
+    def build_inv_obs_fn(self, num_layers, linear_decoder: bool,  identity=False, **kwargs):
+        if identity:
+            return lambda x: x
+
+        if linear_decoder:
+            def decoder(dpnet: DPNet, obs_state: Tensor):
+                assert hasattr(dpnet, 'inverse_projector'), "DPNet.inverse_projector not initialized."
+                return torch.nn.functional.linear(obs_state, dpnet.inverse_projector)
+
+            return lambda x: decoder(self, x)
+        else:
+
+            return MLP(in_dim=self.obs_state_dim, out_dim=self.state_dim, num_layers=num_layers, **kwargs)
+
+    def build_obs_dyn_module(self) -> MarkovDynamics:
+        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt)
+
+    def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
+        """ Compute the empirical inverse projector from the observable state to the pre-processed state.
+
+        Args:
+            state: (batch, state_dim) Tensor containing the pre-processed state.
+            obs_state: (batch, obs_state_dim) Tensor containing the observable state.
+        Returns:
+            A: (state_dim, obs_state_dim) Tensor containing the empirical inverse projector.
+            rec_error: Scalar tensor containing the reconstruction error or "residual".
+        """
+        # Inverse projector is computed from the observable state to the pre-processed state
+        pre_state = self.pre_process_state(state)
+        X = obs_state.T  # (obs_state_dim, n_samples)
+        Y = pre_state.T  # (state_dim, n_samples)
+        A = full_rank_lstsq(X, Y)
+
+        rec_error = torch.nn.functional.mse_loss(A @ X, Y)
+
+        metrics = dict(inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
+                       inverse_projector_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
+                       inverse_projector_error=rec_error)
+
+        return A, metrics
 
     def __repr__(self):
         str = super().__repr__()
@@ -434,98 +376,27 @@ class DPNet(torch.nn.Module):
         return str
 
     def get_hparams(self):
-        return dict(encoder=self.obs_state_fn.get_hparams())
+        return dict(encoder=self.obs_fn.get_hparams())
 
 
 if __name__ == "__main__":
-    torch.set_printoptions(precision=3)
-    seed_everything(10)
-    path_to_data = Path("data")
-    assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
+    n_trajs = 1
+    time = 3
+    state_dim = 2
+    obs_state_dim = state_dim
 
-    log.setLevel(logging.DEBUG)
-    log.level = logging.DEBUG
-    # Find all dynamic systems recordings
-    path_to_data /= "linear_system"
-    path_to_dyn_sys_data = set(
-        [a.parent for a in list(path_to_data.rglob("*train.pkl"))]
-        )
-    # Select a dynamical system
-    mock_path = path_to_dyn_sys_data.pop()
+    change_of_basis = None# Tensor(random_orthogonal_matrix(state_dim))
 
-    pred_horizon = 50
-    batch_size = 100
-    device = torch.device("cuda:0")
-    data_module = DynamicsDataModule(
-        data_path=mock_path,
-        pred_horizon=pred_horizon,
-        eval_pred_horizon=100,
-        frames_per_step=1,
-        num_workers=0,
-        batch_size=batch_size,
-        augment=True,
-        device=device,
-        )
-    data_module.prepare_data()
+    test_dpnet = DPNet(state_dim=state_dim,
+                       obs_state_dim=obs_state_dim,
+                       state_change_of_basis=change_of_basis,
+                       obs_fn_params=dict(identity=True))
 
-    dt = data_module.dt
-    num_encoder_layers = 2
+    random_state_traj = torch.randn(n_trajs, time, state_dim)
 
-    state_type = data_module.state_field_type
-    obs_state_dimension = state_type.size * 1
-    num_encoder_hidden_neurons = obs_state_dimension * 2
-    max_ck_window_length = pred_horizon
+    out = test_dpnet(state=random_state_traj[:, 0, :], next_state=random_state_traj[:, 1:, :])
+    pred_state_traj = out['pred_state_traj']
 
-    dp_net = DPNet(
-        state_dim=data_module.state_field_type.size,
-        obs_state_dim=obs_state_dimension,
-        num_layers=num_encoder_layers,
-        num_hidden_units=num_encoder_hidden_neurons,
-        max_ck_window_length=max_ck_window_length,
-        activation=torch.nn.Identity,
-        bias=True,
-        batch_norm=False,
-        # init_mode='normal.1',
-        )
-    print(dp_net)
-    dp_net.to(device)
+    assert pred_state_traj.shape == random_state_traj.shape, f"{pred_state_traj.shape} != {random_state_traj.shape}"
+    assert torch.allclose(pred_state_traj, random_state_traj, rtol=1e-5, atol=1e-5), f"{pred_state_traj - random_state_traj}"
 
-    dp_net.approximate_transfer_operator(data_module.predict_dataloader())
-
-    start_time = time.time()
-    profiler = cProfile.Profile()
-    profiler.enable()
-    for i, batch in tqdm(enumerate(data_module.train_dataloader())):
-        for k, v in batch.items():
-            batch[k] = v.to(device)
-        state, next_state = batch["state"], batch["next_state"]
-        n_steps = batch["next_state"].shape[1]
-
-        out = dp_net(state=state, next_state=next_state, n_steps=n_steps)
-
-        # Test loss and metrics
-        loss, metrics = dp_net.compute_loss_and_metrics(**batch, **out)
-        if i > 50:
-            break
-    profiler.disable()
-
-    figs, val_metrics = dp_net.eval_metrics(**batch, **out)
-
-    figs["prediction"].show()
-    figs["state"].show()
-    figs["obs_state"].show()
-
-    print(metrics.get("pred_loss", None))
-
-    # print(f"Computing forward pass and loss/metrics for {id} batches took {time.time() - start_time:.2f}[s]"
-    #       f"({(time.time() - start_time) / i:.2f} seconds per batch for {pred_horizon} steps in pred horizon)")
-
-    # Create a pstats object
-    stats = pstats.Stats(profiler)
-
-    # Sort stats by the cumulative time spent in the function
-    stats.sort_stats("cumulative")
-
-    # Print only the info for the functions defined in your script
-    # Assuming your script's name is 'your_script.py'
-    stats.print_stats("koopman_robotics")

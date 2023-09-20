@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from escnn.nn import FieldType, GeometricTensor
 
-from nn.LinearDynamics import EquivariantLinearDynamics
-from nn.markov_dynamics import MarkovDynamicsModule
+from nn.LinearDynamics import LinearDynamics
+from nn.markov_dynamics import MarkovDynamics
 from nn.mlp import MLP
 from nn.emlp import EMLP
 from utils.representation_theory import isotypic_basis
@@ -39,7 +39,7 @@ def compute_invariant_features(x: torch.Tensor, field_type: FieldType) -> torch.
     return inv_features
 
 
-class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
+class EquivDynamicsAutoEncoder(MarkovDynamics):
     TIME_DIM = 1
 
     def __init__(self,
@@ -74,12 +74,12 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
                             num_hidden_units=num_encoder_hidden_neurons,
                             num_layers=num_encoder_layers,
                             activation=activation,
-                            with_bias=True)
+                            bias=True)
         self.decoder = EMLP(in_type=self.obs_state_type,
                             out_type=self.state_type,
                             num_hidden_units=num_encoder_hidden_neurons,
                             num_layers=num_encoder_layers,
-                            with_bias=True)
+                            bias=True)
         # Define the linear dynamics module.
         self.obs_state_dynamics = EquivariantLinearDynamics(in_type=self.obs_state_type,
                                                             dt=self.dt,
@@ -100,7 +100,7 @@ class EquivDynamicsAutoEncoder(MarkovDynamicsModule):
                                   num_hidden_units=num_encoder_hidden_neurons,
                                   num_layers=3,
                                   activation=torch.nn.ReLU,
-                                  with_bias=True)
+                                  bias=True)
             raise NotImplementedError("TODO: Need to implement this. "
                                       "There is no easy way to get batched parametrization of equivariant maps")
 

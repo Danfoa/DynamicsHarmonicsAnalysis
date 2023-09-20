@@ -1,0 +1,10 @@
+defaults:
+  - dpnet
+
+name: E-DPNet
+
+# Symmetry exploitation parameters
+equivariant: True
+group_avg_trick: True
+
+activation: ELU

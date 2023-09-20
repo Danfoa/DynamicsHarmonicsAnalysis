@@ -13,7 +13,7 @@ import wandb
 from lightning import LightningModule
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
-from nn.markov_dynamics import MarkovDynamicsModule
+from nn.markov_dynamics import MarkovDynamics
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class LightningModel(LightningModule):
         self.save_hyperparameters()
         self._log_cache = {}
 
-    def set_model(self, model: MarkovDynamicsModule):
+    def set_model(self, model: MarkovDynamics):
         self.model = model
         if hasattr(model, 'eval_metrics'):
             self.test_metrics_fn = model.eval_metrics
@@ -59,8 +59,7 @@ class LightningModel(LightningModule):
         return self.model(inputs)
 
     def training_step(self, batch, batch_idx):
-        n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps)
+        outputs = self.model(**batch)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
@@ -70,8 +69,7 @@ class LightningModel(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps)
+        outputs = self.model(**batch)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
@@ -81,9 +79,7 @@ class LightningModel(LightningModule):
         return {'output': outputs, 'input': batch}
 
     def test_step(self, batch, batch_idx):
-        n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps)
-
+        outputs = self.model(**batch)
         loss, metrics = self.model.compute_loss_and_metrics(**outputs, **batch)
         vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
 
@@ -122,8 +118,8 @@ class LightningModel(LightningModule):
     def on_train_start(self):
         # TODO: Add number of layers and hidden channels dimensions.
         hparams = flatten_dict(self._run_hps)
-        if hasattr(self.model, "get_hparams"):
-            hparams.update(flatten_dict(self.model.get_hparams()))
+        # if hasattr(self.model, "get_hparams"):
+        #     hparams.update(flatten_dict(self.model.get_hparams()))
 
         if self.val_metrics_fn is not None:
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
@@ -247,8 +243,7 @@ class LightningModel(LightningModule):
     @torch.no_grad()
     def compute_figure_metrics(self, metrics_fn: Callable, dataloader, suffix=''):
         batch = next(iter(dataloader))
-        n_steps = batch['next_state'].shape[1]
-        outputs = self.model(**batch, n_steps=n_steps)
+        outputs = self.model(**batch)
 
         figs, metrics = metrics_fn(**outputs, **batch)
 

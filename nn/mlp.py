@@ -15,7 +15,7 @@ class MLP(torch.nn.Module):
                  out_dim: int,
                  num_hidden_units: int = 64,
                  num_layers: int = 3,
-                 with_bias: bool = True,
+                 bias: bool = True,
                  batch_norm: bool = True,
                  head_with_activation: bool = False,
                  activation: Union[torch.nn.Module, List[torch.nn.Module]] = torch.nn.ReLU,
@@ -33,7 +33,7 @@ class MLP(torch.nn.Module):
             activation (escnn.nn.EquivariantModule, list(escnn.nn.EquivariantModule)): If a single activation module is
             provided it will be used for all layers except the output layer. If a list of activation modules is provided
             then `num_layers` activation equivariant modules should be provided.
-            with_bias: Whether to include a bias term in the linear layers.
+            bias: Whether to include a bias term in the linear layers.
             init_mode: Not used until now. Will be used to initialize the weights of the MLP
         """
         super().__init__()
@@ -55,7 +55,7 @@ class MLP(torch.nn.Module):
             dim_out = num_hidden_units
 
             block = torch.nn.Sequential()
-            block.add_module(f"linear_{n}", torch.nn.Linear(dim_in, dim_out, bias=with_bias))
+            block.add_module(f"linear_{n}", torch.nn.Linear(dim_in, dim_out, bias=bias))
             if batch_norm:
                 block.add_module(f"batchnorm_{n}", torch.nn.BatchNorm1d(dim_out))
             block.add_module(f"act_{n}", activation())
@@ -65,7 +65,7 @@ class MLP(torch.nn.Module):
 
         # Add last layer
         head_block = torch.nn.Sequential()
-        head_block.add_module(f"linear_{num_layers - 1}", torch.nn.Linear(in_features=dim_out, out_features=self.dim_output, bias=with_bias))
+        head_block.add_module(f"linear_{num_layers - 1}", torch.nn.Linear(in_features=dim_out, out_features=self.dim_output, bias=bias))
         if head_with_activation:
             if batch_norm:
                 head_block.add_module(f"batchnorm_{num_layers - 1}", torch.nn.BatchNorm1d(dim_out))

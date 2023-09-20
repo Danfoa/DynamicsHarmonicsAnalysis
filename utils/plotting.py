@@ -100,13 +100,12 @@ def plot_system_2D(trajs, secondary_trajs=None, P=None, z_constraint=None, fig=N
                 )
 
             # Complementary color; here just a dummy example, you can set a real complementary color
-
             fig.add_trace(
                 go.Scatter(
                     x=[secondary_traj[0, 0]],
                     y=[secondary_traj[0, 1]],
                     mode='markers',
-                    marker=dict(color=color, size=initial_point_size*1.1),
+                    marker=dict(color=color, size=initial_point_size * 1.1),
                     opacity=alpha,
                     showlegend=False,
                     legendgroup=secondary_legend_group,
@@ -118,15 +117,8 @@ def plot_system_2D(trajs, secondary_trajs=None, P=None, z_constraint=None, fig=N
         fig.update_layout(
             plot_bgcolor='rgba(245, 245, 245, 1)',
             paper_bgcolor='rgba(245, 245, 245, 1)',
-            xaxis=dict(
-                range=[-bound * 1.1, bound * 1.1],
-                scaleratio=1,
-                scaleanchor="y"
-                ),
-            yaxis=dict(
-                range=[-bound * 1.1, bound * 1.1],
-                scaleratio=1
-                )
+            xaxis=dict(range=[-bound * 1.1, bound * 1.1], scaleratio=1, scaleanchor="y"),
+            yaxis=dict(range=[-bound * 1.1, bound * 1.1], scaleratio=1)
             )
     return fig
 
@@ -326,7 +318,7 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
                        line=dict(color='red', width=2),
                        name=f"MSE",
                        legendgroup=f"MSE", showlegend=False),
-            row=num_rows, col=num_rows + col_shift
+            row=num_rows, col=num_cols + col_shift
             )
         fig.update_yaxes(title_text="Mean Square Error", row=num_rows, col=num_cols + col_shift)
         fig.update_xaxes(title_text=f"Time[{'s' if dt != 1 else 'steps'}]", row=num_rows, col=num_cols + col_shift)

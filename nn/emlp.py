@@ -1,5 +1,5 @@
 import logging
-from typing import List, Union
+from typing import List, Optional, Union
 
 import escnn
 import numpy as np
@@ -17,8 +17,8 @@ class EMLP(EquivariantModule):
                  out_type: FieldType,
                  num_hidden_units: int = 64,
                  num_layers: int = 3,
-                 with_bias: bool = True,
-                 activation: str = "ELU",
+                 bias: bool = True,
+                 activation: Union[str, EquivariantModule] = "ELU",
                  head_with_activation: bool = False,
                  batch_norm: bool = True,
                  init_mode="fan_in"):
@@ -39,7 +39,7 @@ class EMLP(EquivariantModule):
             will be ceil(num_hidden_units/|G|). Since we assume intermediate embeddings are regular fields.
             num_layers: Number of layers in the MLP including input and output/head layers. That is, the number of
             hidden layers will be num_layers - 2.
-            with_bias: Whether to include a bias term in the linear layers.
+            bias: Whether to include a bias term in the linear layers.
             activation (escnn.nn.EquivariantModule, list(escnn.nn.EquivariantModule)): If a single activation module is
             provided it will be used for all layers except the output layer. If a list of activation modules is provided
             then `num_layers` activation equivariant modules should be provided.
@@ -51,17 +51,23 @@ class EMLP(EquivariantModule):
         self.in_type, self.out_type = in_type, out_type
         self.gspace = self.in_type.gspace
         self.group = self.gspace.fibergroup
-        self.activation = activation.lower()
 
         self.num_layers = num_layers
         if self.num_layers == 1 and not head_with_activation:
             log.warning(f"{self} model with 1 layer and no activation. This is equivalent to a linear map")
 
-        # Approximate the num of neurons as the num of signals in the space spawned by the irreps of the input type
-        self.num_hidden_regular_fields = int(np.ceil(num_hidden_units // self.in_type.size))
-        # To compute the signal over the group we use all elements for finite groups
-        activation = self.get_activation(self.activation)
-        hidden_type = activation.in_type
+        if isinstance(activation, str):
+            # Approximate the num of neurons as the num of signals in the space spawned by the irreps of the input type
+            self.num_hidden_regular_fields = int(np.ceil(num_hidden_units // self.in_type.size))
+            # To compute the signal over the group we use all elements for finite groups
+            activation = self.get_activation(self.activation, in_type=in_type, channels=self.num_hidden_regular_fields)
+            hidden_type = activation.in_type
+            self.activation = activation
+        elif isinstance(activation, EquivariantModule):
+            hidden_type = activation.in_type
+            self.activation = activation
+        else:
+            raise ValueError(f"Activation type {type(activation)} not supported.")
 
         input_irreps = set(in_type.representation.irreps)
         inner_irreps = set(out_type.irreps)
@@ -77,7 +83,7 @@ class EMLP(EquivariantModule):
             layer_out_type = hidden_type
 
             block = escnn.nn.SequentialModule()
-            block.add_module(f"linear_{n}", escnn.nn.Linear(layer_in_type, layer_out_type, bias=with_bias))
+            block.add_module(f"linear_{n}", escnn.nn.Linear(layer_in_type, layer_out_type, bias=bias))
             if batch_norm:
                 block.add_module(f"batchnorm_{n}", escnn.nn.IIDBatchNorm1d(layer_out_type)),
             block.add_module(f"act_{n}", activation)
@@ -87,7 +93,7 @@ class EMLP(EquivariantModule):
 
         # Add final layer
         head_block = escnn.nn.SequentialModule()
-        head_block.add_module(f"linear_{num_layers - 1}", escnn.nn.Linear(layer_in_type, out_type, bias=with_bias))
+        head_block.add_module(f"linear_{num_layers - 1}", escnn.nn.Linear(layer_in_type, out_type, bias=bias))
         if head_with_activation:
             if batch_norm:
                 head_block.add_module(f"batchnorm_{num_layers - 1}", escnn.nn.IIDBatchNorm1d(out_type)),
@@ -97,18 +103,21 @@ class EMLP(EquivariantModule):
         # Test the entire model is equivariant.
         # self.net.check_equivariance()
 
-    def get_activation(self, activation):
-        grid_length = self.group.order() if not self.group.continuous else 20 #self.group._maximum_frequency
+    @staticmethod
+    def get_activation(activation, in_type: FieldType, channels: int):
+        gspace = in_type.gspace
+        group = gspace.fibergroup
+        grid_length = group.order() if not group.continuous else 20
         if "identity" in activation.lower():
             raise NotImplementedError("Identity activation not implemented yet")
             # return escnn.nn.IdentityModule()
         else:
-            return escnn.nn.FourierPointwise(self.gspace,
-                                             channels=self.num_hidden_regular_fields,
-                                             irreps=self.in_type.irreps,
+            return escnn.nn.FourierPointwise(gspace,
+                                             channels=channels,
+                                             irreps=in_type.irreps,
                                              function=f"p_{activation.lower()}",
                                              inplace=True,
-                                             type='regular' if not self.group.continuous else 'rand',
+                                             type='regular' if not group.continuous else 'rand',
                                              N=grid_length)
 
     def forward(self, x):

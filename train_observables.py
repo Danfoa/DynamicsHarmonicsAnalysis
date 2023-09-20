@@ -62,7 +62,8 @@ def main(cfg: DictConfig):
                                         device=device,
                                         augment=cfg.model.augment)
         datamodule.prepare_data()
-        obs_state_dim = math.ceil(cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
+        obs_state_dim = math.ceil(
+            cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
         num_hidden_neurons = max(cfg.model.num_hidden_units, 2 * obs_state_dim)
 
         # Get the selected model for observation learning _____________________________________________________________
@@ -71,37 +72,43 @@ def main(cfg: DictConfig):
         else:
             activation = class_from_name('torch.nn', cfg.model.activation)
 
-        model_agnostic_params = dict(obs_state_dim=obs_state_dim,
-                                     num_layers=cfg.model.num_layers,
-                                     num_hidden_units=num_hidden_neurons,
-                                     dt=datamodule.dt,
-                                     activation=activation,
-                                     bias=cfg.model.bias,
-                                     batch_norm=cfg.model.batch_norm)
+        obs_fn_params = dict(num_layers=cfg.model.num_layers,
+                             num_hidden_units=num_hidden_neurons,
+                             activation=activation,
+                             bias=cfg.model.bias,
+                             batch_norm=cfg.model.batch_norm,
+                             # identity=True  # TODO: REMOVE
+                             )
 
         if cfg.model.name.lower() == "dae":
             if cfg.model.equivariant:
-                model = EquivDynamicsAutoEncoder(**model_agnostic_params,
+                model = EquivDynamicsAutoEncoder(**obs_fn_params,
                                                  state_type=datamodule.state_field_type)
                 assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
+        elif cfg.model.name.lower() == "e-dpnet":
+            assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
+            model = EquivDPNet(state_rep=datamodule.state_field_type.representation,
+                               obs_state_dim=obs_state_dim,
+                               max_ck_window_length=cfg.model.max_ck_window_length,
+                               dt=datamodule.dt,
+                               ck_w=cfg.model.ck_w,
+                               orth_w=cfg.model.orth_w,
+                               use_spectral_score=cfg.model.use_spectral_score,
+                               aux_obs_space=cfg.model.aux_obs_space,
+                               obs_fn_params=obs_fn_params,
+                               group_avg_trick=cfg.model.group_avg_trick)
+
         elif cfg.model.name.lower() == "dpnet":
             assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
-            if cfg.model.equivariant:
-                model = EquivDPNet(**model_agnostic_params,
-                                   state_type=datamodule.state_field_type,
-                                   max_ck_window_length=cfg.model.max_ck_window_length,
-                                   ck_w=cfg.model.ck_w,
-                                   orth_w=cfg.model.orth_w,
-                                   group_avg_trick=cfg.model.group_avg_trick,
-                                   )
-            else:
-                model = DPNet(**model_agnostic_params,
-                              state_dim=datamodule.state_field_type.size,
-                              max_ck_window_length=cfg.model.max_ck_window_length,
-                              ck_w=cfg.model.ck_w,
-                              orth_w=cfg.model.orth_w,
-                              use_spectral_score=cfg.model.use_spectral_score,
-                              aux_obs_space=cfg.model.aux_obs_space)
+            model = DPNet(state_dim=datamodule.state_field_type.size,
+                          obs_state_dim=obs_state_dim,
+                          max_ck_window_length=cfg.model.max_ck_window_length,
+                          dt=datamodule.dt,
+                          ck_w=cfg.model.ck_w,
+                          orth_w=cfg.model.orth_w,
+                          use_spectral_score=cfg.model.use_spectral_score,
+                          aux_obs_space=cfg.model.aux_obs_space,
+                          obs_fn_params=obs_fn_params)
         else:
             raise NotImplementedError(f"Model {cfg.model.name} not implemented")
 
@@ -132,7 +139,7 @@ def main(cfg: DictConfig):
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
                           # detect_anomaly=cfg.debug, # This shit slows down to the point of gen existential dread.
-                          enable_progress_bar=True,#cfg.debug_loops or cfg.debug,
+                          enable_progress_bar=True,  # cfg.debug_loops or cfg.debug,
                           limit_train_batches=5 if cfg.debug_loops else 1.0,
                           limit_test_batches=10 if cfg.debug_loops else 1.0,
                           limit_val_batches=10 if cfg.debug_loops else 1.0,

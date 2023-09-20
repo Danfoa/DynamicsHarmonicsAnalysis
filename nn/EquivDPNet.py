@@ -19,112 +19,99 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DPNet import DPNet, DmdSolver
+from nn.DPNet import DPNet
+from nn.EquivLinearDynamics import EquivLinearDynamics
 from nn.TwinMLP import TwinMLP
 from nn.emlp import EMLP
+from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
-from utils.mysc import traj_from_states
+from utils.mysc import full_rank_lstsq_symmetric, traj_from_states
 from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
 
 
 class EquivDPNet(DPNet):
+    _default_obs_fn_params = dict(
+        num_layers=4,
+        num_hidden_units=128,
+        activation="p_elu",
+        batch_norm=True,
+        bias=False,
+        backbone_layers=-2  # num_layers - 2
+        )
 
     def __init__(self,
-                 state_type: FieldType,
+                 state_rep: Representation,
                  obs_state_dim: int,
-                 num_layers: int = 4,
-                 num_hidden_units: int = 128,
-                 max_ck_window_length: int = 6,
-                 ck_w: float = 0.0,
-                 orth_w: float = 0.1,
+                 dt: Union[float, int] = 1,
+                 obs_fn_params: Optional[dict] = None,
                  group_avg_trick: bool = True,
-                 dmd_algorithm: Optional[DmdSolver] = None,
-                 activation: escnn.nn.EquivariantModule = escnn.nn.ReLU,
-                 batch_norm: bool = True,
-                 bias: bool = True,
-                 dt: Union[float, int] = 1):
+                 **dpnet_kwargs,
+                 ):
 
-        # Default dmd algorithm naively exploiting symmetries
-        dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else self._full_rank_lstsq_symmetric
-        self.gspace = state_type.gspace
-        self.symm_group = self.gspace.fibergroup
+        self.symm_group = state_rep.group
+        self.gspace = escnn.gspaces.no_base_space(self.symm_group)
         self.group_avg_trick = group_avg_trick
+        _obs_fn_params = self._default_obs_fn_params.copy()
+        if obs_fn_params is not None:
+            _obs_fn_params.update(obs_fn_params)
+
         # Number of regular fields in obs state and hidden layers of observable network
-        multiplicity = math.ceil(obs_state_dim / state_type.size)
+        multiplicity = math.ceil(obs_state_dim / state_rep.size)
         if multiplicity < 1:
-            raise ValueError(f"State-dim:{state_type.size}, |G|={self.symm_group.order()}, "
+            raise ValueError(f"State-dim:{state_rep.size}, |G|={self.symm_group.order()}, "
                              f"obs_dim:{obs_state_dim}")
 
         # Find the Isotypic basis of the state space and define the observation space representation as
         # `num_spect_field` copies of state representation (in isotypic basis).
-        self.state_iso_reps, Q_iso2state = isotypic_basis(representation=state_type.representation,
-                                                          multiplicity=1,
-                                                          prefix='State')
+        self.state_iso_reps, self.state_iso_dims, Q_iso2state = isotypic_basis(representation=state_rep,
+                                                                               multiplicity=1,
+                                                                               prefix='State')
         # Store the change of basis from original input basis to the isotypic basis of the space.
-        self.Q_iso2state = torch.Tensor(Q_iso2state)
-        self.Q_state2iso = torch.Tensor(np.linalg.inv(Q_iso2state))
+        if np.allclose(Q_iso2state, np.eye(state_rep.size)):
+            Q_iso2state, Q_state2iso = None, None
+        else:
+            Q_iso2state = torch.Tensor(Q_iso2state)
+            Q_state2iso = torch.Tensor(np.linalg.inv(Q_iso2state))
 
-        self.obs_iso_reps, _ = isotypic_basis(representation=state_type.representation,
-                                              multiplicity=multiplicity,
-                                              prefix='Obs')
         # Define the observation space representation in the isotypic basis.
+        self.obs_iso_reps, self.obs_iso_dims, _ = isotypic_basis(representation=state_rep,
+                                                                 multiplicity=multiplicity,
+                                                                 prefix='Obs')
         # Each Field for ESCNN will be an Isotypic Subspace.
-        self.state_type = FieldType(self.gspace, [rep_iso for rep_iso in self.state_iso_reps.values()])
-        self.in_type = self.state_type
+        self.state_type = FieldType(self.gspace, [state_rep])
+        # Field type on isotypic basis.
+        self.state_type_iso = FieldType(self.gspace, [rep_iso for rep_iso in self.state_iso_reps.values()])
         self.obs_state_type = FieldType(self.gspace, [rep_iso for rep_iso in self.obs_iso_reps.values()])
-        self.out_type = self.obs_state_type
-
-        # Auxiliary variables determining the start and end dimensions of Isotypic subspaces of observable space.
-        self.obs_iso_dims = {irrep_id: range(s, e) for s, e, irrep_id in zip(self.obs_state_type.fields_start,
-                                                                             self.obs_state_type.fields_end,
-                                                                             self.obs_iso_reps.keys())}
-        self.state_iso_dims = {irrep_id: range(s, e) for s, e, irrep_id in zip(self.state_type.fields_start,
-                                                                               self.state_type.fields_end,
-                                                                               self.state_iso_reps.keys())}
-
-        # Define the representation and field type of the hidden layers of the encoder/observable network.
-        # TODO: Shift to an Isotypic basis for the hidden layers with Irrep-Norm-Relu activations.
-        num_hidden_regular_fields = int(np.ceil(num_hidden_units / self.symm_group.order()))
-        # regular_rep = self.symm_group.regular_representation
-        # self.intermediate_type = FieldType(self.gspace, [regular_rep] * num_hidden_regular_fields)
 
         # Define a dict containing the transfer operator of each Isotypic subspace.
         self.iso_transfer_op = {irrep_id: None for irrep_id in self.obs_iso_reps.keys()}
         self.iso_inverse_projector = {irrep_id: None for irrep_id in self.obs_iso_reps.keys()}
 
-        super(EquivDPNet, self).__init__(state_dim=state_type.size,
+        super(EquivDPNet, self).__init__(state_dim=state_rep.size,
                                          obs_state_dim=obs_state_dim,
                                          dt=dt,
-                                         num_layers=num_layers,
-                                         num_hidden_units=num_hidden_units,
-                                         max_ck_window_length=max_ck_window_length,
-                                         ck_w=ck_w,
-                                         orth_w=orth_w,
-                                         dmd_algorithm=dmd_algorithm,
-                                         activation=activation,
-                                         batch_norm=batch_norm,
-                                         bias=bias, )
+                                         obs_fn_params=_obs_fn_params,
+                                         obs_state_rep=self.obs_state_type.representation,
+                                         state_change_of_basis=Q_state2iso,
+                                         state_inv_change_of_basis=Q_iso2state,
+                                         **dpnet_kwargs,
+                                         )
 
-    def pre_process_state(self, state: Tensor, next_state=Tensor, **kwargs) -> GeometricTensor:
-        self.Q_state2iso = self.Q_state2iso.to(state.device, dtype=state.dtype)
-        flat_state_trajectory = super().pre_process_state(state, next_state, **kwargs)
+    def pre_process_state(self, state: Tensor, next_state: Optional[Tensor] = None) -> GeometricTensor:
         # Change basis to Isotypic basis.
-        state_trajectory_iso_basis = torch.einsum('is,bs->bi', self.Q_state2iso, flat_state_trajectory)
+        state_trajectory_iso_basis = super().pre_process_state(state=state, next_state=next_state)
         # Convert to Geometric Tensor
-        return self.state_type(state_trajectory_iso_basis)
+        return self.state_type_iso(state_trajectory_iso_basis)
 
-    def post_process_projections(self,
-                                 obs_state_traj: GeometricTensor,
-                                 obs_state_traj_prime: GeometricTensor) -> dict[str, Tensor]:
-        return super().post_process_projections(obs_state_traj=obs_state_traj.tensor,
-                                                obs_state_traj_prime=obs_state_traj_prime.tensor)
+    def post_process_obs_state(self,
+                               obs_state_traj: GeometricTensor,
+                               obs_state_traj_prime: GeometricTensor) -> dict[str, Tensor]:
+        return super().post_process_obs_state(obs_state_traj.tensor, obs_state_traj_prime.tensor)
 
     def post_process_state(self, state_traj: Tensor) -> Tensor:
-        self.Q_iso2state = self.Q_iso2state.to(state_traj.device, dtype=state_traj.dtype)
-        # Convert to original basis
-        state_traj_input_basis = torch.einsum('is,bts->bti', self.Q_iso2state, state_traj)
+        state_traj_input_basis = super().post_process_state(state_traj=state_traj)
         return state_traj_input_basis
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_prime: Optional[Tensor] = None) -> dict:
@@ -141,7 +128,7 @@ class EquivDPNet(DPNet):
             # Compute Covariance and Cross-Covariance operators for this Isotypic subspace.
             # Spectral and Projection scores, and CK loss terms.
             iso_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj_iso,
-                                                  obs_state_traj_prime=obs_state_traj_prime_iso,
+                                                  obs_state_traj_aux=obs_state_traj_prime_iso,
                                                   representation=rep if self.group_avg_trick else None,
                                                   max_ck_window_length=self.max_ck_window_length)
 
@@ -225,115 +212,50 @@ class EquivDPNet(DPNet):
                     # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)  # (batch, time)
                     )
 
-    @torch.no_grad()
-    def approximate_transfer_operator(self, train_data_loader: DataLoader):
-        train_data = {}
-        for batch in train_data_loader:
-            for key, value in batch.items():
-                if key not in train_data:
-                    train_data[key] = torch.squeeze(value)
-                else:
-                    torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+    def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
+        """ Compute the empirical inverse projector from the observable state to the pre-processed state.
 
-        self.eval()
-        pred = self(**train_data)
-        self.train()
+        Args:
+            state: (batch, state_dim) Tensor containing the pre-processed state.
+            obs_state: (batch, obs_state_dim) Tensor containing the observable state.
+        Returns:
+            A: (state_dim, obs_state_dim) Tensor containing the empirical inverse projector.
+            rec_error: Scalar tensor containing the reconstruction error or "residual".
+        """
+        # Inverse projector is computed from the observable state to the pre-processed state
+        pre_state = self.pre_process_state(state).tensor
 
-        # Change state space basis to Isotypic basis.
-        state_iso_basis = torch.einsum('is,bs->bi', self.Q_state2iso, train_data["state"])
-        obs_state_traj = pred["obs_state_traj"]
-
-        assert obs_state_traj.shape[1] == 2, f"Expected single step datapoints, got {obs_state_traj.shape[1]} steps."
-        obs_state, next_obs_state = obs_state_traj[:, 0, :], obs_state_traj[:, 1, :]
-
-        # For each Isotypic Subspace, compute the empirical transfer operator with the present observable state space.
-        for irrep_id, iso_rep in self.obs_iso_reps.items():
-            obs_rep = iso_rep if irrep_id != self.symm_group.identity else None  # Check for Trivial
+        iso_rec_error = []
+        # For each Isotypic Subspace, compute the empirical inverse operator with the present observable state space.
+        for irrep_id, iso_obs_rep in self.obs_iso_reps.items():
+            obs_rep = iso_obs_rep if irrep_id != self.symm_group.identity else None  # Check for Trivial
             state_rep = self.state_iso_reps[
                 irrep_id] if irrep_id != self.symm_group.identity else None  # Check for Trivial
 
-            # IsoSpace
             # Get the projection of the observable state in the isotypic subspace
-            state_iso = state_iso_basis[..., self.state_iso_dims[irrep_id]]
+            state_iso = pre_state[..., self.state_iso_dims[irrep_id]]
             obs_state_iso = obs_state[..., self.obs_iso_dims[irrep_id]]
-            next_obs_state_iso = next_obs_state[..., self.obs_iso_dims[irrep_id]]
-
             # Generate the data matrices of x(w_t) and x(w_t+1)
             X = obs_state_iso.T  # (batch_dim, obs_state_dim)
-            X_prime = next_obs_state_iso.T  # (batch_dim, obs_state_dim)
-
-            # Compute the empirical transfer operator of this Observable Isotypic subspace
-            A_iso = self.dmd_algorithm(X, X_prime,
-                                       rep_X=obs_rep if self.group_avg_trick else None,
-                                       rep_Y=obs_rep if self.group_avg_trick else None)
-            self.iso_transfer_op[irrep_id] = A_iso
-
-            # Approximate a linear decoder from "main" observable Iso space to its associated Iso state subspace.
             Y = state_iso.T  # (state_dim, n_samples)
-            self.iso_inverse_projector[irrep_id] = self._full_rank_lstsq_symmetric(
-                X, Y,
-                rep_X=obs_rep if self.group_avg_trick else None,
-                rep_Y=state_rep if self.group_avg_trick else None)
+            A_iso = full_rank_lstsq_symmetric(X=X,
+                                              Y=Y,
+                                              rep_X=obs_rep if self.group_avg_trick else None,
+                                              rep_Y=state_rep if self.group_avg_trick else None)
+            iso_rec_error.append(torch.nn.functional.mse_loss(Y, A_iso @ X))
 
-        self.transfer_op = torch.block_diag(*self.iso_transfer_op.values())
-        self.inverse_projector = torch.block_diag(*self.iso_inverse_projector.values())
+            assert A_iso.shape == (state_iso.shape[-1], obs_state_iso.shape[-1]), f"A_iso: {A_iso.shape}"
+            self.iso_inverse_projector[irrep_id] = A_iso
 
-        obs_one_step_error = torch.mean(torch.abs(next_obs_state.T - self.transfer_op @ obs_state.T), dim=-1)
-        iso_one_step_error = [obs_one_step_error[self.obs_iso_dims[irrep_id]] for irrep_id in self.obs_iso_reps.keys()]
-        rec_error = torch.mean(torch.abs(state_iso_basis.T - self.inverse_projector @ obs_state.T), dim=-1)
-        iso_rec_error = [rec_error[self.state_iso_dims[irrep_id]] for irrep_id in self.state_iso_reps.keys()]
+        A = torch.block_diag(*[self.iso_inverse_projector[irrep_id] for irrep_id in self.obs_iso_reps.keys()])
+        rec_error = torch.sum(torch.Tensor(iso_rec_error)).detach()
 
-        return dict(solution_op_rank=torch.linalg.matrix_rank(self.transfer_op).to(dtype=torch.float),
-                    solution_op_cond_num=torch.linalg.cond(self.transfer_op).to(dtype=torch.float),
-                    solution_op_error=obs_one_step_error.to(dtype=torch.float).mean(),
-                    solution_op_error_dist=torch.cat(iso_one_step_error),
-                    inverse_projector_rank=torch.linalg.matrix_rank(self.inverse_projector),
-                    inverse_projector_cond_num=torch.linalg.cond(self.inverse_projector),
-                    inverse_projector_error=rec_error,
-                    inverse_projector_error_dist=torch.cat(iso_rec_error),
-                    rank_obs_state=torch.linalg.matrix_rank(obs_state))
+        metrics = dict(inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
+                       inverse_projector_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
+                       inverse_projector_error=rec_error,
+                       inverse_projector_error_dist=torch.Tensor(iso_rec_error).detach())
 
-
-    @staticmethod
-    def _full_rank_lstsq_symmetric(
-            X: Tensor, Y: Tensor, rep_X: Representation, rep_Y: Representation) -> Tensor:
-        """ Compute the least squares solution of the linear system Y = A·X.
-
-        If the representation is provided the empirical transfer operator is improved using the group average trick to
-        enforce equivariance considering that:
-                            rep_Y(g) y = A rep_X(g) x
-                        rep_Y(g) (A x) = A rep_X(g) x
-                            rep_Y(g) A = A rep_X(g)
-                rep_Y(g) A rep_X(g)^-1 = A                | forall g in G.
-
-        Args:
-            X: (|x|, n_samples) Data matrix of the initial states.
-            Y: (|y|, n_samples) Data matrix of the next states.
-        Returns:
-            A: (|y|, |x|) Least squares solution of the linear system `Y = A·X`.
-        """
-
-        A = DPNet._full_rank_lstsq(X, Y)
-        if rep_X is None or rep_Y is None:
-            return A
-        assert rep_Y.group == rep_X.group, "Representations must belong to the same group."
-
-        # Do the group average trick to enforce equivariance.
-        # This is equivalent to applying the group average trick on the singular vectors of the covariance matrices.
-        A_G = []
-        group = rep_X.group
-        elements = group.elements if not group.continuous else group.grid(type='rand', N=group._maximum_frequency)
-        for g in elements:
-            if g == group.identity:
-                A_g = A
-            else:
-                rep_X_g = torch.from_numpy(rep_X(g)).to(dtype=X.dtype, device=X.device)
-                rep_Y_g_inv = torch.from_numpy(rep_Y(~g)).to(dtype=X.dtype, device=X.device)
-                A_g = rep_X_g @ A @ rep_Y_g_inv
-            A_G.append(A_g)
-        A_G = torch.stack(A_G, dim=0)
-        A_G = torch.mean(A_G, dim=0)
-        return A_G
+        return A, metrics
 
     def _compute_endomorphism_basis(self):
         # When approximating the transfer/Koopman operator from the symmetric observable space, we know the operator
@@ -356,22 +278,61 @@ class EquivDPNet(DPNet):
             mask = torch.logical_not(torch.isclose(non_zero_elements, torch.zeros_like(non_zero_elements), atol=1e-6))
             self.iso_space_basis_mask[irrep_id] = mask
 
-    def build_obs_fn(self, num_layers, backbone_layers=None, **kwargs):
-        equivariant = True
+    def build_obs_fn(self, num_layers, **kwargs):
+        num_backbone_layers = kwargs.pop('backbone_layers', num_layers - 2 if self.aux_obs_space else 0)
+        if num_backbone_layers < 0:
+            num_backbone_layers = num_layers - num_backbone_layers
         backbone_params = None
-        # if num_layers > 3:
-        #     num_backbone_layers = max(2, num_layers - 2)
-        #     backbone_params = dict(in_type=self.state_type, out_type=self.intermediate_type,
-        #                            num_layers=num_backbone_layers, head_with_activation=True, **copy.copy(kwargs))
-        #     kwargs['with_bias'] = False
-        #     kwargs['batch_norm'] = False
-        #     obs_fn_params = dict(in_type=self.intermediate_type, out_type=self.obs_state_type,
-        #                          num_layers=num_layers - num_backbone_layers, head_with_activation=False, **kwargs)
-        # else:
-        obs_fn_params = dict(in_type=self.state_type, out_type=self.obs_state_type, num_layers=num_layers,
-                             head_with_activation=False, **kwargs)
+        if num_backbone_layers > 0 and self.aux_obs_space:
+            num_hidden_units = kwargs.get('num_hidden_units')
+            activation_type = kwargs.pop('activation')
+            num_hidden_regular_fields = int(np.ceil(num_hidden_units // self.state_type_iso.size))
+            act = EMLP.get_activation(activation=activation_type,
+                                      in_type=self.state_type_iso,
+                                      channels=num_hidden_regular_fields)
+            backbone_params = dict(in_type=self.state_type_iso,
+                                   out_type=act.out_type,
+                                   activation=act,
+                                   num_layers=num_backbone_layers,
+                                   head_with_activation=True,
+                                   **copy.copy(kwargs))
+            kwargs['bias'] = False
+            kwargs['batch_norm'] = False
+            obs_fn_params = dict(in_type=act.out_type, out_type=self.obs_state_type,
+                                 num_layers=num_layers - num_backbone_layers,
+                                 activation=act,
+                                 head_with_activation=False, **kwargs)
+        else:
+            obs_fn_params = dict(in_type=self.state_type_iso,
+                                 out_type=self.obs_state_type,
+                                 num_layers=num_layers,
+                                 head_with_activation=False,
+                                 **kwargs)
 
-        return TwinMLP(net_kwargs=obs_fn_params, backbone_kwargs=backbone_params, equivariant=equivariant)
+        return TwinMLP(net_kwargs=obs_fn_params,
+                       backbone_kwargs=backbone_params,
+                       fake_aux_fn=not self.aux_obs_space,
+                       equivariant=True)
+
+    def build_inv_obs_fn(self, num_layers, linear_decoder: bool, **kwargs):
+        if linear_decoder:
+            def decoder(dpnet: DPNet, obs_state: Tensor):
+                assert hasattr(dpnet, 'inverse_projector'), "DPNet.inverse_projector not initialized."
+                return torch.nn.functional.linear(obs_state, dpnet.inverse_projector)
+
+            return lambda x: decoder(self, x)
+        else:
+
+            return EMLP(in_type=self.obs_state_type,
+                        out_type=self.state_type_iso,
+                        num_layers=num_layers,
+                        **kwargs)
+
+    def build_obs_dyn_module(self) -> MarkovDynamics:
+        return EquivLinearDynamics(state_rep=self.obs_state_type.representation,
+                                   dt=self.dt,
+                                   trainable=False,
+                                   group_avg_trick=self.group_avg_trick)
 
     def __repr__(self):
         str = super().__repr__()

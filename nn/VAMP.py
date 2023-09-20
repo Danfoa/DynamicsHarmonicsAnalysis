@@ -48,7 +48,7 @@ class VAMP(torch.nn.Module):
         #     # This is a convenient convention. Nothing special behind it.
         #     n_head_layers = 2
         #     heads.append(MLP(d_in=n_hidden_neurons, d_out=output_dim, ch=n_hidden_neurons, n_layers=n_head_layers,
-        #                      with_bias=False, activation=[activation] * (n_head_layers - 1) + [torch.nn.Identity]))
+        #                      bias=False, activation=[activation] * (n_head_layers - 1) + [torch.nn.Identity]))
         #
         # self.heads = torch.nn.ModuleList(heads)
 
