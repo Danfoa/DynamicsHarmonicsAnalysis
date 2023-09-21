@@ -16,10 +16,11 @@ from lightning_fabric import seed_everything
 from omegaconf import DictConfig, OmegaConf
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DPNet import DPNet
-from nn.EquivDPNet import EquivDPNet
-from nn.EquivDynamicsAutoencoder import EquivDynamicsAutoEncoder
-from nn.LightningModel import LightningModel
+from nn.DeepProjections import DPNet
+from nn.DynamicsAutoEncoder import DAE
+from nn.EquivDeepPojections import EquivDPNet
+from nn.EquivDynamicsAutoencoder import EquivDAE
+from nn.LightningLatentMarkovDynamics import LightLatentMarkovDynamics
 from utils.mysc import check_if_resume_experiment, class_from_name, format_scientific
 
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def main(cfg: DictConfig):
     if not training_done:
         # Load the dynamics dataset.
         data_path = root_path / "data" / cfg.system.data_path
-        device = torch.device(f"cuda:{cfg.device}" if torch.cuda.is_available() and cfg.device != "cpu" else "cpu")
+        device = torch.device(f"cuda:{cfg.device}" if torch.cuda.is_available() and cfg.device != "cpu" else None)
         log.info(f"Configuring to use device {device}")
         datamodule = DynamicsDataModule(data_path,
                                         batch_size=cfg.model.batch_size,
@@ -77,14 +78,28 @@ def main(cfg: DictConfig):
                              activation=activation,
                              bias=cfg.model.bias,
                              batch_norm=cfg.model.batch_norm,
-                             # identity=True  # TODO: REMOVE
                              )
 
         if cfg.model.name.lower() == "dae":
-            if cfg.model.equivariant:
-                model = EquivDynamicsAutoEncoder(**obs_fn_params,
-                                                 state_type=datamodule.state_field_type)
-                assert cfg.system.pred_horizon >= 2, "DAE requires at least 2 steps prediction horizon"
+            assert cfg.system.pred_horizon >= 1
+            model = DAE(state_dim=datamodule.state_field_type.size,
+                        obs_state_dim=obs_state_dim,
+                        dt=datamodule.dt,
+                        obs_pred_w=cfg.model.obs_pred_w,
+                        orth_w=cfg.model.orth_w,
+                        corr_w=cfg.model.corr_w,
+                        obs_fn_params=obs_fn_params)
+        elif cfg.model.name.lower() == "e-dae":
+            assert cfg.system.pred_horizon >= 1
+            model = EquivDAE(state_rep=datamodule.state_field_type.representation,
+                             obs_state_dim=obs_state_dim,
+                             dt=datamodule.dt,
+                             orth_w=cfg.model.orth_w,
+                             obs_fn_params=obs_fn_params,
+                             group_avg_trick=cfg.model.group_avg_trick,
+                             state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn)
+
+
         elif cfg.model.name.lower() == "e-dpnet":
             assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
             model = EquivDPNet(state_rep=datamodule.state_field_type.representation,
@@ -135,10 +150,8 @@ def main(cfg: DictConfig):
                           log_every_n_steps=1,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
                           check_val_every_n_epoch=1,
-                          # benchmark=True,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
-                          # detect_anomaly=cfg.debug, # This shit slows down to the point of gen existential dread.
                           enable_progress_bar=True,  # cfg.debug_loops or cfg.debug,
                           limit_train_batches=5 if cfg.debug_loops else 1.0,
                           limit_test_batches=10 if cfg.debug_loops else 1.0,
@@ -148,12 +161,12 @@ def main(cfg: DictConfig):
         # Load lightning module handling the operations of all model variants
         epoch_metrics_fn = model.evaluate_observation_space if hasattr(model, "evaluate_observation_space") else None
 
-        pl_model = LightningModel(lr=cfg.model.lr,
-                                  batch_size=cfg.model.batch_size,
-                                  run_hps=cfg.model,
-                                  test_epoch_metrics_fn=epoch_metrics_fn,
-                                  val_epoch_metrics_fn=epoch_metrics_fn,
-                                  log_figs_every_n_epochs=10)
+        pl_model = LightLatentMarkovDynamics(lr=cfg.model.lr,
+                                             batch_size=cfg.model.batch_size,
+                                             run_hps=cfg.model,
+                                             test_epoch_metrics_fn=epoch_metrics_fn,
+                                             val_epoch_metrics_fn=epoch_metrics_fn,
+                                             log_figs_every_n_epochs=10)
         pl_model.set_model(model)
         # pl_model.to(device)
         wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)

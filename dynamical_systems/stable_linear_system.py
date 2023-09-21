@@ -6,6 +6,7 @@ import escnn
 import numpy as np
 import scipy
 from escnn.group import Representation
+from tqdm import tqdm
 
 from data.DynamicsRecording import DynamicsRecording
 from utils.mysc import companion_matrix, matrix_average_trick, random_orthogonal_matrix
@@ -26,6 +27,7 @@ def sample_initial_condition(state_dim, P=None, z=None):
     distance_from_origin = max(distance_from_origin, MIN_DISTANCE_FROM_ORIGIN)  # Truncate unlikely low values
     x0 = distance_from_origin * direction
 
+    trials = 500
     if P is not None:
         violation = P @ x0 < z
         is_constraint_violated = np.any(violation)
@@ -42,6 +44,10 @@ def sample_initial_condition(state_dim, P=None, z=None):
 
             violation = P @ x0 < z
             is_constraint_violated = np.any(violation)
+
+            trials -= 1
+            if trials == 0:
+                raise RuntimeError("Too constrained.")
         if np.linalg.norm(x0) < MIN_DISTANCE_FROM_ORIGIN:  # If sample is too close to zero ignore it.
             x0 = sample_initial_condition(state_dim, P=P, z=z)
     return x0
@@ -152,7 +158,7 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
         iso_state_dim = rep_iso.size
         A_iso = stable_lin_dynamics(rep_iso,
                                     time_constant=time_constant,
-                                    stable_eigval_prob=1 / (iso_state_dim) if state_dim > 1 else 0.0,
+                                    stable_eigval_prob=1 / (iso_state_dim + 1) if state_dim > 1 else 0.0,
                                     min_period=min_period,
                                     max_period=max_period)
         # Enforce G-equivariance
@@ -247,7 +253,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
-    order = 3
+    order = 2
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -264,7 +270,8 @@ if __name__ == '__main__':
     G, g_dynamics_2_Gsub_domain, g_domain_2_g_dynamics = G_domain.subgroup(G_id)
 
     # Define the state representation.
-    rep_X = G.standard_representation()  # + G.irrep(1)
+    # rep_X = G.regular_representation # + G.irrep(1)
+    rep_X = G.irrep(0) + G.standard_representation()  # + G.irrep(1)
     # rep_X = G.irrep(1) + G.irrep(2) #+ G.irrep(1) #+ G.irrep(0)
     #
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
@@ -279,11 +286,11 @@ if __name__ == '__main__':
         T = fastest_period   # Simulate until the slowest stable mode has completed a full period.
     else:  # System has transient dynamics that vanish to 36.8% in fastest_time_constant seconds.
         T = 6 * fastest_time_constant        # Required time for this transient dynamics to vanish.
-    dt = T * 0.005  # Sample time to obtain 200 samples per trajectory
+    dt = T * 0.005  # Sample time to obtain 100 samples per trajectory
 
     # Generate trajectories of the system dynamics
     n_constraints = 0
-    n_trajs = 100
+    n_trajs = 120
     # Generate hyperplanes that constraint outer region of space
     P_symm, offset = None, None
     if n_constraints > 0:
@@ -293,12 +300,12 @@ if __name__ == '__main__':
         for normal_plane in normal_planes:
             normal_orbit = np.vstack([np.linalg.det(rep_X(g)) * (rep_X(g) @ normal_plane) for g in G.elements])
             # Fix point of linear systems is the origin
-            offset_orbit = np.asarray([-np.random.uniform(-0.05, 0.6)] * normal_orbit.shape[0])
+            offset_orbit = np.asarray([-np.random.uniform(-0.1, 0.3)] * normal_orbit.shape[0])
             P_symm = np.vstack((P_symm, normal_orbit)) if P_symm is not None else normal_orbit
             offset = np.concatenate((offset, offset_orbit)) if offset is not None else offset_orbit
 
     trajs_per_noise_level = []
-    for noise_level in range(10):
+    for noise_level in tqdm(range(10), desc="noise level"):
         sigma = T * 0.005 * noise_level
         state_trajs = []
         for _ in range(n_trajs):
@@ -380,9 +387,12 @@ if __name__ == '__main__':
                                      fig=fig, constraint_matrix=P_symm, constraint_offset=offset,
                                      traj_colorscale='Agsunset', init_state_color='yellow',
                                      legendgroup="val")
+            else:
+                pass
 
-            fig.write_html(path_2_system / 'test_trajectories.html')
-        if noise_level == 0 and fig is not None:
+            if fig is not None:
+                fig.write_html(path_2_system / 'test_trajectories.html')
+        if noise_level == 1 and fig is not None:
             fig.show()
     # fig.show()
     print(f"Recordings saved to {path_2_system}")

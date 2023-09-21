@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DPNet import DPNet
+from nn.DeepProjections import DPNet
 from nn.EquivLinearDynamics import EquivLinearDynamics
 from nn.TwinMLP import TwinMLP
 from nn.emlp import EMLP
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 class EquivDPNet(DPNet):
     _default_obs_fn_params = dict(
         num_layers=4,
-        num_hidden_units=128,
+        num_hidden_units=128,   # Approximate number of neurons in hidden layers. Actual number depends on group order.
         activation="p_elu",
         batch_norm=True,
         bias=False,
@@ -96,8 +96,7 @@ class EquivDPNet(DPNet):
                                          obs_state_rep=self.obs_state_type.representation,
                                          state_change_of_basis=Q_state2iso,
                                          state_inv_change_of_basis=Q_iso2state,
-                                         **dpnet_kwargs,
-                                         )
+                                         **dpnet_kwargs)
 
     def pre_process_state(self, state: Tensor, next_state: Optional[Tensor] = None) -> GeometricTensor:
         # Change basis to Isotypic basis.
@@ -105,10 +104,10 @@ class EquivDPNet(DPNet):
         # Convert to Geometric Tensor
         return self.state_type_iso(state_trajectory_iso_basis)
 
-    def post_process_obs_state(self,
-                               obs_state_traj: GeometricTensor,
-                               obs_state_traj_prime: GeometricTensor) -> dict[str, Tensor]:
-        return super().post_process_obs_state(obs_state_traj.tensor, obs_state_traj_prime.tensor)
+    def pre_process_obs_state(self,
+                              obs_state_traj: GeometricTensor,
+                              obs_state_traj_prime: GeometricTensor) -> dict[str, Tensor]:
+        return super().pre_process_obs_state(obs_state_traj.tensor, obs_state_traj_prime.tensor)
 
     def post_process_state(self, state_traj: Tensor) -> Tensor:
         state_traj_input_basis = super().post_process_state(state_traj=state_traj)
@@ -257,27 +256,6 @@ class EquivDPNet(DPNet):
 
         return A, metrics
 
-    def _compute_endomorphism_basis(self):
-        # When approximating the transfer/Koopman operator from the symmetric observable space, we know the operator
-        # belongs to the space of G-equivariant operators (Group Endomorphism of the observable space).
-        # Using ESCNN we can compute the basis of the Endomorphism space, and use this basis to compute an empirical
-        # G-equivariant approximation of the transfer operator. Since the observable space is defined in the Isotypic
-        # basis, the operator is block-diagonal and the basis of the Endomorphism space is the block diagonal sum of
-        # the
-        # basis of the Endomorphism space of each Isotypic subspace.
-        self.iso_space_basis = {}
-        self.iso_space_basis_mask = {}  # Used to mask empirical covariance between orthogonal observables
-        for irrep_id, rep in self.obs_iso_reps.items():
-            iso_basis = BlocksBasisExpansion(in_reprs=[self.symm_group.irrep(*id) for id in rep.irreps],
-                                             out_reprs=[self.symm_group.irrep(*id) for id in rep.irreps],
-                                             basis_generator=self.gspace.build_fiber_intertwiner_basis,
-                                             points=np.zeros((1, 1)))
-            self.iso_space_basis[irrep_id] = iso_basis
-            basis_coefficients = torch.rand((iso_basis.dimension(),)) + 2
-            non_zero_elements = iso_basis(basis_coefficients)[:, :, 0]
-            mask = torch.logical_not(torch.isclose(non_zero_elements, torch.zeros_like(non_zero_elements), atol=1e-6))
-            self.iso_space_basis_mask[irrep_id] = mask
-
     def build_obs_fn(self, num_layers, **kwargs):
         num_backbone_layers = kwargs.pop('backbone_layers', num_layers - 2 if self.aux_obs_space else 0)
         if num_backbone_layers < 0:
@@ -336,6 +314,7 @@ class EquivDPNet(DPNet):
 
     def __repr__(self):
         str = super().__repr__()
+        str.replace("DPNet", "EquivDPNet")
         str += (f"\tState Space fields={self.state_type.representations} "
                 f"\n\t\tirreps={self.state_type.representation.irreps}"
                 f"\n\tObservation Space fields={self.obs_state_type.representations} "

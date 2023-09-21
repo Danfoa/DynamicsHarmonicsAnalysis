@@ -1,3 +1,4 @@
+import logging
 from abc import ABC
 from typing import Iterable, Optional, Union
 import torch
@@ -8,6 +9,7 @@ from utils.losses_and_metrics import forecasting_loss_and_metrics
 from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, random_orthogonal_matrix,
                         states_from_traj, traj_from_states)
 
+log = logging.getLogger(__name__)
 
 class MarkovDynamics(torch.nn.Module):
 
@@ -41,25 +43,29 @@ class MarkovDynamics(torch.nn.Module):
         # Used to reshape the state trajectory from/back (batch * time, state_dim) to (batch, time, state_dim)
         self._batch_size = None
 
-    def forward(self, state: Tensor, next_state: Tensor) -> [dict[str, Tensor]]:
+    def forward(self, state: Tensor, next_state: Tensor, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
         Args:
             state: (batch, state_dim) Initial state of the system.
             next_state: (batch, pred_horizon, state_dim) Next states of the system in a prediction horizon window. or
                (batch, state_dim) if prediction horizon is 1 [step]
+            **kwargs: Any auxiliary input required for training the model.
         Returns:
             predictions (dict): A dictionary containing the predicted state and observable state trajectory.
                 - 'pred_state_traj': (batch, pred_horizon + 1, state_dim)
+                - Any auxiliary output required for training the model.
         """
         # Apply pre-processing to the initial state and state trajectory
         # obtaining a stare trajectory of shape: (batch * (pred_horizon + 1), state_dim) tensor
         state_traj = self.pre_process_state(state=state, next_state=next_state)
         # Evolution of dynamics ===============================================
         pred_state_traj = state_traj
+        log.warning(f"MarkovDynamics.forward() is not implemented for {self.__class__.__name__}. "
+                    f"This makes this module default to the trivial or identity dynamics.")
         # =====================================================================
         # Apply the required post-processing of the state.
         pred_state_traj = self.post_process_state(pred_state_traj)
-        return pred_state_traj
+        return dict(pred_state_traj=pred_state_traj)
 
     def forcast(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
@@ -136,6 +142,15 @@ class MarkovDynamics(torch.nn.Module):
 
         return pred_loss, pred_metrics
 
+    def get_hparams(self):
+        hparams = {}
+        hparams['state_dim'] = self.state_dim
+        hparams['obs_state_dim'] = self.obs_state_dim
+        hparams['dt'] = self.dt
+        return hparams
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(state_dim={self.state_dim}, dt={self.dt})"
 
 if __name__ == "__main__":
 

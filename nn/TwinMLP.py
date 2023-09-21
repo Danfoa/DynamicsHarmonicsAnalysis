@@ -3,7 +3,7 @@ from typing import Optional
 import torch.nn
 
 from nn.mlp import MLP
-from nn.emlp import EMLP, SO2MLP
+from nn.emlp import EMLP
 
 
 class TwinMLP(torch.nn.Module):

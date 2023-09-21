@@ -8,12 +8,12 @@ obs_state_dim: 2             # Dimension of the system's observable state
 
 frames_per_state: 1          # Number of time-frames to use as a Markov Process state time step
 pred_horizon: 10             # Number (or percentage) of Markov Process state time steps to predict into the future
-eval_pred_horizon: 100       # Number (or percentage) of Markov Process state time steps to predict into the future
+eval_pred_horizon: .5        # Number (or percentage) of Markov Process state time steps to predict into the future
 
 group: SO(2)
-noise_level: 0
+noise_level: 1
 n_constraints: 0
 
-data_path: '${system.name}/group=${system.group}-dim=${system.state_dim}/'
+data_path: '${system.name}/group=${system.group}-dim=${system.state_dim}/n_constraints=${system.n_constraints}'
 
 summary: S:${system.state_dim}-OS:${system.obs_state_dim}-H:${system.pred_horizon}-G:${system.group}-N:${system.noise_level}

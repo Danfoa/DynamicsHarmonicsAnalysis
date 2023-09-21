@@ -67,6 +67,8 @@ hydra:
           - system.pred_horizon
           - system.eval_pred_horizon
           - system.data_path
+          - system.group
+          - system.noise_level
           - debug
           - debug_loops
           - seed

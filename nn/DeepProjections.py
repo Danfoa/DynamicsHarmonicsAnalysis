@@ -89,7 +89,6 @@ class DPNet(LatentMarkovDynamics):
                                     dt=dt,
                                     **markov_dyn_params)
 
-
     def forecast(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
 
@@ -107,14 +106,32 @@ class DPNet(LatentMarkovDynamics):
         obs_state = self.obs_fn(state)
         pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state, n_steps=n_steps)
         pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
-        if self.transfer_op is None:
-            raise RuntimeError("The transfer operator not approximated yet. Call `approximate_transfer_operator`")
 
         assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), \
             f"{pred_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.state_dim})"
         assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), \
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
+        raise NotImplementedError("This function needs to handle pre/post state processing")
         return pred_state_traj, pred_obs_state_traj
+
+    def pre_process_obs_state(self,
+                              obs_state_traj: Tensor,
+                              obs_state_traj_aux: Optional[Tensor] = None) -> dict[str, Tensor]:
+        """ Apply transformations to the observable state trajectory.
+        Args:
+            obs_state_traj: (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
+            obs_state_traj_aux: (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
+        Returns:
+            Directory containing
+                - obs_state_traj: (batch, time, obs_state_dim) tensor.
+                - obs_state_traj_aux: (batch, time, obs_state_dim) tensor.
+        """
+        obs_state_traj = super().pre_process_obs_state(obs_state_traj)['obs_state_traj']
+        if obs_state_traj_aux is not None:
+            obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
+        else:
+            obs_state_traj_aux = None
+        return dict(obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux)
 
     def compute_loss_and_metrics(self,
                                  obs_state_traj: Tensor,
@@ -277,7 +294,7 @@ class DPNet(LatentMarkovDynamics):
         # Obtain the observable state
         obs_fn_output = self.obs_fn(state_traj)
         # Post process observable state
-        obs_state_trajs = self.post_process_obs_state(*obs_fn_output)
+        obs_state_trajs = self.pre_process_obs_state(*obs_fn_output)
         obs_state_traj = obs_state_trajs.pop('obs_state_traj')
 
         assert obs_state_traj.shape[1] == 2, f"Expected single step datapoints, got {obs_state_traj.shape[1]} steps."
@@ -320,7 +337,7 @@ class DPNet(LatentMarkovDynamics):
 
         return TwinMLP(net_kwargs=obs_fn_params, backbone_kwargs=backbone_params, fake_aux_fn=not self.aux_obs_space)
 
-    def build_inv_obs_fn(self, num_layers, linear_decoder: bool,  identity=False, **kwargs):
+    def build_inv_obs_fn(self, num_layers, linear_decoder: bool, identity=False, **kwargs):
         if identity:
             return lambda x: x
 
@@ -385,7 +402,7 @@ if __name__ == "__main__":
     state_dim = 2
     obs_state_dim = state_dim
 
-    change_of_basis = None# Tensor(random_orthogonal_matrix(state_dim))
+    change_of_basis = None  # Tensor(random_orthogonal_matrix(state_dim))
 
     test_dpnet = DPNet(state_dim=state_dim,
                        obs_state_dim=obs_state_dim,
@@ -398,5 +415,5 @@ if __name__ == "__main__":
     pred_state_traj = out['pred_state_traj']
 
     assert pred_state_traj.shape == random_state_traj.shape, f"{pred_state_traj.shape} != {random_state_traj.shape}"
-    assert torch.allclose(pred_state_traj, random_state_traj, rtol=1e-5, atol=1e-5), f"{pred_state_traj - random_state_traj}"
-
+    assert torch.allclose(pred_state_traj, random_state_traj, rtol=1e-5,
+                          atol=1e-5), f"{pred_state_traj - random_state_traj}"

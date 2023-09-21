@@ -3,6 +3,7 @@ from typing import Any, Optional, Union
 
 import torch.nn
 from escnn.group import Representation
+from escnn.nn import GeometricTensor
 from torch import Tensor
 
 from nn.markov_dynamics import MarkovDynamics
@@ -63,20 +64,30 @@ class LatentMarkovDynamics(MarkovDynamics):
         # obtaining a stare trajectory of shape: (batch * (pred_horizon + 1), state_dim) tensor
         state_traj = self.pre_process_state(state=state, next_state=next_state)
 
-        # Evolution of dynamics ===============================================
+        # Observation function evaluation ===============================================
         # Compute the projection of the state trajectory in the main and auxiliary observable states
         obs_fn_output = self.obs_fn(state_traj)
         # Post-process observation state trajectories to get (batch, (pred_horizon + 1), obs_state_dim) tensors
-        obs_state_trajs = self.post_process_obs_state(*obs_fn_output)
+        if not isinstance(obs_fn_output, tuple):
+            pre_obs_fn_output = self.pre_process_obs_state(obs_fn_output)
+        else:
+            pre_obs_fn_output = self.pre_process_obs_state(*obs_fn_output)
 
-        obs_state_traj = obs_state_trajs.pop('obs_state_traj')
-
-        # Compute the prediction of the observable state trajectory
-        pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state_traj[:, 0, :], n_steps=pred_horizon)
-
-        # Predictions in original state space   ==============================
+        # Extract the observable state trajectory
+        assert 'obs_state_traj' in pre_obs_fn_output, f"Missing 'obs_state_traj' in {pre_obs_fn_output}"
+        obs_state_traj = pre_obs_fn_output.pop('obs_state_traj')
+        # Evolution of observable states ===============================================
+        # Feed the pre-processed observable state trajectory to the observable state dynamics
+        # pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state_traj[:, 0, :], n_steps=pred_horizon)
+        obs_dyn_output = self.obs_state_dynamics(state=obs_state_traj[:, 0, :],
+                                                 next_state=obs_state_traj[:, 1:, :],
+                                                 **pre_obs_fn_output)
+        pred_obs_state_traj = obs_dyn_output.pop('pred_state_traj')
+        # Observation function inversion ===============================================
         # Compute the prediction of the state trajectory
-        pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
+        # This post-processing of observables ensures the input to the inverse function is of the correct shape.
+        post_obs_dyn_output = self.post_process_obs_state(pred_obs_state_traj, **obs_dyn_output)
+        pred_state_traj = self.inv_obs_fn(post_obs_dyn_output.pop('pred_obs_state_traj'))
         # Apply the required post-processing of the state.
         pred_state_traj = self.post_process_state(pred_state_traj)
 
@@ -90,30 +101,43 @@ class LatentMarkovDynamics(MarkovDynamics):
         out = dict(obs_state_traj=obs_state_traj,
                    pred_obs_state_traj=pred_obs_state_traj,
                    pred_state_traj=pred_state_traj)
-        out.update(obs_state_trajs)
+        out.update(pre_obs_fn_output)
+        out.update(post_obs_dyn_output)
         return out
 
-    def post_process_obs_state(self, obs_state_traj: Tensor, *aux_obs_state_trajs) -> dict[str, Tensor]:
+    def pre_process_obs_state(self, obs_state_traj: Tensor) -> dict[str, Tensor]:
         """ Apply transformations to the observable state trajectory.
         Args:
             obs_state_traj: (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
-            aux_obs_state_trajs: iterable of (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
         Returns:
-            obs_state_traj: (batch, time, obs_state_dim) tensor
+            Directory containing
+                - obs_state_traj: (batch, time, obs_state_dim) tensor.
+                - other: Other observations required for training of the model.
         """
-        out = {}
         if len(obs_state_traj.shape) == 2:
             obs_state_traj = flat_to_batched_trajectory(
                 obs_state_traj, batch_size=self._batch_size, state_dim=self.obs_state_dim)
+        elif len(obs_state_traj.shape) == 3:
+            pass
+        else:
+            raise RuntimeError(f"Invalid observable state trajectory shape {obs_state_traj.shape}. Expected "
+                               f"(batch, time, {self.obs_state_dim}) or (batch * time, {self.obs_state_dim})")
 
-        out['obs_state_traj'] = obs_state_traj
+        return dict(obs_state_traj=obs_state_traj)
 
-        if aux_obs_state_trajs is not None:
-            for i, traj in enumerate(aux_obs_state_trajs):
-                if len(traj.shape) == 2:
-                    traj = flat_to_batched_trajectory(traj, batch_size=self._batch_size, state_dim=self.obs_state_dim)
-                out[f'obs_state_traj_aux{"" if i == 0 else f"_{i}"}'] = traj
-        return out
+    def post_process_obs_state(self, pred_state_traj: Tensor, **kwargs) -> dict[str, Tensor]:
+        """ Post-process the predicted observable state trajectory given by the observable state dynamics.
+
+        Args:
+            pred_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
+             predicted by the transfer operator.
+            **kwargs:
+        Returns:
+            Dictionary contraining
+                - pred_obs_state_traj: (batch, time, obs_state_dim) Trajectory
+        """
+        flat_pred_obs_state_traj = batched_to_flat_trajectory(pred_state_traj)
+        return dict(pred_obs_state_traj=flat_pred_obs_state_traj)
 
     def compute_loss_and_metrics(self,
                                  state_traj: Tensor,
@@ -137,3 +161,22 @@ class LatentMarkovDynamics(MarkovDynamics):
         metrics.update(state_pred_metrics)
 
         return state_pred_loss, metrics
+
+    def get_hparams(self):
+        hparams = {}
+        if hasattr(self.obs_fn, 'get_hparams'):
+            obs_fn_params = self.obs_fn.get_hparams()
+            hparams['obs_fn'] = obs_fn_params
+        if hasattr(self.inv_obs_fn, 'get_hparams'):
+            inv_obs_fn_params = self.inv_obs_fn.get_hparams()
+            hparams['inv_obs_fn'] = inv_obs_fn_params
+        if hasattr(self.obs_state_dynamics, 'get_hparams'):
+            obs_state_dyn_params = self.obs_state_dynamics.get_hparams()
+            hparams['obs_state_dynamics'] = obs_state_dyn_params
+        hparams['state_dim'] = self.state_dim
+        hparams['obs_state_dim'] = self.obs_state_dim
+        hparams['dt'] = self.dt
+        return hparams
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(state_dim={self.state_dim} obs_state_dim={self.obs_state_dim}, dt={self.dt})"

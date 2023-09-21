@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.nn import Module
 
 from nn.markov_dynamics import MarkovDynamics
-from utils.mysc import full_rank_lstsq
+from utils.mysc import full_rank_lstsq, random_orthogonal_matrix
 from utils.representation_theory import identify_isotypic_spaces
 
 log = logging.getLogger(__name__)
@@ -48,9 +48,24 @@ class LinearDynamics(MarkovDynamics):
             self.transfer_op = None
             self.dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else full_rank_lstsq
         else:
-            # Variables for training mode
-            self.linear_layer = None    # TODO
-            raise NotImplementedError()
+            self.transfer_op = self.build_linear_map()
+            # Initialize weights of the linear layer such that it represents a stable system
+            self.reset_parameters(init_mode="stable")
+
+    def forward(self, state: Tensor, next_state: Tensor, **kwargs) -> [dict[str, Tensor]]:
+        pred_horizon = next_state.shape[1]
+        pre_processed_state = self.pre_process_state(state=state)
+
+        if self.is_trainable:
+            state_traj = self.pre_process_state(state=state, next_state=next_state)
+            one_step_evolved_traj = self.transfer_op(state_traj)
+            pred_state_traj = self.forcast(state=pre_processed_state, n_steps=pred_horizon)
+            out = dict(pred_state_traj=self.post_process_state(pred_state_traj),
+                       pred_state_one_step=self.post_process_state(one_step_evolved_traj))
+        else:
+            pred_state_traj = self.forcast(state=pre_processed_state, n_steps=pred_horizon)
+            out = dict(pred_state_traj=self.post_process_state(pred_state_traj))
+        return out
 
     def forcast(self, state: Tensor, n_steps: int = 1, **kwargs) -> Tensor:
         """ Predict the next `n_steps` states of the system.
@@ -63,14 +78,16 @@ class LinearDynamics(MarkovDynamics):
         batch, state_dim = state.shape
         assert state_dim == self.state_dim
 
-        transfer_op = self.get_transfer_op()
-
-        # Use the transfer operator to compute the maximum likelihood prediction of the trajectory
+        # Use the transfer operator to compute the maximum likelihood prediction of the future trajectory
         pred_state_traj = [state]
         for step in range(n_steps):
             # Compute the next state prediction s_t+1 = K @ s_t
             current_state = pred_state_traj[-1]
-            next_obs_state = torch.nn.functional.linear(current_state, transfer_op)
+            if self.is_trainable:
+                next_obs_state = self.transfer_op(current_state)
+            else:
+                transfer_op = self.get_transfer_op()
+                next_obs_state = (transfer_op @ current_state.T).T
             pred_state_traj.append(next_obs_state)
 
         pred_state_traj = torch.stack(pred_state_traj, dim=1)
@@ -80,12 +97,7 @@ class LinearDynamics(MarkovDynamics):
 
     def get_transfer_op(self):
         if self.is_trainable:
-            if isinstance(self.linear_layer, torch.nn.Linear):
-                transfer_op = self.linear_layer.weight
-            elif isinstance(self.linear_layer, escnn.nn.Linear):
-                transfer_op = self.linear_layer.matrix
-            else:
-                raise NotImplementedError(f"Unknown linear layer type {type(self.linear_layer)}")
+            raise RuntimeError("This model was initialized as trainable")
         else:
             transfer_op = self.transfer_op
             if transfer_op is None:
@@ -116,7 +128,24 @@ class LinearDynamics(MarkovDynamics):
                     solution_op_cond_num=torch.linalg.cond(transfer_op.detach()).to(torch.float),
                     solution_op_error=rec_error.detach().to(torch.float))
 
+    def build_linear_map(self) -> torch.nn.Linear:
+        return torch.nn.Linear(self.state_dim, self.state_dim, bias=False)
+
     def get_hparams(self):
         main_params = dict(state_dim=self.state_dim, trainable=self.is_trainable)
         return main_params
 
+    def reset_parameters(self, init_mode: str):
+        if init_mode == "stable":
+            weights = self.transfer_op.weight
+            # Do eigenvalue decomposition of the weights
+            A = torch.from_numpy(random_orthogonal_matrix(self.state_dim)).to(torch.float)
+            eig_vals, eig_vecs = torch.linalg.eig(A)
+            marginally_stable_eigvals = torch.complex(
+                eig_vals.real * 0, eig_vals.imag * self.dt**2)
+            # A = eig_vecs @ torch.diag(marginally_stable_eigvals) @ torch.inverse(eig_vecs)
+            # Reconstruct weight matrix
+            self.transfer_op.copy_ = (eig_vecs @ torch.diag(marginally_stable_eigvals) @ torch.inverse(eig_vecs)).real
+        else:
+            raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
+        log.info(f"Eigenvalues initialization to {init_mode}")
