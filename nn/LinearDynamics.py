@@ -91,7 +91,6 @@ class LinearDynamics(MarkovDynamics):
             pred_state_traj.append(next_obs_state)
 
         pred_state_traj = torch.stack(pred_state_traj, dim=1)
-        # a = pred_state_traj.detach().cpu().numpy()
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 

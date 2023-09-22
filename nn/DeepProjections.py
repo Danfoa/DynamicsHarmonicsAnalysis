@@ -129,6 +129,7 @@ class DPNet(LatentMarkovDynamics):
         obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
         return dict(obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux)
 
+
     def compute_loss_and_metrics(self,
                                  obs_state_traj: Tensor,
                                  obs_state_traj_aux: Tensor,

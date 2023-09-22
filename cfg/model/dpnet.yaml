@@ -7,14 +7,13 @@ name: DPNet
 equivariant: False
 
 # Model hyperparameters
-activation: ReLU
+activation: ELU
 num_layers: 5                                   # Number MLPs' layers (including input and output layers)
 num_hidden_units: 128                           # Number of hidden units in each layer
 batch_norm: True
 bias: False
 # Optimization hyperparameters parameters
 lr: 1e-3
-batch_size: 1024
 
 max_ck_window_length: ${system.pred_horizon}    # Maximum length of the Chapman-Kolmogorov window
 ck_w: 0.0                                       # Weight of the Chapman-Kolmogorov regularization term in the loss function

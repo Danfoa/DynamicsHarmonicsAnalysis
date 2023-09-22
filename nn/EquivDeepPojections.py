@@ -21,7 +21,7 @@ from tqdm import tqdm
 from data.DynamicsDataModule import DynamicsDataModule
 from nn.DeepProjections import DPNet
 from nn.EquivLinearDynamics import EquivLinearDynamics
-from nn.TwinMLP import TwinMLP
+from nn.ObservableNet import ObservableNet
 from nn.emlp import EMLP
 from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
@@ -38,7 +38,7 @@ class EquivDPNet(DPNet):
         activation="p_elu",
         batch_norm=True,
         bias=False,
-        backbone_layers=-2  # num_layers - 2
+        # backbone_layers=-2  # num_layers - 2
         )
 
     def __init__(self,
@@ -257,40 +257,27 @@ class EquivDPNet(DPNet):
         return A, metrics
 
     def build_obs_fn(self, num_layers, **kwargs):
-        num_backbone_layers = kwargs.pop('backbone_layers', num_layers - 2 if self.aux_obs_space else 0)
-        if num_backbone_layers < 0:
-            num_backbone_layers = num_layers - num_backbone_layers
-        backbone_params = None
-        if num_backbone_layers > 0 and self.aux_obs_space:
-            num_hidden_units = kwargs.get('num_hidden_units')
-            activation_type = kwargs.pop('activation')
-            num_hidden_regular_fields = int(np.ceil(num_hidden_units // self.state_type_iso.size))
-            act = EMLP.get_activation(activation=activation_type,
-                                      in_type=self.state_type_iso,
-                                      channels=num_hidden_regular_fields)
-            backbone_params = dict(in_type=self.state_type_iso,
-                                   out_type=act.out_type,
-                                   activation=act,
-                                   num_layers=num_backbone_layers,
-                                   head_with_activation=True,
-                                   **copy.copy(kwargs))
-            kwargs['bias'] = False
-            kwargs['batch_norm'] = False
-            obs_fn_params = dict(in_type=act.out_type, out_type=self.obs_state_type,
-                                 num_layers=num_layers - num_backbone_layers,
-                                 activation=act,
-                                 head_with_activation=False, **kwargs)
-        else:
-            obs_fn_params = dict(in_type=self.state_type_iso,
-                                 out_type=self.obs_state_type,
-                                 num_layers=num_layers,
-                                 head_with_activation=False,
-                                 **kwargs)
 
-        return TwinMLP(net_kwargs=obs_fn_params,
-                       backbone_kwargs=backbone_params,
-                       fake_aux_fn=not self.aux_obs_space,
-                       equivariant=True)
+        num_hidden_units = kwargs.get('num_hidden_units')
+        activation_type = kwargs.pop('activation')
+        act = EMLP.get_activation(activation=activation_type,
+                                  in_type=self.state_type_iso,
+                                  desired_hidden_units=num_hidden_units)
+
+        obs_fn = EMLP(in_type=self.state_type_iso,
+                      out_type=self.obs_state_type,
+                      num_layers=num_layers,
+                      activation=act,
+                      **kwargs)
+        obs_fn_aux = None
+        if self.aux_obs_space:
+            obs_fn_aux = EMLP(in_type=self.state_type_iso,
+                              out_type=self.obs_state_type,
+                              num_layers=num_layers,
+                              activation=act,
+                              **kwargs)
+
+        return ObservableNet(obs_fn=obs_fn, obs_fn_aux=obs_fn_aux)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, **kwargs):
         if linear_decoder:
@@ -307,7 +294,7 @@ class EquivDPNet(DPNet):
                         **kwargs)
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return EquivLinearDynamics(state_rep=self.obs_state_type.representation,
+        return EquivLinearDynamics(state_type=self.obs_state_type,
                                    dt=self.dt,
                                    trainable=False,
                                    group_avg_trick=self.group_avg_trick)

@@ -1,46 +1,46 @@
-from typing import Optional
+import copy
+from typing import Optional, Union
 
+import escnn.nn
 import torch.nn
+from escnn.nn import EquivariantModule
 
+from nn.EquivLinearDynamics import EquivLinearDynamics
+from nn.LinearDynamics import LinearDynamics
 from nn.mlp import MLP
 from nn.emlp import EMLP
 
 
-class TwinMLP(torch.nn.Module):
-    """Auxiliary class to construct Twin MLPs with a potentially shared backbone."""
+class ObservableNet(torch.nn.Module):
 
-    def __init__(self, net_kwargs: dict, backbone_kwargs: Optional[dict] = None, equivariant=False, fake_aux_fn=False):
+    def __init__(self, 
+                 obs_fn: Union[torch.nn.Module, EquivariantModule],
+                 obs_fn_aux: Optional[Union[torch.nn.Module, EquivariantModule]] = None):
         super().__init__()
-        self.fake_aux_fn = fake_aux_fn
-        self.shared_backbone = backbone_kwargs is not None
-        mlp_class = MLP if not equivariant else EMLP # SO2MLP
+        self.equivariant = isinstance(obs_fn, EquivariantModule)
+        self.use_aux_obs_fn = obs_fn_aux is not None
 
-        if self.shared_backbone:
-            self.backbone = mlp_class(**backbone_kwargs)
-
-        self.fn1 = mlp_class(**net_kwargs)
-        if not fake_aux_fn:
-            self.fn2 = mlp_class(**net_kwargs)
+        self.obs = obs_fn
+        self.obs_aux = None
+        if self.use_aux_obs_fn:  # Use two twin networks to compute the main and auxiliary observable space.
+            self.obs_aux = obs_fn_aux
         else:
-            pass
+            if self.equivariant:
+                self.transfer_op_H_H_prime = escnn.nn.Linear(
+                    in_type=self.obs.out_type, out_type=self.obs.out_type, bias=False)
+            else:
+                self.transfer_op_H_H_prime = torch.nn.Linear(
+                    in_features=self.obs.out_dim, out_features=self.obs.out_dim, bias=False)
 
     def forward(self, input):
 
-        if self.shared_backbone:
-            backbone_output = self.backbone(input)
-            output1 = self.fn1(backbone_output)
-            output2 = self.fn2(backbone_output)
+        obs_state = self.obs(input)
+
+        if self.use_aux_obs_fn:
+            obs_aux_state = self.obs_aux(input)
         else:
-            if self.fake_aux_fn:
-                output1 = self.fn1(input)
-                output2 = output1
-            else:
-                output1 = self.fn1(input)
-                output2 = self.fn2(input)
+            obs_aux_state = self.transfer_op_H_H_prime(obs_state)
 
-        return output1, output2
-
-    def get_hparams(self):
-        return {}
+        return obs_state, obs_aux_state
 
 

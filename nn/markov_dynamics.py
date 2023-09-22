@@ -42,6 +42,7 @@ class MarkovDynamics(torch.nn.Module):
 
         # Used to reshape the state trajectory from/back (batch * time, state_dim) to (batch, time, state_dim)
         self._batch_size = None
+        log.info(f"Instantiating {self.__class__.__name__} with state_dim={self.state_dim} and dt={self.dt}")
 
     def forward(self, state: Tensor, next_state: Tensor, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
@@ -150,7 +151,8 @@ class MarkovDynamics(torch.nn.Module):
         return hparams
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(state_dim={self.state_dim}, dt={self.dt})"
+        module_str = super().__repr__()
+        return module_str
 
 if __name__ == "__main__":
 

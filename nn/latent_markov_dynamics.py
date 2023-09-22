@@ -83,11 +83,13 @@ class LatentMarkovDynamics(MarkovDynamics):
                                                  next_state=obs_state_traj[:, 1:, :],
                                                  **pre_obs_fn_output)
         pred_obs_state_traj = obs_dyn_output.pop('pred_state_traj')
-        # Observation function inversion ===============================================
-        # Compute the prediction of the state trajectory
         # This post-processing of observables ensures the input to the inverse function is of the correct shape.
-        post_obs_dyn_output = self.post_process_obs_state(pred_obs_state_traj, **obs_dyn_output)
-        pred_state_traj = self.inv_obs_fn(post_obs_dyn_output.pop('pred_obs_state_traj'))
+        post_obs_dyn_output = self.post_process_obs_state(obs_state_traj, **obs_dyn_output)
+        # Observation function inversion ===============================================
+        # Compute the prediction of the state trajectory. The predicted state is computed from the ground truth
+        # observable state trajectory. Thus, error in predictions of observable states will propagate to errors in the
+        # reconstruction.
+        pred_state_traj = self.inv_obs_fn(post_obs_dyn_output['obs_state_traj'])
         # Apply the required post-processing of the state.
         pred_state_traj = self.post_process_state(pred_state_traj)
 
@@ -102,7 +104,7 @@ class LatentMarkovDynamics(MarkovDynamics):
                    pred_obs_state_traj=pred_obs_state_traj,
                    pred_state_traj=pred_state_traj)
         out.update(pre_obs_fn_output)
-        out.update(post_obs_dyn_output)
+        # out.update(post_obs_dyn_output)
         return out
 
     def pre_process_obs_state(self, obs_state_traj: Tensor) -> dict[str, Tensor]:
@@ -125,19 +127,19 @@ class LatentMarkovDynamics(MarkovDynamics):
 
         return dict(obs_state_traj=obs_state_traj)
 
-    def post_process_obs_state(self, pred_state_traj: Tensor, **kwargs) -> dict[str, Tensor]:
+    def post_process_obs_state(self, obs_state_traj: Tensor, **kwargs) -> dict[str, Tensor]:
         """ Post-process the predicted observable state trajectory given by the observable state dynamics.
 
         Args:
-            pred_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
+            obs_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
              predicted by the transfer operator.
             **kwargs:
         Returns:
             Dictionary contraining
                 - pred_obs_state_traj: (batch, time, obs_state_dim) Trajectory
         """
-        flat_pred_obs_state_traj = batched_to_flat_trajectory(pred_state_traj)
-        return dict(pred_obs_state_traj=flat_pred_obs_state_traj)
+        flat_obs_state_traj = batched_to_flat_trajectory(obs_state_traj)
+        return dict(obs_state_traj=flat_obs_state_traj)
 
     def compute_loss_and_metrics(self,
                                  state_traj: Tensor,
@@ -179,4 +181,6 @@ class LatentMarkovDynamics(MarkovDynamics):
         return hparams
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(state_dim={self.state_dim} obs_state_dim={self.obs_state_dim}, dt={self.dt})"
+        str = super().__repr__()
+        return (f"{str} \n {self.__class__.__name__}(state_dim={self.state_dim} "
+                f"obs_state_dim={self.obs_state_dim}, dt={self.dt:.1e})")

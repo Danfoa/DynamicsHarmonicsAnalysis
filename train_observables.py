@@ -129,7 +129,7 @@ def main(cfg: DictConfig):
 
         log.info(f"Model \n {model}")
 
-        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(5, int(cfg.max_epochs * 0.1)))
+        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(10, int(cfg.max_epochs * 0.1)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters

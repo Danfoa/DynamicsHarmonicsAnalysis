@@ -58,14 +58,11 @@ class EMLP(EquivariantModule):
 
         if isinstance(activation, str):
             # Approximate the num of neurons as the num of signals in the space spawned by the irreps of the input type
-            self.num_hidden_regular_fields = int(np.ceil(num_hidden_units // self.in_type.size))
             # To compute the signal over the group we use all elements for finite groups
-            activation = self.get_activation(activation, in_type=in_type, channels=self.num_hidden_regular_fields)
+            activation = self.get_activation(activation, in_type=in_type, desired_hidden_units=num_hidden_units)
             hidden_type = activation.in_type
-            self.activation = activation
         elif isinstance(activation, EquivariantModule):
             hidden_type = activation.in_type
-            self.activation = activation
         else:
             raise ValueError(f"Activation type {type(activation)} not supported.")
 
@@ -104,17 +101,22 @@ class EMLP(EquivariantModule):
         # self.net.check_equivariance()
 
     @staticmethod
-    def get_activation(activation, in_type: FieldType, channels: int):
+    def get_activation(activation, in_type: FieldType, desired_hidden_units: int):
         gspace = in_type.gspace
         group = gspace.fibergroup
         grid_length = group.order() if not group.continuous else 20
+
+        unique_irreps = set(in_type.irreps)
+        unique_irreps_dim = sum([group.irrep(*id).size for id in set(in_type.irreps)])
+        scale = in_type.size // unique_irreps_dim
+        channels = int(np.ceil(desired_hidden_units // unique_irreps_dim // scale))
         if "identity" in activation.lower():
             raise NotImplementedError("Identity activation not implemented yet")
             # return escnn.nn.IdentityModule()
         else:
             return escnn.nn.FourierPointwise(gspace,
                                              channels=channels,
-                                             irreps=in_type.irreps,
+                                             irreps=list(unique_irreps),
                                              function=f"p_{activation.lower()}",
                                              inplace=True,
                                              type='regular' if not group.continuous else 'rand',
@@ -123,12 +125,6 @@ class EMLP(EquivariantModule):
     def forward(self, x):
         """Forward pass of the EMLP model."""
         return self.net(x)
-
-    def get_hparams(self):
-        return {'num_layers': self.num_layers,
-                'hidden_ch':  self.num_hidden_regular_fields,
-                'activation': str(self.activation.__class__.__name__),
-                }
 
     def reset_parameters(self, init_mode=None):
         """Initialize weights and biases of E-MLP model."""

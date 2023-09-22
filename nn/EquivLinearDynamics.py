@@ -46,7 +46,8 @@ class EquivLinearDynamics(LinearDynamics):
         Q_iso2state = Tensor(Q_iso2state)
         Q_state2iso = Tensor(np.linalg.inv(Q_iso2state))
 
-        super(EquivLinearDynamics, self).__init__(state_rep=state_type.representation,
+        super(EquivLinearDynamics, self).__init__(state_dim=state_type.size,
+                                                  state_rep=state_type.representation,
                                                   dt=dt,
                                                   trainable=trainable,
                                                   dmd_algorithm=dmd_algorithm,
@@ -77,13 +78,10 @@ class EquivLinearDynamics(LinearDynamics):
                 next_obs_state = self.transfer_op(current_state)
             else:
                 transfer_op = self.get_transfer_op()
-                next_obs_state = torch.nn.functional.linear(current_state, transfer_op)
+                next_obs_state = self.state_type((transfer_op @ current_state.tensor.T).T)
             pred_state_traj.append(next_obs_state)
 
-        if self.is_trainable:
-            pred_state_traj = torch.stack([gt.tensor for gt in pred_state_traj], dim=1)
-        else:
-            pred_state_traj = torch.stack(pred_state_traj, dim=1)
+        pred_state_traj = torch.stack([gt.tensor for gt in pred_state_traj], dim=1)
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 

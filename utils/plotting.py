@@ -138,7 +138,7 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
 
     if fig is None:
         initial_call = True
-        fig = go.Figure()
+        fig = make_subplots(rows=1, cols=1)
 
     if initial_call:
         if constraint_matrix is not None:

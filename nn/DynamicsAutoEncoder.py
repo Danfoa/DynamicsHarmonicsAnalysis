@@ -87,11 +87,11 @@ class DAE(LatentMarkovDynamics):
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
         return pred_state_traj, pred_obs_state_traj
 
-    def post_process_obs_state(self, pred_state_traj: Tensor, pred_state_one_step: Tensor) -> dict[str, Tensor]:
+    def post_process_obs_state(self, obs_state_traj: Tensor, pred_state_one_step: Tensor) -> dict[str, Tensor]:
         """ Post-process the predicted observable state trajectory given by the observable state dynamics.
 
         Args:
-            pred_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
+            obs_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
              predicted by the transfer operator.
             pred_state_one_step: (batch, time, obs_state_dim) Trajectory of the predicted one-step ahead (time)
              observable states predicted by the transfer operator.
@@ -101,7 +101,7 @@ class DAE(LatentMarkovDynamics):
                 - pred_obs_state_traj: (batch * time, obs_state_dim) Trajectory
                 - pred_obs_state_one_step: (batch, time, obs_state_dim) Trajectory
         """
-        batched_pred_obs_state_traj = batched_to_flat_trajectory(pred_state_traj)
+        batched_pred_obs_state_traj = batched_to_flat_trajectory(obs_state_traj)
         return dict(pred_obs_state_traj=batched_pred_obs_state_traj,
                     pred_obs_state_one_step=pred_state_one_step)
 

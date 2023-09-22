@@ -38,7 +38,7 @@ class MLP(torch.nn.Module):
         """
         super().__init__()
         logging.info("Instantiating MLP (PyTorch)")
-        self.dim_input, self.dim_output = in_dim, out_dim
+        self.in_dim, self.out_dim = in_dim, out_dim
         self.init_mode = init_mode if init_mode is not None else "fan_in"
         self.hidden_channels = num_hidden_units
         self.activation = activation if isinstance(activation, list) else [activation] * (num_layers - 1)
@@ -47,7 +47,7 @@ class MLP(torch.nn.Module):
         if self.num_layers == 1 and not head_with_activation:
             log.warning(f"{self} model with 1 layer and no activation. This is equivalent to a linear map")
 
-        dim_in = self.dim_input
+        dim_in = self.in_dim
         dim_out = num_hidden_units
 
         self.net = torch.nn.Sequential()
@@ -65,7 +65,7 @@ class MLP(torch.nn.Module):
 
         # Add last layer
         head_block = torch.nn.Sequential()
-        head_block.add_module(f"linear_{num_layers - 1}", torch.nn.Linear(in_features=dim_out, out_features=self.dim_output, bias=bias))
+        head_block.add_module(f"linear_{num_layers - 1}", torch.nn.Linear(in_features=dim_out, out_features=self.out_dim, bias=bias))
         if head_with_activation:
             if batch_norm:
                 head_block.add_module(f"batchnorm_{num_layers - 1}", torch.nn.BatchNorm1d(dim_out))
@@ -100,7 +100,11 @@ class MLP(torch.nn.Module):
                 raise NotImplementedError(module.__class__.__name__)
 
             if "fan_in" == self.init_mode or "fan_out" == self.init_mode:
-                torch.nn.init.kaiming_uniform_(tensor, mode=self.init_mode, nonlinearity=activation.lower())
+                try:
+                    torch.nn.init.kaiming_uniform_(tensor, mode=self.init_mode, nonlinearity=activation.lower())
+                except ValueError as e:
+                    log.warning(f"Could not initialize {module.__class__.__name__} with {self.init_mode} mode. "
+                                f"Using default Pytorch initialization")
             elif 'normal' in self.init_mode.lower():
                 split = self.init_mode.split('l')
                 std = 0.1 if len(split) == 1 else float(split[1])

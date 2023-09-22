@@ -107,19 +107,19 @@ class EquivDAE(DAE):
                               ) -> dict[str, Tensor]:
         return super().pre_process_obs_state(obs_state_traj.tensor)
 
-    def post_process_obs_state(self, pred_state_traj: Tensor, **kwargs) -> dict[str, GeometricTensor]:
+    def post_process_obs_state(self, obs_state_traj: Tensor, **kwargs) -> dict[str, GeometricTensor]:
         """ Post-process the predicted observable state trajectory given by the observable state dynamics.
 
         Args:
-            pred_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
+            obs_state_traj: (batch, time, obs_state_dim) Trajectory of the predicted (time -1) observable states
              predicted by the transfer operator.
             **kwargs:
         Returns:
             Dictionary contraining
                 - pred_obs_state_traj: (batch * time, obs_state_dim) Geometric Tensor Trajectory
         """
-        flat_pred_obs_state_traj = batched_to_flat_trajectory(pred_state_traj)
-        return dict(pred_obs_state_traj=self.obs_state_type(flat_pred_obs_state_traj))
+        flat_obs_state_traj = batched_to_flat_trajectory(obs_state_traj)
+        return dict(obs_state_traj=self.obs_state_type(flat_obs_state_traj))
 
     def post_process_state(self, state_traj: GeometricTensor) -> Tensor:
         state_traj_input_basis = super().post_process_state(state_traj=state_traj.tensor)
@@ -138,7 +138,7 @@ class EquivDAE(DAE):
                     **kwargs)
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return EquivLinearDynamics(state_type=self.state_type_iso,
+        return EquivLinearDynamics(state_type=self.obs_state_type,
                                    dt=self.dt,
                                    trainable=True,
                                    group_avg_trick=self.group_avg_trick)

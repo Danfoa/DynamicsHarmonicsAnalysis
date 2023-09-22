@@ -116,10 +116,6 @@ class LightLatentMarkovDynamics(LightningModule):
         self._loss_metrics_fn = loss_metrics_fn
 
     def on_train_start(self):
-        # TODO: Add number of layers and hidden channels dimensions.
-        hparams = flatten_dict(self._run_hps)
-        if hasattr(self.model, "get_hparams"):
-            hparams.update(flatten_dict(self.model.get_hparams()))
 
         if hasattr(self.model, "approximate_transfer_operator"):
             metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
