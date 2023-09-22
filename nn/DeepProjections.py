@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from data.DynamicsDataModule import DynamicsDataModule
 from nn.LinearDynamics import LinearDynamics
-from nn.TwinMLP import TwinMLP
+from nn.ObservableNet import ObservableNet
 from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
 from nn.mlp import MLP
@@ -42,7 +42,6 @@ class DPNet(LatentMarkovDynamics):
         batch_norm=True,
         bias=False,
         init_mode='fan_in',
-        backbone_layers=-2  # num_layers - 2
         )
 
     def __init__(
@@ -73,11 +72,11 @@ class DPNet(LatentMarkovDynamics):
         _obs_fn_params = self._default_obs_fn_params.copy()
         if obs_fn_params is not None:
             _obs_fn_params.update(obs_fn_params)
+        # Define the linear dynamics of the observable state space
+        obs_state_dym = self.build_obs_dyn_module()
         # Build the observation function and its inverse
         obs_fn = self.build_obs_fn(**_obs_fn_params)
         inv_obs_fn = self.build_inv_obs_fn(linear_decoder=linear_decoder, **_obs_fn_params)
-        # Define the linear dynamics of the observable state space
-        obs_state_dym = self.build_obs_dyn_module()
         # Variable holding the transfer operator used to evolve the observable state in time.
 
         # Initialize the base class
@@ -127,10 +126,7 @@ class DPNet(LatentMarkovDynamics):
                 - obs_state_traj_aux: (batch, time, obs_state_dim) tensor.
         """
         obs_state_traj = super().pre_process_obs_state(obs_state_traj)['obs_state_traj']
-        if obs_state_traj_aux is not None:
-            obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
-        else:
-            obs_state_traj_aux = None
+        obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
         return dict(obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux)
 
     def compute_loss_and_metrics(self,
@@ -241,22 +237,30 @@ class DPNet(LatentMarkovDynamics):
                                           pred_obs_state_trajs=pred_obs_state_traj,
                                           dt=self.dt,
                                           n_trajs_to_show=5)
+        figs = dict(prediction=fig)
         if self.obs_state_dim == 3:
-            fig_3ds = plot_system_3D(trajectories=state_traj, secondary_trajectories=pred_state_traj,
-                                     title='state_traj', num_trajs_to_show=20)
             fig_3do = plot_system_3D(trajectories=obs_state_traj, secondary_trajectories=pred_obs_state_traj,
                                      title='obs_state', num_trajs_to_show=20)
-            figs = dict(prediction=fig, state=fig_3ds, obs_state=fig_3do)
-        elif self.obs_state_dim == 2:
-            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.2,
-                                     num_trajs_to_show=10)
+            if obs_state_traj_aux is not None:
+                fig_3do = plot_system_3D(trajectories=obs_state_traj_aux, legendgroup='aux', traj_colorscale='solar',
+                                         num_trajs_to_show=20, fig=fig_3do)
+            figs['obs_state'] = fig_3do
+        if self.state_dim == 3:
+            fig_3ds = plot_system_3D(trajectories=state_traj, secondary_trajectories=pred_state_traj,
+                                 title='state_traj', num_trajs_to_show=20)
+            figs['state'] = fig_3ds
+
+        if self.obs_state_dim == 2:
             fig_2do = plot_system_2D(trajs=obs_state_traj, secondary_trajs=pred_obs_state_traj, alpha=0.2,
                                      num_trajs_to_show=10)
-            if self.aux_obs_space:
-                plot_system_2D(trajs=obs_state_traj_aux, legendgroup='aux', num_trajs_to_show=10, fig=fig_2ds)
-            figs = dict(prediction=fig, state=fig_2ds, obs_state=fig_2do)
-        else:
-            figs = dict(prediction=fig)
+            if obs_state_traj_aux is not None:
+                fig_2do = plot_system_2D(trajs=obs_state_traj_aux, legendgroup='aux',
+                                         num_trajs_to_show=10, fig=fig_2do)
+            figs['obs_state'] = fig_2do
+        if self.state_dim == 2:
+            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.2,
+                                     num_trajs_to_show=10)
+            figs['state'] = fig_2ds
 
         metrics = None
         return figs, metrics
@@ -285,8 +289,6 @@ class DPNet(LatentMarkovDynamics):
                     train_data[key] = torch.squeeze(value)
                 else:
                     torch.cat([train_data[key], torch.squeeze(value)], dim=0)
-        for key, value in train_data.items():
-            train_data[key] = value[:6]
 
         # Apply any pre-processing to the state and next state
         state, next_state = train_data["state"], train_data["next_state"]
@@ -309,6 +311,8 @@ class DPNet(LatentMarkovDynamics):
         metrics['rank_obs_state'] = torch.linalg.matrix_rank(X).detach().to(torch.float)
 
         if self.linear_decoder:
+            # Predict the pre-processed state from the observable state
+            # pre_state = self.pre_process_state(state)
             inv_projector, inv_projector_metrics = self.empirical_lin_inverse_projector(state, obs_state)
             metrics.update(inv_projector_metrics)
             self.inverse_projector = inv_projector
@@ -318,24 +322,14 @@ class DPNet(LatentMarkovDynamics):
     def build_obs_fn(self, num_layers, identity=False, **kwargs):
         if identity:
             return lambda x: (x, x)
+        obs_fn = MLP(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers,
+                     head_with_activation=False, **kwargs)
+        obs_fn_aux = None
+        if self.aux_obs_space:
+            obs_fn_aux = MLP(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers,
+                             head_with_activation=False, **kwargs)
 
-        num_backbone_layers = kwargs.pop('backbone_layers', num_layers - 2 if self.aux_obs_space else 0)
-        if num_backbone_layers < 0:
-            num_backbone_layers = num_layers - num_backbone_layers
-        backbone_params = None
-        if num_backbone_layers > 0 and self.aux_obs_space:
-            backbone_feat_dim = kwargs.get('num_hidden_units')
-            backbone_params = dict(in_dim=self.state_dim, out_dim=backbone_feat_dim,
-                                   num_layers=num_backbone_layers, head_with_activation=True, **copy.copy(kwargs))
-            kwargs['bias'] = False
-            kwargs['batch_norm'] = False
-            obs_fn_params = dict(in_dim=backbone_feat_dim, out_dim=self.obs_state_dim,
-                                 num_layers=num_layers - num_backbone_layers, head_with_activation=False, **kwargs)
-        else:
-            obs_fn_params = dict(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers,
-                                 head_with_activation=False, **kwargs)
-
-        return TwinMLP(net_kwargs=obs_fn_params, backbone_kwargs=backbone_params, fake_aux_fn=not self.aux_obs_space)
+        return ObservableNet(obs_fn=obs_fn, obs_fn_aux=obs_fn_aux)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, identity=False, **kwargs):
         if identity:
@@ -352,7 +346,7 @@ class DPNet(LatentMarkovDynamics):
             return MLP(in_dim=self.obs_state_dim, out_dim=self.state_dim, num_layers=num_layers, **kwargs)
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt)
+        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt, trainable=False)
 
     def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
         """ Compute the empirical inverse projector from the observable state to the pre-processed state.

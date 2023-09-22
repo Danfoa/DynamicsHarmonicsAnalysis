@@ -41,9 +41,6 @@ class TwinMLP(torch.nn.Module):
         return output1, output2
 
     def get_hparams(self):
-        if self.fake_aux_fn:
-            return dict(fn1=self.fn1.get_hparams())
-        else:
-            return dict(fn1=self.fn1.get_hparams(), fn2=self.fn2.get_hparams())
+        return {}
 
 

@@ -1,6 +1,0 @@
-#model.lr: tag(log, interval(0.1, 0.0001))
-#model.ck_w: tag(log, interval(1, 0.001))
-#model.orthonormal_w: tag(log, interval(1, 0.001))
-#model.max_ck_window_length: choice(3, 6, 12)
-
-fuck: True
