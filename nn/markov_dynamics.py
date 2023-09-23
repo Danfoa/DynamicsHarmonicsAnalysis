@@ -143,6 +143,23 @@ class MarkovDynamics(torch.nn.Module):
 
         return pred_loss, pred_metrics
 
+    def check_state_traj_shape(self,
+                               state_dim: Optional[int] = None,
+                               time_horizon: Optional[int] = None,
+                               **state_trajectories):
+        """ Check shapes of state trajectories in time and batch dimensions. """
+        assert len(state_trajectories) > 0, "No state trajectories provided."
+        state_dim = self.state_dim if state_dim is None else state_dim
+        for traj_name, state_traj in state_trajectories.items():
+            assert len(state_traj.shape) == 3 and state_traj.shape[-1] == state_dim, \
+                f"Expected {traj_name} (batch, time, {state_dim}), got {state_traj.shape}"
+            if time_horizon is None:
+                assert state_traj.shape[0] == self._batch_size, \
+                    f"Expected {traj_name} ({self._batch_size}, time_horizon, {state_dim}), got {state_traj.shape}"
+            else:
+                assert state_traj.shape[0] == self._batch_size and state_traj.shape[1] == time_horizon, \
+                    f"Expected {traj_name} ({self._batch_size}, {time_horizon}, {state_dim}), got {state_traj.shape}"
+
     def get_hparams(self):
         hparams = {}
         hparams['state_dim'] = self.state_dim

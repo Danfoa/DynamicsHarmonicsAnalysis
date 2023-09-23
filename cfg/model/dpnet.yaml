@@ -7,9 +7,6 @@ name: DPNet
 equivariant: False
 
 # Model hyperparameters
-activation: ELU
-num_layers: 5                                   # Number MLPs' layers (including input and output layers)
-num_hidden_units: 128                           # Number of hidden units in each layer
 batch_norm: True
 bias: False
 # Optimization hyperparameters parameters

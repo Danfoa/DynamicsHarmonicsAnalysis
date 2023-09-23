@@ -35,6 +35,7 @@ class LinearDynamics(MarkovDynamics):
     def __init__(self,
                  state_dim: Optional[int] = None,
                  state_rep: Optional[Representation] = None,
+                 bias: bool = True,
                  dmd_algorithm: Optional[DmdSolver] = None,
                  dt: Optional[Union[float, int]] = 1,
                  trainable=False,
@@ -42,7 +43,7 @@ class LinearDynamics(MarkovDynamics):
 
         super().__init__(state_dim=state_dim, state_rep=state_rep, dt=dt, **markov_dyn_kwargs)
         self.is_trainable = trainable
-
+        self.bias = bias
         # Variables for non-training mode
         if not trainable:
             self.transfer_op = None
@@ -122,13 +123,13 @@ class LinearDynamics(MarkovDynamics):
 
         rec_error = torch.nn.functional.mse_loss(transfer_op @ X, X_prime)
         self.transfer_op = transfer_op
-
+        log.warning(f"We have not yet added the bias/constant function in the DMD optimization")
         return dict(solution_op_rank=torch.linalg.matrix_rank(transfer_op.detach()).to(torch.float),
                     solution_op_cond_num=torch.linalg.cond(transfer_op.detach()).to(torch.float),
                     solution_op_error=rec_error.detach().to(torch.float))
 
     def build_linear_map(self) -> torch.nn.Linear:
-        return torch.nn.Linear(self.state_dim, self.state_dim, bias=False)
+        return torch.nn.Linear(self.state_dim, self.state_dim, bias=self.bias)
 
     def get_hparams(self):
         main_params = dict(state_dim=self.state_dim, trainable=self.is_trainable)
@@ -136,15 +137,7 @@ class LinearDynamics(MarkovDynamics):
 
     def reset_parameters(self, init_mode: str):
         if init_mode == "stable":
-            weights = self.transfer_op.weight
-            # Do eigenvalue decomposition of the weights
-            A = torch.from_numpy(random_orthogonal_matrix(self.state_dim)).to(torch.float)
-            eig_vals, eig_vecs = torch.linalg.eig(A)
-            marginally_stable_eigvals = torch.complex(
-                eig_vals.real * 0, eig_vals.imag * self.dt**2)
-            # A = eig_vecs @ torch.diag(marginally_stable_eigvals) @ torch.inverse(eig_vecs)
-            # Reconstruct weight matrix
-            self.transfer_op.copy_ = (eig_vecs @ torch.diag(marginally_stable_eigvals) @ torch.inverse(eig_vecs)).real
+            self.transfer_op.weight.data = torch.eye(self.state_dim)
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
         log.info(f"Eigenvalues initialization to {init_mode}")

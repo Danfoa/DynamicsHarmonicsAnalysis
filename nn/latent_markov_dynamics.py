@@ -4,10 +4,13 @@ from typing import Any, Optional, Union
 import torch.nn
 from escnn.group import Representation
 from escnn.nn import GeometricTensor
+from plotly.graph_objs import Figure
 from torch import Tensor
 
 from nn.markov_dynamics import MarkovDynamics
+from utils.losses_and_metrics import forecasting_loss_and_metrics
 from utils.mysc import batched_to_flat_trajectory, flat_to_batched_trajectory, traj_from_states
+from utils.plotting import plot_system_2D, plot_system_3D, plot_two_panel_trajectories
 
 log = logging.getLogger(__name__)
 
@@ -82,30 +85,30 @@ class LatentMarkovDynamics(MarkovDynamics):
         obs_dyn_output = self.obs_state_dynamics(state=obs_state_traj[:, 0, :],
                                                  next_state=obs_state_traj[:, 1:, :],
                                                  **pre_obs_fn_output)
-        pred_obs_state_traj = obs_dyn_output.pop('pred_state_traj')
-        # This post-processing of observables ensures the input to the inverse function is of the correct shape.
-        post_obs_dyn_output = self.post_process_obs_state(obs_state_traj, **obs_dyn_output)
+        obs_dyn_output = {k.replace('state', 'obs_state'): v for k, v in obs_dyn_output.items()}
+        pred_obs_state_traj = obs_dyn_output.pop('pred_obs_state_traj')
         # Observation function inversion ===============================================
-        # Compute the prediction of the state trajectory. The predicted state is computed from the ground truth
-        # observable state trajectory. Thus, error in predictions of observable states will propagate to errors in the
-        # reconstruction.
-        pred_state_traj = self.inv_obs_fn(post_obs_dyn_output['obs_state_traj'])
+        # Compute the prediction of the state trajectory
+        # This post-processing of observables ensures the input to the inverse function is of the correct shape.
+        post_pred_obs_dyn_output = self.post_process_obs_state(pred_obs_state_traj)
+        post_obs_dyn_output = self.post_process_obs_state(obs_state_traj)
+        pred_state_traj = self.inv_obs_fn(post_pred_obs_dyn_output.pop('obs_state_traj'))
+        rec_state_traj = self.inv_obs_fn(post_obs_dyn_output.pop('obs_state_traj'))
         # Apply the required post-processing of the state.
         pred_state_traj = self.post_process_state(pred_state_traj)
+        rec_state_traj = self.post_process_state(rec_state_traj)
 
         # Sanity checks of shapes.
-        assert pred_state_traj.shape == (batch, time_horizon, self.state_dim), \
-            f"{pred_state_traj.shape}!=({batch}, {time_horizon}, {self.state_dim})"
-        assert obs_state_traj.shape == (batch, time_horizon, self.obs_state_dim), \
-            f"{obs_state_traj.shape}!=({batch}, {time_horizon}, {self.obs_state_dim})"
-        assert pred_obs_state_traj.shape == obs_state_traj.shape, f"{pred_obs_state_traj.shape}!={obs_state_traj.shape}"
-
-        out = dict(obs_state_traj=obs_state_traj,
-                   pred_obs_state_traj=pred_obs_state_traj,
-                   pred_state_traj=pred_state_traj)
-        out.update(pre_obs_fn_output)
-        # out.update(post_obs_dyn_output)
-        return out
+        self.check_state_traj_shape(pred_state_traj=pred_state_traj, rec_state_traj=rec_state_traj,
+                                    time_horizon=time_horizon, state_dim=self.state_dim)
+        self.check_state_traj_shape(obs_state_traj=obs_state_traj, pred_obs_state_traj=pred_obs_state_traj,
+                                    time_horizon=time_horizon, state_dim=self.obs_state_dim)
+        return dict(obs_state_traj=obs_state_traj,
+                    pred_obs_state_traj=pred_obs_state_traj,
+                    pred_state_traj=pred_state_traj,
+                    rec_state_traj=rec_state_traj,
+                    **pre_obs_fn_output,
+                    **obs_dyn_output)
 
     def pre_process_obs_state(self, obs_state_traj: Tensor) -> dict[str, Tensor]:
         """ Apply transformations to the observable state trajectory.
@@ -142,27 +145,91 @@ class LatentMarkovDynamics(MarkovDynamics):
         return dict(obs_state_traj=flat_obs_state_traj)
 
     def compute_loss_and_metrics(self,
-                                 state_traj: Tensor,
+                                 state: Tensor,
+                                 next_state: Tensor,
                                  pred_state_traj: Tensor,
                                  obs_state_traj: Tensor,
-                                 pred_obs_state_traj: Tensor) -> (Tensor, dict[str, Tensor]):
+                                 pred_obs_state_traj: Tensor,
+                                 rec_state_traj: Tensor,
+                                 ) -> (Tensor, dict[str, Tensor]):
         """ Compute the loss and metrics for the predicted state trajectory. You should probably override this."""
-        obs_pred_loss, obs_pred_metrics = self.obs_state_dynamics.compute_loss_and_metrics(
-            state_traj=state_traj, pred_state_traj=pred_obs_state_traj)
+        state_traj = traj_from_states(state, next_state)
 
-        state_pred_loss, state_pred_metrics = super().compute_loss_and_metrics(
-            state_traj=state_traj, pred_state_traj=pred_state_traj)
+        obs_pred_loss, obs_pred_metrics = forecasting_loss_and_metrics(
+            gt=obs_state_traj, pred=pred_obs_state_traj, prefix='obs_pred')
+        state_pred_loss, state_pred_metrics = forecasting_loss_and_metrics(
+            gt=state_traj, pred=pred_state_traj, prefix='state_pred')
+        state_rec_loss, state_rec_metrics = forecasting_loss_and_metrics(
+            gt=state_traj, pred=rec_state_traj, prefix='state_rec')
 
-        metrics = obs_pred_metrics
-        metrics['obs_pred_loss'] = obs_pred_loss
-
-        shared_metrics = set(state_pred_metrics.keys()).symmetric_difference(set(obs_pred_metrics.keys()))
-        if len(shared_metrics) > 0:
-            raise RuntimeError(f"Metrics: {shared_metrics} are shared by observation and state space predictions.")
-
-        metrics.update(state_pred_metrics)
+        metrics = dict(obs_pred_loss=obs_pred_loss,
+                       state_rec_loss=state_rec_loss,
+                       state_pred_loss=state_pred_loss,
+                       **obs_pred_metrics, **state_pred_metrics, **state_rec_metrics)
 
         return state_pred_loss, metrics
+
+    @torch.no_grad()
+    def eval_metrics(self,
+                     state: Tensor,
+                     next_state: Tensor,
+                     obs_state_traj: Tensor,
+                     obs_state_traj_aux: Optional[Tensor] = None,
+                     pred_state_traj: Optional[Tensor] = None,
+                     rec_state_traj: Optional[Tensor] = None,
+                     pred_obs_state_one_step: Optional[Tensor] = None,
+                     pred_obs_state_traj: Optional[Tensor] = None,
+                     ) -> (dict[str, Figure], dict[str, Tensor]):
+
+        state_traj = traj_from_states(state, next_state)
+
+        if obs_state_traj_aux is None and pred_obs_state_one_step is not None:
+            obs_state_traj_aux = pred_obs_state_one_step
+
+        # Detach all arguments and ensure they are in CPU
+        state_traj = state_traj.detach().cpu().numpy()
+        obs_state_traj = obs_state_traj.detach().cpu().numpy()
+        if obs_state_traj_aux is not None:
+            obs_state_traj_aux = obs_state_traj_aux.detach().cpu().numpy()
+        if pred_state_traj is not None:
+            pred_state_traj = pred_state_traj.detach().cpu().numpy()
+        if pred_obs_state_traj is not None:
+            pred_obs_state_traj = pred_obs_state_traj.detach().cpu().numpy()
+
+        fig = plot_two_panel_trajectories(state_trajs=state_traj,
+                                          pred_state_trajs=pred_state_traj,
+                                          obs_state_trajs=obs_state_traj,
+                                          pred_obs_state_trajs=pred_obs_state_traj,
+                                          dt=self.dt,
+                                          n_trajs_to_show=5)
+        figs = dict(prediction=fig)
+        if self.obs_state_dim == 3:
+            fig_3do = plot_system_3D(trajectories=obs_state_traj, secondary_trajectories=pred_obs_state_traj,
+                                     title='obs_state', num_trajs_to_show=20)
+            if obs_state_traj_aux is not None:
+                fig_3do = plot_system_3D(trajectories=obs_state_traj_aux, legendgroup='aux', traj_colorscale='solar',
+                                         num_trajs_to_show=20, fig=fig_3do)
+            figs['obs_state'] = fig_3do
+        if self.state_dim == 3:
+            fig_3ds = plot_system_3D(trajectories=state_traj, secondary_trajectories=pred_state_traj,
+                                     title='state_traj', num_trajs_to_show=20)
+            figs['state'] = fig_3ds
+
+        if self.obs_state_dim == 2:
+            fig_2do = plot_system_2D(trajs=obs_state_traj, secondary_trajs=pred_obs_state_traj, alpha=0.2,
+                                     num_trajs_to_show=10)
+            if obs_state_traj_aux is not None:
+                fig_2do = plot_system_2D(trajs=obs_state_traj_aux, legendgroup='aux',
+                                         num_trajs_to_show=10, fig=fig_2do)
+            figs['obs_state'] = fig_2do
+        if self.state_dim == 2:
+            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.2,
+                                     num_trajs_to_show=10)
+            figs['state'] = fig_2ds
+
+        metrics = None
+        return figs, metrics
+
 
     def get_hparams(self):
         hparams = {}

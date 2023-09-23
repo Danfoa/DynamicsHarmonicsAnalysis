@@ -13,6 +13,7 @@ import wandb
 from lightning import LightningModule
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
+from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class LightLatentMarkovDynamics(LightningModule):
                  run_hps: Optional[dict] = None):
         super().__init__()
         # self.model_type = model.__class__.__name__
-        self.model = None
+        self.model: LatentMarkovDynamics = None
         self.lr = lr
         self._batch_size = batch_size
 

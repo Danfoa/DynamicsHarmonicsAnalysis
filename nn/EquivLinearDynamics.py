@@ -1,4 +1,6 @@
+import itertools
 import logging
+import random
 from collections import OrderedDict
 from typing import Optional, Union
 
@@ -24,8 +26,8 @@ class EquivLinearDynamics(LinearDynamics):
                  dmd_algorithm: Optional[DmdSolver] = None,
                  dt: Optional[Union[float, int]] = 1,
                  trainable=False,
+                 bias: bool = True,
                  group_avg_trick: bool = True):
-
 
         self.symm_group = state_type.fibergroup
         self.gspace = state_type.gspace
@@ -36,24 +38,28 @@ class EquivLinearDynamics(LinearDynamics):
         self.state_iso_reps, self.state_iso_dims, Q_iso2state = isotypic_basis(representation=self.state_rep,
                                                                                multiplicity=1,
                                                                                prefix='ELDstate')
-        self.iso_space_basis = {}
-        # Each Field for ESCNN will be an Isotypic Subspace.
-        self.state_type = state_type
-        # Field type on isotypic basis.
-        self.state_type_iso = FieldType(self.gspace, [rep_iso for rep_iso in self.state_iso_reps.values()])
 
-        # Change of coordinates required for state to be in Isotypic basis.
-        Q_iso2state = Tensor(Q_iso2state)
-        Q_state2iso = Tensor(np.linalg.inv(Q_iso2state))
+        ordered_irreps = [id for iso_rep in self.state_iso_reps.values() for id in iso_rep.irreps]
+        self.state_type = state_type
+        if ordered_irreps == state_type.irreps and np.allclose(self.state_rep.change_of_basis, np.eye(self.state_rep.size)):
+            self.state_type_iso = state_type
+            Q_iso2state = Q_state2iso = None
+        else:
+            self.state_type_iso = FieldType(self.gspace, [rep_iso for rep_iso in self.state_iso_reps.values()])
+            # Change of coordinates required for state to be in Isotypic basis.
+            Q_iso2state = Tensor(Q_iso2state)
+            Q_state2iso = Tensor(np.linalg.inv(Q_iso2state))
 
         super(EquivLinearDynamics, self).__init__(state_dim=state_type.size,
                                                   state_rep=state_type.representation,
                                                   dt=dt,
                                                   trainable=trainable,
+                                                  bias=bias,
                                                   dmd_algorithm=dmd_algorithm,
                                                   state_change_of_basis=Q_state2iso,
                                                   state_inv_change_of_basis=Q_iso2state)
 
+        # self.compute_endomorphism_basis()
         self.iso_transfer_op = OrderedDict()
         for irrep_id in self.state_iso_reps:  # Preserve the order of the Isotypic Subspaces
             self.iso_transfer_op[irrep_id] = None
@@ -82,6 +88,8 @@ class EquivLinearDynamics(LinearDynamics):
             pred_state_traj.append(next_obs_state)
 
         pred_state_traj = torch.stack([gt.tensor for gt in pred_state_traj], dim=1)
+        # A = self.transfer_op.matrix.detach().cpu().numpy()
+        # traj = pred_state_traj.detach().cpu().numpy()
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 
@@ -139,13 +147,14 @@ class EquivLinearDynamics(LinearDynamics):
         rec_error = torch.sum(iso_rec_error)
         self.transfer_op = transfer_op
 
+        log.warning(f"We have not yet added the bias/constant function in the DMD optimization")
         return dict(solution_op_rank=torch.linalg.matrix_rank(transfer_op.detach()).to(torch.float),
                     solution_op_cond_num=torch.linalg.cond(transfer_op.detach()).to(torch.float),
                     solution_op_error=rec_error.detach().to(torch.float),
                     solution_op_error_dist=iso_rec_error.detach().to(torch.float))
 
     def build_linear_map(self) -> escnn.nn.Linear:
-        return escnn.nn.Linear(in_type=self.state_type_iso, out_type=self.state_type_iso, bias=False)
+        return escnn.nn.Linear(in_type=self.state_type_iso, out_type=self.state_type_iso, bias=True)
 
     def compute_endomorphism_basis(self):
         # When approximating the transfer/Koopman operator from the symmetric observable space, we know the operator
@@ -163,25 +172,55 @@ class EquivLinearDynamics(LinearDynamics):
                                              out_reprs=[self.symm_group.irrep(*id) for id in rep.irreps],
                                              basis_generator=self.gspace.build_fiber_intertwiner_basis,
                                              points=np.zeros((1, 1)))
-            self.iso_space_basis[irrep_id] = iso_basis
-            # basis_coefficients = torch.rand((iso_basis.dimension(),)) + 2
-            # non_zero_elements = iso_basis(basis_coefficients)[:, :, 0]
+            basis_coefficients = torch.rand((iso_basis.dimension(),)) + 2
             # mask = torch.logical_not(torch.isclose(non_zero_elements, torch.zeros_like(non_zero_elements), atol=1e-6))
             # self.iso_space_basis_mask[irrep_id] = mask
-
-        print("D")
+        raise NotImplementedError()
 
     def reset_parameters(self, init_mode: str):
         if init_mode == "stable":
-            equiv_map, _ = self.transfer_op.expand_parameters()
-            # Do eigenvalue decomposition of the weights
-            eig_vals, eig_vecs = torch.linalg.eig(equiv_map)
+            # Incredibly shady hack in order to get the identity matrix as the initial transfer operator.
+            basis_expansion = self.transfer_op.basisexpansion
+            identity_coefficients = torch.zeros((basis_expansion.dimension(),))
+            # weights = torch.rand((self.transfer_op.basisexpansion.dimension(),))
+            for io_pair in basis_expansion._representations_pairs:
+                # retrieve the indices
+                in_indices = getattr(basis_expansion, f"in_indices_{basis_expansion._escape_pair(io_pair)}")
+                out_indices = getattr(basis_expansion, f"out_indices_{basis_expansion._escape_pair(io_pair)}")
+                start_coeff = basis_expansion._weights_ranges[io_pair][0]
+                end_coeff = basis_expansion._weights_ranges[io_pair][1]
+                # expand the current subset of basis vectors and set the result in the appropriate place in the filter
+                # retrieve the basis
+                block_expansion = getattr(basis_expansion, f"block_expansion_{basis_expansion._escape_pair(io_pair)}")
 
-            marginally_stable_eigvals = torch.complex(torch.ones_like(eig_vals.real) * -0.99,
-                                                      eig_vals.imag * self.dt**2)
-            A = eig_vecs @ torch.diag(marginally_stable_eigvals) @ torch.inverse(eig_vecs)
-            # Reconstruct weight matrix
-            self.transfer_op.copy_ = A
+                # Basis Matrices spawing the space of equivariant linear maps of this block
+                basis_matrices = block_expansion.sampled_basis.detach().cpu().numpy()[:, :, :, 0]
+                # We want to find the coefficients of this basis responsible for the identity matrix. These are the
+                # elements of the basis having no effect on off-diagonal elements of the block.
+                basis_dimension = basis_matrices.shape[0]
+                singlar_value_dimensions = []
+                for element_num in range(basis_dimension):
+                    # Get the basis matrix corresponding to this element
+                    basis_matrix = basis_matrices[element_num]
+                    # Assert that all elements off-diagonal are zero
+                    is_singular_value = np.all(basis_matrix == np.diag(np.diag(basis_matrix)))
+                    if is_singular_value:
+                        singlar_value_dimensions.append(element_num)
+                coefficients = torch.zeros((basis_dimension,))
+                coefficients[singlar_value_dimensions] = 1
+
+                # retrieve the linear coefficients for the basis expansion
+                identity_coefficients[start_coeff:end_coeff] = coefficients
+
+            self.transfer_op.weights.data = identity_coefficients
+            matrix, _ = self.transfer_op.expand_parameters()
+            empirical_eigvals = torch.linalg.eigvals(matrix)
+            real_part = empirical_eigvals.real.detach().cpu().numpy()
+            imaginary_part = empirical_eigvals.imag.detach().cpu().numpy()
+            assert np.allclose(real_part, np.ones_like(real_part)), \
+                f"Eigenvalues with real part different from 1: {real_part}"
+            assert np.allclose(imaginary_part, np.zeros_like(imaginary_part)), \
+                f"Eigenvalues with imaginary part: {imaginary_part}"
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
 

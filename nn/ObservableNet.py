@@ -25,12 +25,14 @@ class ObservableNet(torch.nn.Module):
         if self.use_aux_obs_fn:  # Use two twin networks to compute the main and auxiliary observable space.
             self.obs_aux = obs_fn_aux
         else:
+            # Setting the bias of the linear layer to true is equivalent to setting the constant function in the basis
+            # of the space of functions. Then the bias of each dimension is the coefficient of the constant function.
             if self.equivariant:
                 self.transfer_op_H_H_prime = escnn.nn.Linear(
-                    in_type=self.obs.out_type, out_type=self.obs.out_type, bias=False)
+                    in_type=self.obs.out_type, out_type=self.obs.out_type, bias=True)
             else:
                 self.transfer_op_H_H_prime = torch.nn.Linear(
-                    in_features=self.obs.out_dim, out_features=self.obs.out_dim, bias=False)
+                    in_features=self.obs.out_dim, out_features=self.obs.out_dim, bias=True)
 
     def forward(self, input):
 

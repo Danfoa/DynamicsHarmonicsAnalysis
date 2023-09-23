@@ -102,9 +102,7 @@ class EquivDAE(DAE):
         # Convert to Geometric Tensor
         return self.state_type_iso(state_trajectory_iso_basis)
 
-    def pre_process_obs_state(self,
-                              obs_state_traj: GeometricTensor
-                              ) -> dict[str, Tensor]:
+    def pre_process_obs_state(self, obs_state_traj: GeometricTensor) -> dict[str, Tensor]:
         return super().pre_process_obs_state(obs_state_traj.tensor)
 
     def post_process_obs_state(self, obs_state_traj: Tensor, **kwargs) -> dict[str, GeometricTensor]:
@@ -141,7 +139,8 @@ class EquivDAE(DAE):
         return EquivLinearDynamics(state_type=self.obs_state_type,
                                    dt=self.dt,
                                    trainable=True,
-                                   group_avg_trick=self.group_avg_trick)
+                                   group_avg_trick=self.group_avg_trick,
+                                   bias=True)
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_prime: Optional[Tensor] = None) -> dict:
         # For each Isotypic Subspace, compute empirical Covariance and Cross-Covariance operators.

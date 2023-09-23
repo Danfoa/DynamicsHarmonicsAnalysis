@@ -4,7 +4,7 @@ name: ??
 # Dataset related parameters
 augment: False          # Weather to use data-augmentation of the dataset if the system has symmetries.
 # Model hyperparameters
-activation: ReLU
+activation: ELU
 num_layers: 5                                   # Number MLPs' layers (including input and output layers)
 num_hidden_units: 128                           # Number of hidden units in each layer
 batch_norm: True

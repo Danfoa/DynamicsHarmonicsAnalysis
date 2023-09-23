@@ -97,21 +97,29 @@ class DPNet(LatentMarkovDynamics):
             n_steps: Number of steps to predict.
             **kwargs:
         Returns:
-            pred_next_obs_state: (batch_dim, n_steps, obs_state_dim) Predicted observable state.
+            pred_obs_state_traj: (batch_dim, n_steps, obs_state_dim) Predicted observable state.
         """
-        assert state.shape[-1] == self.state_dim, f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
+        assert len(state.shape) == 2 and state.shape[-1] == self.state_dim, \
+            f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
         time_horizon = n_steps + 1
 
-        obs_state = self.obs_fn(state)
+        preprocessed_state = self.pre_process_state(state=state)
+
+        obs_state, obs_state_aux = self.obs_fn(preprocessed_state)
+
         pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state, n_steps=n_steps)
-        pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
+
+        pred_state_traj = self.inv_obs_fn(batched_to_flat_trajectory(pred_obs_state_traj))
+
+        pred_state_traj = self.post_process_state(state_traj=pred_state_traj)
 
         assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), \
             f"{pred_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.state_dim})"
         assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), \
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
-        raise NotImplementedError("This function needs to handle pre/post state processing")
-        return pred_state_traj, pred_obs_state_traj
+
+        return dict(pred_state_traj=pred_state_traj,
+                    pred_obs_state_traj=pred_obs_state_traj)
 
     def pre_process_obs_state(self,
                               obs_state_traj: Tensor,
@@ -129,7 +137,6 @@ class DPNet(LatentMarkovDynamics):
         obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
         return dict(obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux)
 
-
     def compute_loss_and_metrics(self,
                                  obs_state_traj: Tensor,
                                  obs_state_traj_aux: Tensor,
@@ -137,9 +144,8 @@ class DPNet(LatentMarkovDynamics):
                                  state: Optional[Tensor] = None,
                                  next_state: Optional[Tensor] = None,
                                  pred_state_traj: Optional[Tensor] = None,
+                                 rec_state_traj: Optional[Tensor] = None,
                                  ) -> (Tensor, dict[str, Tensor]):
-
-        state_traj = traj_from_states(state, next_state)
 
         obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, obs_state_traj_aux)
 
@@ -148,21 +154,13 @@ class DPNet(LatentMarkovDynamics):
                                  ck_reg=obs_space_metrics["ck_reg"],
                                  orth_reg=obs_space_metrics["orth_reg"])
 
-        # Include prediction metrics if available
-        if pred_obs_state_traj is not None:
-            assert pred_obs_state_traj.shape == obs_state_traj.shape, \
-                f"{pred_obs_state_traj.shape} != {obs_state_traj.shape}"
-            obs_pred_loss, obs_pred_metrics = forecasting_loss_and_metrics(gt=obs_state_traj, pred=pred_obs_state_traj)
-            obs_pred_metrics["obs_pred_loss"] = obs_pred_loss
-            obs_space_metrics.update(obs_pred_metrics)
-            # obs_pred_metrics["obs_pred_loss_t"] = obs_pred_metrics.pop("pred_loss_t")
-        if pred_state_traj is not None:  # Get the state prediction error
-            assert pred_state_traj.shape == state_traj.shape, f"{pred_state_traj.shape} != {state_traj.shape}"
-            pred_loss, pred_metrics = forecasting_loss_and_metrics(gt=state_traj, pred=pred_state_traj)
-            pred_metrics["pred_loss"] = pred_loss
-            # Step 0 describes the linear decoder error
-            pred_metrics["decoder_error"] = torch.nn.functional.mse_loss(state, pred_state_traj[:, 0, :])
-            obs_space_metrics.update(pred_metrics)
+        _, metrics = super().compute_loss_and_metrics(state=state,
+                                                      next_state=next_state,
+                                                      pred_state_traj=pred_state_traj,
+                                                      rec_state_traj=rec_state_traj,
+                                                      obs_state_traj=obs_state_traj,
+                                                      pred_obs_state_traj=pred_obs_state_traj)
+        obs_space_metrics.update(metrics)
 
         return loss, obs_space_metrics
 
@@ -209,62 +207,6 @@ class DPNet(LatentMarkovDynamics):
         loss = -score  # Change sign to minimize the loss and maximize the score.
         assert not torch.isnan(loss), f"Loss is NaN."
         return loss
-
-    @torch.no_grad()
-    def eval_metrics(self,
-                     state: Tensor,
-                     next_state: Tensor,
-                     obs_state_traj: Tensor,
-                     obs_state_traj_aux: Optional[Tensor] = None,
-                     pred_state_traj: Optional[Tensor] = None,
-                     pred_obs_state_traj: Optional[Tensor] = None,
-                     ) -> (dict[str, Figure], dict[str, Tensor]):
-
-        state_traj = traj_from_states(state, next_state)
-
-        # Detach all arguments and ensure they are in CPU
-        state_traj = state_traj.detach().cpu().numpy()
-        obs_state_traj = obs_state_traj.detach().cpu().numpy()
-        if obs_state_traj_aux is not None:
-            obs_state_traj_aux = obs_state_traj_aux.detach().cpu().numpy()
-        if pred_state_traj is not None:
-            pred_state_traj = pred_state_traj.detach().cpu().numpy()
-        if pred_obs_state_traj is not None:
-            pred_obs_state_traj = pred_obs_state_traj.detach().cpu().numpy()
-
-        fig = plot_two_panel_trajectories(state_trajs=state_traj,
-                                          pred_state_trajs=pred_state_traj,
-                                          obs_state_trajs=obs_state_traj,
-                                          pred_obs_state_trajs=pred_obs_state_traj,
-                                          dt=self.dt,
-                                          n_trajs_to_show=5)
-        figs = dict(prediction=fig)
-        if self.obs_state_dim == 3:
-            fig_3do = plot_system_3D(trajectories=obs_state_traj, secondary_trajectories=pred_obs_state_traj,
-                                     title='obs_state', num_trajs_to_show=20)
-            if obs_state_traj_aux is not None:
-                fig_3do = plot_system_3D(trajectories=obs_state_traj_aux, legendgroup='aux', traj_colorscale='solar',
-                                         num_trajs_to_show=20, fig=fig_3do)
-            figs['obs_state'] = fig_3do
-        if self.state_dim == 3:
-            fig_3ds = plot_system_3D(trajectories=state_traj, secondary_trajectories=pred_state_traj,
-                                 title='state_traj', num_trajs_to_show=20)
-            figs['state'] = fig_3ds
-
-        if self.obs_state_dim == 2:
-            fig_2do = plot_system_2D(trajs=obs_state_traj, secondary_trajs=pred_obs_state_traj, alpha=0.2,
-                                     num_trajs_to_show=10)
-            if obs_state_traj_aux is not None:
-                fig_2do = plot_system_2D(trajs=obs_state_traj_aux, legendgroup='aux',
-                                         num_trajs_to_show=10, fig=fig_2do)
-            figs['obs_state'] = fig_2do
-        if self.state_dim == 2:
-            fig_2ds = plot_system_2D(trajs=state_traj, secondary_trajs=pred_state_traj, alpha=0.2,
-                                     num_trajs_to_show=10)
-            figs['state'] = fig_2ds
-
-        metrics = None
-        return figs, metrics
 
     @torch.no_grad()
     def approximate_transfer_operator(self, train_data_loader: DataLoader):

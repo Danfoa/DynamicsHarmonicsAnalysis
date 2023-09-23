@@ -37,7 +37,6 @@ class DynamicsDataModule(LightningDataModule):
         super().__init__()
         if system_cfg is None:
             system_cfg = {}
-        assert data_path.exists(), f"Data folder not found {data_path.absolute()}"
         self._data_path = data_path
         self.system_cfg = system_cfg
         self.augment = augment
@@ -83,6 +82,8 @@ class DynamicsDataModule(LightningDataModule):
         system_data_path = [path for path in dyn_sys_data if f"noise_level={noise_level}" in str(path)]
         if len(system_data_path) > 1:
             raise RuntimeError(f"Multiple potential paths {system_data_path} found")
+        elif len(system_data_path) == 0:
+            raise ValueError(f"No recordings found in {self._data_path}")
         system_data_path = system_data_path.pop()
 
         train_data, test_data, val_data = get_train_test_val_file_paths(system_data_path)
@@ -284,6 +285,17 @@ if __name__ == "__main__":
 
     # Time the time taken to iterate over train test and validation datasets and divide it by the number of samples
     # in each partition, accessible through the dataset.dataset_size attribute
+    train_data = {}
+    for batch in data_module.train_dataloader():
+        for key, value in batch.items():
+            if key not in train_data:
+                train_data[key] = torch.squeeze(value)
+            else:
+                torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+    for key, value in train_data.items():
+        train_data[key] = value[:6]
+
+
     for partition, dataloader in zip(['Train', 'Test', 'Validation'],
                                      [data_module.train_dataloader(), data_module.test_dataloader(),
                                       data_module.val_dataloader()]):
@@ -295,21 +307,3 @@ if __name__ == "__main__":
         # print the time in [ms]
         print(f"Average time per sample in {partition} set: {(time.time() - start_time) / n_samples * 1000:.2f} [ms]")
         print(f"Total time iters over {partition} set: {(time.time() - start_time):.2f}[s]")
-
-    for color, dataloader in zip(['Gray', 'Agsunset', 'Viridis'], [data_module.test_dataloader(), data_module.val_dataloader(), data_module.train_dataloader()]):
-        for i, batch in enumerate(dataloader):
-            states = batch['state'][:5].detach().numpy()
-            next_states = batch['next_state'][:5].detach().numpy()
-
-            for state, next_state in zip(states, next_states):
-                traj = np.concatenate([np.expand_dims(state, 0), next_state], axis=0)
-                if state_dim == 2:
-                    pass
-                elif state_dim == 3:
-                    fig = plot_system_3D(A_G, traj, constraint_matrix=P_symm, constraint_offset=offset, fig=fig,
-                                         traj_colorscale=color)
-                else:
-                    pass
-            break
-    fig.write_html("Example-test-val-train-samples.html")
-    fig.show()
