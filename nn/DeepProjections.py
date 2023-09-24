@@ -231,7 +231,7 @@ class DPNet(LatentMarkovDynamics):
                 if key not in train_data:
                     train_data[key] = torch.squeeze(value)
                 else:
-                    torch.cat([train_data[key], torch.squeeze(value)], dim=0)
+                    train_data[key] = torch.cat([train_data[key], torch.squeeze(value)], dim=0)
 
         # Apply any pre-processing to the state and next state
         state, next_state = train_data["state"], train_data["next_state"]
