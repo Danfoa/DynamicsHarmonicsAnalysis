@@ -25,7 +25,8 @@ from nn.ObservableNet import ObservableNet
 from nn.emlp import EMLP
 from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
-from utils.mysc import full_rank_lstsq_symmetric, traj_from_states
+from utils.mysc import traj_from_states
+from utils.linear_algebra import full_rank_lstsq_symmetric
 from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ log = logging.getLogger(__name__)
 class EquivDPNet(DPNet):
     _default_obs_fn_params = dict(
         num_layers=4,
-        num_hidden_units=128,   # Approximate number of neurons in hidden layers. Actual number depends on group order.
+        num_hidden_units=128,  # Approximate number of neurons in hidden layers. Actual number depends on group order.
         activation="p_elu",
         batch_norm=True,
         bias=False,
@@ -88,6 +89,7 @@ class EquivDPNet(DPNet):
         # Define a dict containing the transfer operator of each Isotypic subspace.
         self.iso_transfer_op = {irrep_id: None for irrep_id in self.obs_iso_reps.keys()}
         self.iso_inverse_projector = {irrep_id: None for irrep_id in self.obs_iso_reps.keys()}
+        self.iso_inverse_projector_bias = {irrep_id: None for irrep_id in self.obs_iso_reps.keys()}
 
         super(EquivDPNet, self).__init__(state_dim=state_rep.size,
                                          obs_state_dim=obs_state_dim,
@@ -219,6 +221,7 @@ class EquivDPNet(DPNet):
             obs_state: (batch, obs_state_dim) Tensor containing the observable state.
         Returns:
             A: (state_dim, obs_state_dim) Tensor containing the empirical inverse projector.
+            B: (state_dim, 1) Tensor containing the empirical bias term.
             rec_error: Scalar tensor containing the reconstruction error or "residual".
         """
         # Inverse projector is computed from the observable state to the pre-processed state
@@ -235,18 +238,24 @@ class EquivDPNet(DPNet):
             state_iso = pre_state[..., self.state_iso_dims[irrep_id]]
             obs_state_iso = obs_state[..., self.obs_iso_dims[irrep_id]]
             # Generate the data matrices of x(w_t) and x(w_t+1)
-            X = obs_state_iso.T  # (batch_dim, obs_state_dim)
-            Y = state_iso.T  # (state_dim, n_samples)
-            A_iso = full_rank_lstsq_symmetric(X=X,
-                                              Y=Y,
-                                              rep_X=obs_rep if self.group_avg_trick else None,
-                                              rep_Y=state_rep if self.group_avg_trick else None)
-            iso_rec_error.append(torch.nn.functional.mse_loss(Y, A_iso @ X))
+            X_iso = obs_state_iso.T  # (batch_dim, obs_state_dim)
+            Y_iso = state_iso.T  # (state_dim, n_samples)
+            A_iso, B_iso = full_rank_lstsq_symmetric(X=X_iso,
+                                                     Y=Y_iso,
+                                                     rep_X=obs_rep if self.group_avg_trick else None,
+                                                     rep_Y=state_rep if self.group_avg_trick else None,
+                                                     bias=True)
+            if B_iso is not None:
+                iso_rec_error.append(torch.nn.functional.mse_loss(Y_iso, (A_iso @ X_iso) + B_iso))
+            else:
+                iso_rec_error.append(torch.nn.functional.mse_loss(Y_iso, A_iso @ X_iso))
 
             assert A_iso.shape == (state_iso.shape[-1], obs_state_iso.shape[-1]), f"A_iso: {A_iso.shape}"
             self.iso_inverse_projector[irrep_id] = A_iso
+            self.iso_inverse_projector_bias[irrep_id] = B_iso
 
         A = torch.block_diag(*[self.iso_inverse_projector[irrep_id] for irrep_id in self.obs_iso_reps.keys()])
+        B = torch.cat([self.iso_inverse_projector_bias[irrep_id] for irrep_id in self.obs_iso_reps.keys()])
         rec_error = torch.sum(torch.Tensor(iso_rec_error)).detach()
 
         metrics = dict(inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
@@ -254,7 +263,7 @@ class EquivDPNet(DPNet):
                        inverse_projector_error=rec_error,
                        inverse_projector_error_dist=torch.Tensor(iso_rec_error).detach())
 
-        return A, metrics
+        return A, B, metrics
 
     def build_obs_fn(self, num_layers, **kwargs):
 
@@ -281,13 +290,8 @@ class EquivDPNet(DPNet):
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, **kwargs):
         if linear_decoder:
-            def decoder(dpnet: DPNet, obs_state: Tensor):
-                assert hasattr(dpnet, 'inverse_projector'), "DPNet.inverse_projector not initialized."
-                return torch.nn.functional.linear(obs_state, dpnet.inverse_projector)
-
-            return lambda x: decoder(self, x)
+            return super().build_inv_obs_fn(num_layers=num_layers, linear_decoder=linear_decoder, **kwargs)
         else:
-
             return EMLP(in_type=self.obs_state_type,
                         out_type=self.state_type_iso,
                         num_layers=num_layers,
@@ -297,6 +301,7 @@ class EquivDPNet(DPNet):
         return EquivLinearDynamics(state_type=self.obs_state_type,
                                    dt=self.dt,
                                    trainable=False,
+                                   bias=self.enforce_constant_fn,
                                    group_avg_trick=self.group_avg_trick)
 
     def __repr__(self):

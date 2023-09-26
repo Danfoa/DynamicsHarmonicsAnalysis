@@ -11,71 +11,8 @@ import math
 
 from itertools import chain, combinations
 
-from escnn.group import Representation
 from torch import Tensor
 
-
-def full_rank_lstsq(X: Tensor, Y: Tensor, driver='gelsd') -> Tensor:
-    """Compute the least squares solution of the linear system `X' = A·X`. Assuming full rank X and A.
-    Args:<
-        X: (|x|, n_samples) Data matrix of the initial states.
-        Y: (|y|, n_samples) Data matrix of the next states.
-    Returns:
-        A: (|y|, |x|) Least squares solution of the linear system `X' = A·X`.
-    """
-    assert (
-            X.ndim == 2 and Y.ndim == 2 and X.shape[1] == Y.shape[1]
-    ), f"X: {X.shape}, Y: {Y.shape}. Expected (|x|, n_samples) and (|y|, n_samples) respectively."
-
-    # Torch convention uses Y:(n_samples, |y|) and X:(n_samples, |x|) to solve the least squares
-    # problem for `Y = X·A`, instead of our convention `Y = A·X`. So we have to do the appropriate transpose.
-    result = torch.linalg.lstsq(X.T.detach().cpu().to(dtype=torch.double),
-                                Y.T.detach().cpu().to(dtype=torch.double), rcond=None, driver=driver)
-    A = result.solution.T.to(device=X.device, dtype=X.dtype)
-    # y_hat = A @ X
-    return A
-
-
-def full_rank_lstsq_symmetric(
-        X: Tensor, Y: Tensor, rep_X: Representation, rep_Y: Representation) -> Tensor:
-    """ Compute the least squares solution of the linear system Y = A·X.
-
-    If the representation is provided the empirical transfer operator is improved using the group average trick to
-    enforce equivariance considering that:
-                        rep_Y(g) y = A rep_X(g) x
-                    rep_Y(g) (A x) = A rep_X(g) x
-                        rep_Y(g) A = A rep_X(g)
-            rep_Y(g) A rep_X(g)^-1 = A                | forall g in G.
-
-    TODO: Parallelize
-    Args:
-        X: (|x|, n_samples) Data matrix of the initial states.
-        Y: (|y|, n_samples) Data matrix of the next states.
-    Returns:
-        A: (|y|, |x|) Least squares solution of the linear system `Y = A·X`.
-    """
-
-    A = full_rank_lstsq(X, Y)
-    if rep_X is None or rep_Y is None:
-        return A
-    assert rep_Y.group == rep_X.group, "Representations must belong to the same group."
-
-    # Do the group average trick to enforce equivariance.
-    # This is equivalent to applying the group average trick on the singular vectors of the covariance matrices.
-    A_G = []
-    group = rep_X.group
-    elements = group.elements if not group.continuous else group.grid(type='rand', N=group._maximum_frequency)
-    for g in elements:
-        if g == group.identity:
-            A_g = A
-        else:
-            rep_X_g_inv = torch.from_numpy(rep_X(~g)).to(dtype=X.dtype, device=X.device)
-            rep_Y_g = torch.from_numpy(rep_Y(g)).to(dtype=X.dtype, device=X.device)
-            A_g = rep_Y_g @ A @ rep_X_g_inv
-        A_G.append(A_g)
-    A_G = torch.stack(A_G, dim=0)
-    A_G = torch.mean(A_G, dim=0)
-    return A_G
 
 def powerset(iterable):
     "Return the list of all subsets of the input iterable"

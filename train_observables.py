@@ -122,6 +122,7 @@ def main(cfg: DictConfig):
                           ck_w=cfg.model.ck_w,
                           orth_w=cfg.model.orth_w,
                           use_spectral_score=cfg.model.use_spectral_score,
+                          enforce_constant_fn=cfg.model.constant_function,
                           aux_obs_space=cfg.model.aux_obs_space,
                           obs_fn_params=obs_fn_params)
         else:

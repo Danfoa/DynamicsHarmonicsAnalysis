@@ -140,7 +140,7 @@ class EquivDAE(DAE):
                                    dt=self.dt,
                                    trainable=True,
                                    group_avg_trick=self.group_avg_trick,
-                                   bias=True)
+                                   bias=self.enforce_constant_fn)
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_prime: Optional[Tensor] = None) -> dict:
         # For each Isotypic Subspace, compute empirical Covariance and Cross-Covariance operators.

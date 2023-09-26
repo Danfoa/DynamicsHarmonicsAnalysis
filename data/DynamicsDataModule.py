@@ -38,7 +38,8 @@ class DynamicsDataModule(LightningDataModule):
         if system_cfg is None:
             system_cfg = {}
         self._data_path = data_path
-        self.system_cfg = system_cfg
+        self.system_cfg = system_cfg if system_cfg is not None else {}
+        self.noise_level = self.system_cfg.get('noise_level', 0)
         self.augment = augment
         self.frames_per_step = frames_per_step
         if isinstance(pred_horizon, float):
@@ -78,8 +79,7 @@ class DynamicsDataModule(LightningDataModule):
         log.info(f"Preparing datasets {self._data_path}")
 
         dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
-        noise_level = self.system_cfg.get('noise_level', 0)
-        system_data_path = [path for path in dyn_sys_data if f"noise_level={noise_level}" in str(path)]
+        system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
         if len(system_data_path) > 1:
             raise RuntimeError(f"Multiple potential paths {system_data_path} found")
         elif len(system_data_path) == 0:

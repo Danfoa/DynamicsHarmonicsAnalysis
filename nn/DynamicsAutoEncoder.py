@@ -34,6 +34,7 @@ class DAE(LatentMarkovDynamics):
             orth_w: float = 0.1,
             corr_w: float = 0.0,
             obs_fn_params: Optional[dict] = None,
+            enforce_constant_fn: bool = True,
             **markov_dyn_params
             ):
         self.state_dim, self.obs_state_dim = state_dim, obs_state_dim
@@ -41,6 +42,7 @@ class DAE(LatentMarkovDynamics):
         self.orth_w = orth_w
         self.obs_pred_w = obs_pred_w
         self.corr_w = corr_w
+        self.enforce_constant_fn = enforce_constant_fn
 
         _obs_fn_params = self._default_obs_fn_params.copy()
         if obs_fn_params is not None:
@@ -139,4 +141,4 @@ class DAE(LatentMarkovDynamics):
         return MLP(in_dim=self.obs_state_dim, out_dim=self.state_dim, num_layers=num_layers, **kwargs)
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt, trainable=True, bias=True)
+        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt, trainable=True, bias=self.enforce_constant_fn)

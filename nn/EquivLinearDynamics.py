@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 import escnn
 import numpy as np
+import scipy
 import torch
 from escnn.group import Representation
 from escnn.nn import FieldType, GeometricTensor
@@ -14,7 +15,7 @@ from torch import Tensor
 
 from nn.LinearDynamics import DmdSolver, LinearDynamics
 from nn.markov_dynamics import MarkovDynamics
-from utils.mysc import full_rank_lstsq, full_rank_lstsq_symmetric
+from utils.linear_algebra import full_rank_lstsq, full_rank_lstsq_symmetric, represent_linear_map_in_basis
 from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
@@ -27,11 +28,12 @@ class EquivLinearDynamics(LinearDynamics):
                  dt: Optional[Union[float, int]] = 1,
                  trainable=False,
                  bias: bool = True,
+                 init_mode: str = "identity",
                  group_avg_trick: bool = True):
 
         self.symm_group = state_type.fibergroup
         self.gspace = state_type.gspace
-        self.state_rep = state_type.representation
+        self.state_rep: Representation = state_type.representation
         self.group_avg_trick = group_avg_trick
         dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else full_rank_lstsq_symmetric
         # Find the Isotypic basis of the state space
@@ -55,14 +57,17 @@ class EquivLinearDynamics(LinearDynamics):
                                                   dt=dt,
                                                   trainable=trainable,
                                                   bias=bias,
+                                                  init_mode=init_mode,
                                                   dmd_algorithm=dmd_algorithm,
                                                   state_change_of_basis=Q_state2iso,
                                                   state_inv_change_of_basis=Q_iso2state)
 
         # self.compute_endomorphism_basis()
         self.iso_transfer_op = OrderedDict()
+        self.iso_transfer_op_bias = OrderedDict()
         for irrep_id in self.state_iso_reps:  # Preserve the order of the Isotypic Subspaces
             self.iso_transfer_op[irrep_id] = None
+            self.iso_transfer_op_bias[irrep_id] = None
 
     def forcast(self, state: GeometricTensor, n_steps: int = 1, **kwargs) -> Tensor:
         """ Predict the next `n_steps` states of the system.
@@ -72,26 +77,10 @@ class EquivLinearDynamics(LinearDynamics):
         Returns:
             pred_state_traj: (batch, n_steps + 1, state_dim)
         """
-        batch, state_dim = state.tensor.shape
         assert state.type == self.state_type_iso, f"{state.type} != {self.state_type_iso}"
 
-        # Use the transfer operator to compute the maximum likelihood prediction of the future trajectory
-        pred_state_traj = [state]
-        for step in range(n_steps):
-            # Compute the next state prediction s_t+1 = K @ s_t
-            current_state = pred_state_traj[-1]
-            if self.is_trainable:
-                next_obs_state = self.transfer_op(current_state)
-            else:
-                transfer_op = self.get_transfer_op()
-                next_obs_state = self.state_type((transfer_op @ current_state.tensor.T).T)
-            pred_state_traj.append(next_obs_state)
+        return super().forcast(state=state.tensor, n_steps=n_steps, **kwargs)
 
-        pred_state_traj = torch.stack([gt.tensor for gt in pred_state_traj], dim=1)
-        # A = self.transfer_op.matrix.detach().cpu().numpy()
-        # traj = pred_state_traj.detach().cpu().numpy()
-        assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
-        return pred_state_traj
 
     def pre_process_state(self, state: Tensor, next_state: Optional[Tensor] = None) -> GeometricTensor:
         # Change basis to Isotypic basis.
@@ -133,28 +122,38 @@ class EquivLinearDynamics(LinearDynamics):
             X_iso_prime = next_state_iso.T  # (iso_state_dim, num_samples)
 
             # Compute the empirical transfer operator of this Observable Isotypic subspace
-            A_iso = self.dmd_algorithm(X_iso, X_iso_prime,
-                                       rep_X=rep if self.group_avg_trick else None,
-                                       rep_Y=rep if self.group_avg_trick else None)
-            rec_error = torch.nn.functional.mse_loss(A_iso @ X_iso, X_iso_prime)
+            A_iso, B_iso = self.dmd_algorithm(X_iso, X_iso_prime, bias=self.bias,
+                                              rep_X=rep if self.group_avg_trick else None,
+                                              rep_Y=rep if self.group_avg_trick else None)
+            if self.bias:
+                rec_error = torch.nn.functional.mse_loss(A_iso @ X_iso + B_iso, X_iso_prime)
+            else:
+                rec_error = torch.nn.functional.mse_loss(A_iso @ X_iso, X_iso_prime)
+
             iso_rec_error.append(rec_error)
             self.iso_transfer_op[irrep_id] = A_iso
+            self.iso_transfer_op_bias[irrep_id] = B_iso
+
         transfer_op = torch.block_diag(*[self.iso_transfer_op[irrep_id] for irrep_id in self.state_iso_reps.keys()])
         assert transfer_op.shape == (self.state_dim, self.state_dim)
         self.transfer_op = transfer_op
+        if self.bias:
+            transfer_op_bias = torch.cat(
+                [self.iso_transfer_op_bias[irrep_id] for irrep_id in self.state_iso_reps.keys()])
+            assert transfer_op_bias.shape == (self.state_dim, 1), f"{transfer_op_bias.shape}!=({self.state_dim}, 1)"
+            self.transfer_op_bias = transfer_op_bias
 
         iso_rec_error = Tensor(iso_rec_error)
         rec_error = torch.sum(iso_rec_error)
         self.transfer_op = transfer_op
 
-        log.warning(f"We have not yet added the bias/constant function in the DMD optimization")
         return dict(solution_op_rank=torch.linalg.matrix_rank(transfer_op.detach()).to(torch.float),
                     solution_op_cond_num=torch.linalg.cond(transfer_op.detach()).to(torch.float),
                     solution_op_error=rec_error.detach().to(torch.float),
                     solution_op_error_dist=iso_rec_error.detach().to(torch.float))
 
     def build_linear_map(self) -> escnn.nn.Linear:
-        return escnn.nn.Linear(in_type=self.state_type_iso, out_type=self.state_type_iso, bias=True)
+        return escnn.nn.Linear(in_type=self.state_type_iso, out_type=self.state_type_iso, bias=self.bias)
 
     def compute_endomorphism_basis(self):
         # When approximating the transfer/Koopman operator from the symmetric observable space, we know the operator
@@ -178,32 +177,29 @@ class EquivLinearDynamics(LinearDynamics):
         raise NotImplementedError()
 
     def reset_parameters(self, init_mode: str):
-        if init_mode == "stable":
+        basis_expansion = self.transfer_op.basisexpansion
+        identity_coefficients = torch.zeros((basis_expansion.dimension(),))
+        if init_mode == "identity":
             # Incredibly shady hack in order to get the identity matrix as the initial transfer operator.
-            basis_expansion = self.transfer_op.basisexpansion
-            identity_coefficients = torch.zeros((basis_expansion.dimension(),))
-            # weights = torch.rand((self.transfer_op.basisexpansion.dimension(),))
             for io_pair in basis_expansion._representations_pairs:
+                # retrieve the basis
+                block_expansion = getattr(basis_expansion, f"block_expansion_{basis_expansion._escape_pair(io_pair)}")
                 # retrieve the indices
-                in_indices = getattr(basis_expansion, f"in_indices_{basis_expansion._escape_pair(io_pair)}")
-                out_indices = getattr(basis_expansion, f"out_indices_{basis_expansion._escape_pair(io_pair)}")
                 start_coeff = basis_expansion._weights_ranges[io_pair][0]
                 end_coeff = basis_expansion._weights_ranges[io_pair][1]
                 # expand the current subset of basis vectors and set the result in the appropriate place in the filter
-                # retrieve the basis
-                block_expansion = getattr(basis_expansion, f"block_expansion_{basis_expansion._escape_pair(io_pair)}")
 
                 # Basis Matrices spawing the space of equivariant linear maps of this block
-                basis_matrices = block_expansion.sampled_basis.detach().cpu().numpy()[:, :, :, 0]
+                basis_set_linear_map = block_expansion.sampled_basis.detach().cpu().numpy()[:, :, :, 0]
                 # We want to find the coefficients of this basis responsible for the identity matrix. These are the
                 # elements of the basis having no effect on off-diagonal elements of the block.
-                basis_dimension = basis_matrices.shape[0]
+                basis_dimension = basis_set_linear_map.shape[0]
                 singlar_value_dimensions = []
                 for element_num in range(basis_dimension):
                     # Get the basis matrix corresponding to this element
-                    basis_matrix = basis_matrices[element_num]
+                    basis_matrix = basis_set_linear_map[element_num]
                     # Assert that all elements off-diagonal are zero
-                    is_singular_value = np.all(basis_matrix == np.diag(np.diag(basis_matrix)))
+                    is_singular_value = np.allclose(basis_matrix, np.diag(np.diag(basis_matrix)), rtol=1e-4, atol=1e-4)
                     if is_singular_value:
                         singlar_value_dimensions.append(element_num)
                 coefficients = torch.zeros((basis_dimension,))
@@ -214,13 +210,57 @@ class EquivLinearDynamics(LinearDynamics):
 
             self.transfer_op.weights.data = identity_coefficients
             matrix, _ = self.transfer_op.expand_parameters()
-            empirical_eigvals = torch.linalg.eigvals(matrix)
-            real_part = empirical_eigvals.real.detach().cpu().numpy()
-            imaginary_part = empirical_eigvals.imag.detach().cpu().numpy()
-            assert np.allclose(real_part, np.ones_like(real_part)), \
-                f"Eigenvalues with real part different from 1: {real_part}"
-            assert np.allclose(imaginary_part, np.zeros_like(imaginary_part)), \
-                f"Eigenvalues with imaginary part: {imaginary_part}"
+            eigvals = torch.linalg.eigvals(matrix)
+            eigvals_real = eigvals.real.detach().cpu().numpy()
+            eigvals_imag = eigvals.imag.detach().cpu().numpy()
+            assert np.allclose(np.abs(eigvals_real), np.ones_like(eigvals_real), rtol=1e-4, atol=1e-4), \
+                f"Eigenvalues with real part different from 1: {eigvals_real}"
+            assert np.allclose(eigvals_imag, np.zeros_like(eigvals_imag), rtol=1e-4, atol=1e-4), \
+                f"Eigenvalues with imaginary part: {eigvals_imag}"
+        elif init_mode == "isotypic_identity":
+            # Incredibly shady hack in order to set the identity operator between all irreps of the same type.
+            block_coeff = []
+            block_init_transfer_op = []
+            for io_pair in basis_expansion._representations_pairs:
+                # retrieve the basis
+                block_expansion = getattr(basis_expansion, f"block_expansion_{basis_expansion._escape_pair(io_pair)}")
+                basis_instance = block_expansion.basis
+                assert len(basis_instance.irreps_bases) == 1, "We need to handle non-isotypic blocks"
+                in_rep, out_rep = block_expansion.basis.in_repr, block_expansion.basis.out_repr
+                group = in_rep.group
+                in_irrep_id, out_irrep_id = np.unique(in_rep.irreps)[0], np.unique(out_rep.irreps)[0]
+                # Cyclic group fucking Ids.
+                in_irrep_id = (in_irrep_id,) if not isinstance(in_irrep_id, tuple) else in_irrep_id
+                out_irrep_id = (out_irrep_id,) if not isinstance(out_irrep_id, tuple) else out_irrep_id
+                basis_set_linear_map = block_expansion.sampled_basis.detach().cpu().numpy()[:, :, :, 0]
+                basis_dimension, out_dim, in_dim = basis_set_linear_map.shape
+                if group.irrep(*in_irrep_id) == in_rep.group.trivial_representation:
+                    init_transfer_op = np.eye(out_dim, in_dim)
+                else:
+                    in_irrep, out_irrep = group.irrep(*in_irrep_id), group.irrep(*out_irrep_id)
+                    in_multiplicity, out_multiplicity = in_dim // in_irrep.size, out_dim // out_irrep.size
+                    irrep_init_transfer_op = np.eye(out_irrep.size, in_irrep.size) / max(out_multiplicity,
+                                                                                         in_multiplicity)
+                    init_transfer_op = scipy.linalg.kron(np.ones((out_multiplicity, in_multiplicity)),
+                                                         irrep_init_transfer_op)
+                    print("")
+
+                coeff = represent_linear_map_in_basis(basis_linear_map=basis_set_linear_map,
+                                                      in_linear_map=init_transfer_op)
+                block_coeff.append(coeff)
+                block_init_transfer_op.append(init_transfer_op)
+
+            block_coeff = np.concatenate(block_coeff)
+            self.transfer_op.weights.data = torch.from_numpy(block_coeff).to(device=self.transfer_op.weights.device,
+                                                                             dtype=self.transfer_op.weights.dtype)
+            matrix, _ = self.transfer_op.expand_parameters()
+            matrix_np = matrix.detach().cpu().numpy()
+            eigvals = torch.linalg.eigvals(matrix)
+            eigvals_real = eigvals.real.detach().cpu().numpy()
+            eigvals_imag = eigvals.imag.detach().cpu().numpy()
+            assert np.allclose(matrix_np, scipy.linalg.block_diag(*block_init_transfer_op)), \
+                f"Probably the block coefficients order of ESCNN is not what we assumed"
+            raise NotImplementedError("This is not working yet")
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
 

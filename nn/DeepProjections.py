@@ -24,10 +24,11 @@ from utils.losses_and_metrics import (
     forecasting_loss_and_metrics,
     obs_state_space_metrics,
     )
-from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, full_rank_lstsq, print_dict,
+from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, print_dict,
                         random_orthogonal_matrix,
                         states_from_traj,
                         traj_from_states)
+from utils.linear_algebra import full_rank_lstsq
 from utils.plotting import (combine_side_by_side, plot_system_2D, plot_system_3D, plot_trajectories,
                             plot_two_panel_trajectories)
 
@@ -52,7 +53,7 @@ class DPNet(LatentMarkovDynamics):
             max_ck_window_length: int = 6,
             ck_w: float = 0.1,
             orth_w: float = 0.1,
-            enforce_constant_function: bool = True,
+            enforce_constant_fn: bool = True,
             use_spectral_score: bool = True,
             aux_obs_space: bool = False,
             obs_fn_params: Optional[dict] = None,
@@ -70,7 +71,7 @@ class DPNet(LatentMarkovDynamics):
         self.inverse_projector = None  # if linear decoder is true, this is the map between obs to states.
         self.inverse_projector_bias = None
         self.linear_decoder = linear_decoder
-        self.enforce_constant_function = enforce_constant_function
+        self.enforce_constant_fn = enforce_constant_fn
 
         _obs_fn_params = self._default_obs_fn_params.copy()
         if obs_fn_params is not None:
@@ -299,7 +300,7 @@ class DPNet(LatentMarkovDynamics):
         return LinearDynamics(state_dim=self.obs_state_dim,
                               dt=self.dt,
                               trainable=False,
-                              bias=self.enforce_constant_function)
+                              bias=self.enforce_constant_fn)
 
     def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
         """ Compute the empirical inverse projector from the observable state to the pre-processed state.
@@ -316,7 +317,7 @@ class DPNet(LatentMarkovDynamics):
         pre_state = self.pre_process_state(state)
         X = obs_state.T  # (obs_state_dim, n_samples)
         Y = pre_state.T  # (state_dim, n_samples)
-        A, B = full_rank_lstsq(X, Y)
+        A, B = full_rank_lstsq(X, Y, bias=True)
 
         rec_error = torch.nn.functional.mse_loss(A @ X + B, Y)
 
