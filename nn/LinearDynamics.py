@@ -39,6 +39,7 @@ class LinearDynamics(MarkovDynamics):
                  dmd_algorithm: Optional[DmdSolver] = None,
                  dt: Optional[Union[float, int]] = 1,
                  trainable=False,
+                 init_mode: str = "stable",
                  **markov_dyn_kwargs):
 
         super().__init__(state_dim=state_dim, state_rep=state_rep, dt=dt, **markov_dyn_kwargs)
@@ -47,11 +48,12 @@ class LinearDynamics(MarkovDynamics):
         # Variables for non-training mode
         if not trainable:
             self.transfer_op = None
+            self.transfer_op_bias = None
             self.dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else full_rank_lstsq
         else:
             self.transfer_op = self.build_linear_map()
             # Initialize weights of the linear layer such that it represents a stable system
-            self.reset_parameters(init_mode="stable")
+            self.reset_parameters(init_mode=init_mode)
 
     def forward(self, state: Tensor, next_state: Tensor, **kwargs) -> [dict[str, Tensor]]:
         pred_horizon = next_state.shape[1]
@@ -87,8 +89,11 @@ class LinearDynamics(MarkovDynamics):
             if self.is_trainable:
                 next_obs_state = self.transfer_op(current_state)
             else:
-                transfer_op = self.get_transfer_op()
-                next_obs_state = (transfer_op @ current_state.T).T
+                transfer_op, bias = self.get_transfer_op()
+                if bias is not None:
+                    next_obs_state = (transfer_op @ current_state.T + bias).T
+                else:
+                    next_obs_state = (transfer_op @ current_state.T).T
             pred_state_traj.append(next_obs_state)
 
         pred_state_traj = torch.stack(pred_state_traj, dim=1)
@@ -100,9 +105,10 @@ class LinearDynamics(MarkovDynamics):
             raise RuntimeError("This model was initialized as trainable")
         else:
             transfer_op = self.transfer_op
+            bias = self.transfer_op_bias
             if transfer_op is None:
                 raise RuntimeError("The transfer operator not approximated yet. Call `approximate_transfer_operator`")
-        return transfer_op
+        return transfer_op, bias
 
     def update_transfer_op(self, X: Tensor, X_prime: Tensor) -> dict[str, Tensor]:
         """ Use a DMD algorithm to update the empirical transfer operator
@@ -118,14 +124,16 @@ class LinearDynamics(MarkovDynamics):
         assert X.shape == X_prime.shape, f"X: {X.shape}, X_prime: {X_prime.shape}"
         assert X.shape[0] == self.state_dim, f"Invalid state dimension {X.shape[0]} != {self.state_dim}"
 
-        transfer_op = self.dmd_algorithm(X=X, Y=X_prime)
-        assert transfer_op.shape == (self.state_dim, self.state_dim)
+        A, B = self.dmd_algorithm(X=X, Y=X_prime, bias=self.bias)
+        if self.bias:
+            rec_error = torch.nn.functional.mse_loss(A @ X + B, X_prime)
+        else:
+            rec_error = torch.nn.functional.mse_loss(A @ X, X_prime)
 
-        rec_error = torch.nn.functional.mse_loss(transfer_op @ X, X_prime)
-        self.transfer_op = transfer_op
-        log.warning(f"We have not yet added the bias/constant function in the DMD optimization")
-        return dict(solution_op_rank=torch.linalg.matrix_rank(transfer_op.detach()).to(torch.float),
-                    solution_op_cond_num=torch.linalg.cond(transfer_op.detach()).to(torch.float),
+        self.transfer_op = A
+        self.transfer_op_bias = B
+        return dict(solution_op_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
+                    solution_op_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
                     solution_op_error=rec_error.detach().to(torch.float))
 
     def build_linear_map(self) -> torch.nn.Linear:

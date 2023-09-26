@@ -502,11 +502,11 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
                 )
 
 
-def forecasting_loss_and_metrics(gt: Tensor, pred: Tensor, prefix='') -> (Tensor, dict[str, Tensor]):
+def forecasting_loss_and_metrics(gt: Tensor, pred: Tensor, prefix='pred') -> (Tensor, dict[str, Tensor]):
     # Compute state squared error over time and the infinite norm of the state dimension over time.
     l2_loss = torch.norm(gt - pred, p=2, dim=-1)
     metrics = {}
-    metrics[f'{prefix}pred_loss_t'] = l2_loss
+    metrics[f'{prefix}_loss_t'] = l2_loss
     return l2_loss.mean(), metrics
 
 

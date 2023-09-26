@@ -52,6 +52,7 @@ class DPNet(LatentMarkovDynamics):
             max_ck_window_length: int = 6,
             ck_w: float = 0.1,
             orth_w: float = 0.1,
+            enforce_constant_function: bool = True,
             use_spectral_score: bool = True,
             aux_obs_space: bool = False,
             obs_fn_params: Optional[dict] = None,
@@ -67,7 +68,9 @@ class DPNet(LatentMarkovDynamics):
         self.use_spectral_score = use_spectral_score
         self.aux_obs_space = aux_obs_space
         self.inverse_projector = None  # if linear decoder is true, this is the map between obs to states.
+        self.inverse_projector_bias = None
         self.linear_decoder = linear_decoder
+        self.enforce_constant_function = enforce_constant_function
 
         _obs_fn_params = self._default_obs_fn_params.copy()
         if obs_fn_params is not None:
@@ -256,9 +259,10 @@ class DPNet(LatentMarkovDynamics):
         if self.linear_decoder:
             # Predict the pre-processed state from the observable state
             # pre_state = self.pre_process_state(state)
-            inv_projector, inv_projector_metrics = self.empirical_lin_inverse_projector(state, obs_state)
+            inv_projector, inv_projector_bias, inv_projector_metrics = self.empirical_lin_inverse_projector(state, obs_state)
             metrics.update(inv_projector_metrics)
             self.inverse_projector = inv_projector
+            self.inverse_projector_bias = inv_projector_bias
 
         return metrics
 
@@ -281,15 +285,21 @@ class DPNet(LatentMarkovDynamics):
         if linear_decoder:
             def decoder(dpnet: DPNet, obs_state: Tensor):
                 assert hasattr(dpnet, 'inverse_projector'), "DPNet.inverse_projector not initialized."
-                return torch.nn.functional.linear(obs_state, dpnet.inverse_projector)
+                return torch.nn.functional.linear(
+                    obs_state,
+                    weight=dpnet.inverse_projector,
+                    bias=dpnet.inverse_projector_bias.T if dpnet.inverse_projector_bias is not None else None)
 
             return lambda x: decoder(self, x)
         else:
-
             return MLP(in_dim=self.obs_state_dim, out_dim=self.state_dim, num_layers=num_layers, **kwargs)
+            raise NotImplementedError("Need to handle the decoupled optimization of encoder/decoder")
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt, trainable=False)
+        return LinearDynamics(state_dim=self.obs_state_dim,
+                              dt=self.dt,
+                              trainable=False,
+                              bias=self.enforce_constant_function)
 
     def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
         """ Compute the empirical inverse projector from the observable state to the pre-processed state.
@@ -299,21 +309,22 @@ class DPNet(LatentMarkovDynamics):
             obs_state: (batch, obs_state_dim) Tensor containing the observable state.
         Returns:
             A: (state_dim, obs_state_dim) Tensor containing the empirical inverse projector.
+            B: (state_dim, 1) Tensor containing the empirical inverse projector bias.
             rec_error: Scalar tensor containing the reconstruction error or "residual".
         """
         # Inverse projector is computed from the observable state to the pre-processed state
         pre_state = self.pre_process_state(state)
         X = obs_state.T  # (obs_state_dim, n_samples)
         Y = pre_state.T  # (state_dim, n_samples)
-        A = full_rank_lstsq(X, Y)
+        A, B = full_rank_lstsq(X, Y)
 
-        rec_error = torch.nn.functional.mse_loss(A @ X, Y)
+        rec_error = torch.nn.functional.mse_loss(A @ X + B, Y)
 
         metrics = dict(inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
                        inverse_projector_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
                        inverse_projector_error=rec_error)
 
-        return A, metrics
+        return A, B, metrics
 
     def __repr__(self):
         str = super().__repr__()

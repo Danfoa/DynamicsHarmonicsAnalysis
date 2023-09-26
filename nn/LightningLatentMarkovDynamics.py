@@ -66,7 +66,7 @@ class LightLatentMarkovDynamics(LightningModule):
 
         self.log("loss/train", loss, prog_bar=False)
         self.log_metrics(scalar_metrics, suffix="train", batch_size=self._batch_size)
-        self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
+        # self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -76,7 +76,7 @@ class LightLatentMarkovDynamics(LightningModule):
 
         self.log("loss/val", loss, prog_bar=False)
         self.log_metrics(scalar_metrics, suffix="val", batch_size=self._batch_size)
-        self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
+        # self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def test_step(self, batch, batch_idx):
@@ -117,6 +117,7 @@ class LightLatentMarkovDynamics(LightningModule):
         self._loss_metrics_fn = loss_metrics_fn
 
     def on_train_start(self):
+        self.log("noise_level", self.trainer.datamodule.noise_level, prog_bar=False, on_epoch=True)
 
         if hasattr(self.model, "approximate_transfer_operator"):
             metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
@@ -167,7 +168,6 @@ class LightLatentMarkovDynamics(LightningModule):
 
     def on_test_end(self) -> None:
         self.log_vector_metrics(flush=True)
-
         if self.test_metrics_fn is not None:
             self.compute_figure_metrics(self.test_metrics_fn, self.trainer.datamodule.test_dataloader(), suffix="test")
 
@@ -196,49 +196,41 @@ class LightLatentMarkovDynamics(LightningModule):
             tmp = metric.split('_')   # Average value will use this name, vector metric will use the full name.
             metric_name, metric_sufix = '_'.join(tmp[:-1]), tmp[-1]
 
-            if "_t" in metric or "_dist" in metric:
-                metric_log_name = f"{metric_name}/{type_sufix}"
-            else:
-                metric_log_name = f"{metric}/{type_sufix}"
-            self.log(metric_log_name, torch.mean(vector), prog_bar=False, batch_size=batch_size)
+            metric_log_name = f"{metric}/{type_sufix}"
+            # self.log(metric_log_name, torch.mean(vector), prog_bar=False, batch_size=batch_size)
 
-            # if metric_name in self._log_cache:
-            #     self._log_cache[metric_log_name] = np.concatenate([self._log_cache[metric_name], vector.detach().cpu().numpy()], axis=0)
-            # else:
-            #     self._log_cache[metric_log_name] = vector.detach().cpu().numpy()
-            #
-            # full_vector = self._log_cache[metric_log_name]
-            # log_vector_metrics_n_steps = self.trainer.log_every_n_steps * 20
-            # if self.trainer.global_step % log_vector_metrics_n_steps == 0 or flush:
-            #     if metric_sufix == "t":  # Vector to be plotted against time
-            #         assert full_vector.ndim == 2, f"{metric} Expected (batch, time_steps) vector, got {full_vector.shape}."
-            #         dt = self.model.dt if hasattr(self.model, 'dt') else 1
-            #         time_horizon = np.arange(full_vector.shape[-1]) * dt
-            #         y = np.mean(full_vector, axis=0)
-            #
-            #         df = pd.DataFrame(columns=["time", f"{metric_name}", "epoch"])
-            #         df["time"] = time_horizon
-            #         df[f"{metric_name}"] = y
-            #         df["epoch"] = self.trainer.global_step
-            #         # in order to get the history of the lines we have to save the lines per "epoch" in memory
-            #         if f"{metric_log_name}-table" not in self._log_cache:
-            #             self._log_cache[f"{metric_log_name}-table"] = df
-            #         else:
-            #             # Append the new epoch trajectory to the table.
-            #             df_old = self._log_cache[f"{metric_log_name}-table"]
-            #             self._log_cache[f"{metric_log_name}-table"] = pd.concat([df_old, df], axis=0)
-            #             df = self._log_cache[f"{metric_log_name}-table"]
-            #
-            #         table = wandb.Table(dataframe=df)
-            #         line_2D = wandb.plot.line(table,"time", f"{metric_name}", title=f"{metric}/{type_sufix}")
-            #         wandb_logger.log({f"{metric}/{type_sufix}": line_2D,
-            #                           "trainer/global_step":    self.trainer.global_step})
-            #
-            #     elif metric_sufix == "dist":  # Distribution to be logged as a histogram.
-            #         wandb_logger.log({f"{metric}/{type_sufix}": wandb.Histogram(full_vector),
-            #                           'trainer/global_step':    self.trainer.global_step})
-            #
-            #         self._log_cache.pop(metric_log_name)
+            if metric_log_name in self._log_cache:
+                self._log_cache[metric_log_name] = np.concatenate([self._log_cache[metric_log_name], vector.detach().cpu().numpy()], axis=0)
+            else:
+                self._log_cache[metric_log_name] = vector.detach().cpu().numpy()
+
+        log_vector_metrics_n_steps = 10
+        if self.trainer.current_epoch % log_vector_metrics_n_steps == 0 or flush:
+            metrics_to_wipe = []
+            for metric_log_name, metric_vector in self._log_cache.items():
+                if "_t/" in metric_log_name:  # Vector to be plotted against time
+                    assert metric_vector.ndim == 2, f"{metric_log_name} Expected (batch, time_steps) vector, got {metric_vector.shape}."
+                    dt = self.model.dt if hasattr(self.model, 'dt') else 1
+                    time_horizon = np.arange(metric_vector.shape[-1]) * dt
+                    y = np.mean(metric_vector, axis=0)
+
+                    df = pd.DataFrame(columns=["time", f"{metric_log_name}", "epoch"])
+                    df["time"] = time_horizon
+                    df[f"{metric_log_name}"] = y
+                    df["epoch"] = self.trainer.global_step
+
+                    for t, x in zip(df['time'], df[f'{metric_log_name}']):
+                        wandb_logger.log({f"{metric_log_name}": x,  "time": t,
+                                          "trainer/global_step": self.trainer.global_step})
+
+                    metrics_to_wipe.append(metric_log_name)
+
+                elif "_dist/" in metric_log_name:  # Distribution to be logged as a histogram.
+                    wandb_logger.log({f"{metric_log_name}": wandb.Histogram(metric_vector),
+                                      'trainer/global_step':    self.trainer.global_step})
+                    metrics_to_wipe.append(metric_log_name)
+
+            self._log_cache = {}
 
     def log_figures(self, figs: dict[str, plotly.graph_objs.Figure], suffix=''):
         """Log plotly figures to wandb."""

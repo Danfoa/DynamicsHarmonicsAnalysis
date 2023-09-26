@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 import escnn
 import numpy as np
 from escnn import gspaces
+from escnn.group import DihedralGroup
 from escnn.nn import EquivariantModule, FieldType
 
 log = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ class EMLP(EquivariantModule):
         gspace = in_type.gspace
         group = gspace.fibergroup
         grid_length = group.order() if not group.continuous else 20
-
+        grid_length = grid_length//2 if isinstance(group, DihedralGroup) else grid_length
         unique_irreps = set(in_type.irreps)
         unique_irreps_dim = sum([group.irrep(*id).size for id in set(in_type.irreps)])
         scale = in_type.size // unique_irreps_dim

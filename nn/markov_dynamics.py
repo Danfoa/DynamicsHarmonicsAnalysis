@@ -22,7 +22,7 @@ class MarkovDynamics(torch.nn.Module):
         super().__init__()
         assert state_dim is not None or state_rep is not None, \
             "Either state_dim or state_rep must be provided"
-        self.state_rep = state_rep
+        self.state_rep: Representation = state_rep
         self.state_dim = state_dim if state_dim is not None else state_rep.size
         self.dt = dt
 
