@@ -88,7 +88,9 @@ def main(cfg: DictConfig):
                         obs_pred_w=cfg.model.obs_pred_w,
                         orth_w=cfg.model.orth_w,
                         corr_w=cfg.model.corr_w,
-                        obs_fn_params=obs_fn_params)
+                        obs_fn_params=obs_fn_params,
+                        enforce_constant_fn=cfg.model.constant_function,
+                        )
         elif cfg.model.name.lower() == "e-dae":
             assert cfg.system.pred_horizon >= 1
             model = EquivDAE(state_rep=datamodule.state_field_type.representation,
@@ -97,7 +99,9 @@ def main(cfg: DictConfig):
                              orth_w=cfg.model.orth_w,
                              obs_fn_params=obs_fn_params,
                              group_avg_trick=cfg.model.group_avg_trick,
-                             state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn)
+                             state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn,
+                             enforce_constant_fn=cfg.model.constant_function,
+                             )
 
 
         elif cfg.model.name.lower() == "e-dpnet":
@@ -109,6 +113,7 @@ def main(cfg: DictConfig):
                                ck_w=cfg.model.ck_w,
                                orth_w=cfg.model.orth_w,
                                use_spectral_score=cfg.model.use_spectral_score,
+                               enforce_constant_fn=cfg.model.constant_function,
                                aux_obs_space=cfg.model.aux_obs_space,
                                obs_fn_params=obs_fn_params,
                                group_avg_trick=cfg.model.group_avg_trick)
@@ -170,7 +175,7 @@ def main(cfg: DictConfig):
                                              log_figs_every_n_epochs=10)
         pl_model.set_model(model)
         # pl_model.to(device)
-        wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)
+        # wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)
 
         # trainer.test(model=pl_model, datamodule=datamodule)
 
@@ -204,7 +209,7 @@ def main(cfg: DictConfig):
 
         results = trainer.test(model=pl_model, datamodule=datamodule)
         test_pred_loss = results[0]['obs_pred_loss/test']
-        wandb_logger.experiment.unwatch(model)
+        # wandb_logger.experiment.unwatch(model)
         wandb_logger.experiment.finish()
         return test_pred_loss
     else:

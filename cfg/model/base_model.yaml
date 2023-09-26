@@ -9,6 +9,8 @@ num_layers: 5                                   # Number MLPs' layers (including
 num_hidden_units: 128                           # Number of hidden units in each layer
 batch_norm: True
 bias: False
+constant_function: True                         # Whether to ensure the constant function is on the obs/function space.
+
 
 # Optimization hyperparameters parameters
 lr: 1e-3

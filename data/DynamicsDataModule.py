@@ -108,8 +108,8 @@ class DynamicsDataModule(LightningDataModule):
 
         # Ensure what we shuffle the train dataset:
         train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size / 2)
-        test_dataset = test_dataset.shuffle(buffer_size=test_dataset.dataset_size)
-        val_dataset = val_dataset.shuffle(buffer_size=val_dataset.dataset_size)
+        test_dataset = test_dataset.shuffle(buffer_size=test_dataset.dataset_size, seed=18)
+        val_dataset = val_dataset.shuffle(buffer_size=val_dataset.dataset_size, seed=18)
         # Convert to torch. Apply map to get samples containing state and next state
         train_dataset = train_dataset.with_format("torch").map(
             map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})

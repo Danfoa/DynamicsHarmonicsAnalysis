@@ -12,7 +12,6 @@ bias: False
 # Optimization hyperparameters parameters
 lr: 1e-3
 
-constant_function: True                         # Whether to ensure the constant function is on the obs/function space.
 max_ck_window_length: ${system.pred_horizon}    # Maximum length of the Chapman-Kolmogorov window
 ck_w: 0.0                                       # Weight of the Chapman-Kolmogorov regularization term in the loss function
 orth_w: 0.5                                     # Weight of the orthonormal regularization term in the loss function

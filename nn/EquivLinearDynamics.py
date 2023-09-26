@@ -77,10 +77,28 @@ class EquivLinearDynamics(LinearDynamics):
         Returns:
             pred_state_traj: (batch, n_steps + 1, state_dim)
         """
+        batch, state_dim = state.tensor.shape
         assert state.type == self.state_type_iso, f"{state.type} != {self.state_type_iso}"
 
-        return super().forcast(state=state.tensor, n_steps=n_steps, **kwargs)
+        # Use the transfer operator to compute the maximum likelihood prediction of the future trajectory
+        pred_state_traj = [state]
+        for step in range(n_steps):
+            # Compute the next state prediction s_t+1 = K @ s_t
+            current_state = pred_state_traj[-1]
+            if self.is_trainable:
+                next_obs_state = self.transfer_op(current_state)
+            else:
+                transfer_op, bias = self.get_transfer_op()
+                if bias is not None:
+                    next_obs_state = self.state_type_iso((transfer_op @ current_state.tensor.T + bias).T)
+                else:
+                    next_obs_state = self.state_type_iso((transfer_op @ current_state.tensor.T).T)
+            pred_state_traj.append(next_obs_state)
 
+        pred_state_traj = torch.stack([gt.tensor for gt in pred_state_traj], dim=1)
+
+        assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
+        return pred_state_traj
 
     def pre_process_state(self, state: Tensor, next_state: Optional[Tensor] = None) -> GeometricTensor:
         # Change basis to Isotypic basis.

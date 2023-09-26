@@ -191,6 +191,9 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     # Compute the longest period of oscillation of the system:
     periods = [2 * np.pi / np.abs(np.imag(eigval)) for eigval in eigvals if not np.isinf(eigval)]
     fastest_period = np.min(periods)
+    print(f"System has eigenvalues \n {eigvals}")
+    print(f"Empirical periods MIN:{np.min(periods)}, MAX:{np.max(periods)}")
+    print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
     # print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
     return A_G, rep_X, fastest_period, fastest_time_constant
 
@@ -253,44 +256,44 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
-    order = 2
+    order = 10
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
                          Icosahedral=(True, 'ico',),
                          Cyclic=(False, False, order),
                          Dihedral=(False, True, order),
-                         SO2=(False, False, -1),
-                         )
+                         SO2=(False, False, -1))
 
     # Select the group of the domain
     G_domain = escnn.group.O3(maximum_frequency=10)
     # Select the subgroup  of the dynamics of the system
-    G_id = subgroups_ids['SO2']
+    G_id = subgroups_ids['Cyclic']
     G, g_dynamics_2_Gsub_domain, g_domain_2_g_dynamics = G_domain.subgroup(G_id)
 
     # Define the state representation.
-    # rep_X = G.regular_representation # + G.irrep(1)
-    rep_X = G.irrep(0) + G.standard_representation()  # + G.irrep(1)
-    # rep_X = G.irrep(1) + G.irrep(2) #+ G.irrep(1) #+ G.irrep(0)
-    #
+    rep_X = Representation(group=G, name="state", irreps=G.regular_representation.irreps,
+                           change_of_basis=np.eye(G.order()))   # + G.irrep(1)
+
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
     max_time_constant = 5  # [s] Maximum time constant of the system.
     min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.
     max_period = max_time_constant * 2  # [s] Maximum period of oscillation of the slowest transient mode.
+
     A_G, rep_X, fastest_period, fastest_time_constant = stable_equivariant_lin_dynamics(
         rep_X, time_constant=max_time_constant, min_period=min_period, max_period=max_period)
+
     # Fastest time constants determines the fastest transient dynamics of the system. We want to capture it.
     if np.isinf(fastest_time_constant):             # Stable system on limit cycle. no transient dynamics.
         T = fastest_period   # Simulate until the slowest stable mode has completed a full period.
     else:  # System has transient dynamics that vanish to 36.8% in fastest_time_constant seconds.
         T = 6 * fastest_time_constant        # Required time for this transient dynamics to vanish.
-    dt = T * 0.005  # Sample time to obtain 100 samples per trajectory
+    dt = T * 0.005  # Sample time to obtain 200 samples per trajectory
 
     # Generate trajectories of the system dynamics
     n_constraints = 0
-    n_trajs = 120
+    n_trajs = 170
     # Generate hyperplanes that constraint outer region of space
     P_symm, offset = None, None
     if n_constraints > 0:
