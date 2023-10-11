@@ -333,6 +333,48 @@ def flat_to_batched_trajectory(x_reshaped, batch_size, state_dim):
     return x_original
 
 
+def format_si(number, sig_figs=2):
+    """
+    Format a number in SI (International System of Units) notation.
+
+    Parameters:
+        number (float or int): The number to format.
+        sig_figs (int): The number of significant figures to use.
+
+    Returns:
+        str: The number formatted in SI notation.
+    """
+    si_prefixes = {
+        -24: "y",  # yocto
+        -21: "z",  # zepto
+        -18: "a",  # atto
+        -15: "f",  # femto
+        -12: "p",  # pico
+        -9:  "n",  # nano
+        -6:  "µ",  # micro
+        -3:  "m",  # milli
+        0:   "",
+        3:   "k",  # kilo
+        6:   "M",  # mega
+        9:   "G",  # giga
+        12:  "T",  # tera
+        15:  "P",  # peta
+        18:  "E",  # exa
+        21:  "Z",  # zetta
+        24:  "Y",  # yotta
+        }
+
+    if number == 0:
+        return "0"
+
+    exponent = int(math.floor(math.log10(abs(number))))
+    rounded_exp = exponent - (exponent % 3)
+    base = number / 10 ** rounded_exp
+
+    r = f"{base:.{sig_figs}f}{si_prefixes.get(rounded_exp, 'e' + str(rounded_exp))}"
+    return r
+
+
 # Test the utility functions with emphasis on time order preservation
 batch_size, time_steps, old_dim = 3, 5, 4
 new_dim = 6

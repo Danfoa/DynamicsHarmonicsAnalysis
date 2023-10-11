@@ -3,9 +3,14 @@ defaults:
 
 name: E-DAE
 # Model hyperparameters
+obs_pred_w: 1.0                                 # Cost function weight for prediction in observation space Z
+orth_w: 0.0                                     # Weight of the orthonormal regularization term in the loss function
+corr_w: 0.5
+
 state_dependent_obs_dyn: False                  # Whether to use state-dependent observation dynamics
 group_avg_trick: True
 
-
+# Optimization hyperparameters parameters
+lr: 5e-4
 equivariant: True
 

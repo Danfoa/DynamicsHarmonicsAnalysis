@@ -13,8 +13,9 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
-from data.DynamicsRecording import get_dynamics_dataset, get_train_test_val_file_paths, map_state_next_state
-from utils.plotting import plot_system_3D
+from data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
+from utils.mysc import traj_from_states
+from utils.plotting import plot_system_3D, plot_trajectories, plot_two_panel_trajectories
 
 log = logging.getLogger(__name__)
 
@@ -31,15 +32,15 @@ class DynamicsDataModule(LightningDataModule):
                  num_workers: int = 0,
                  augment: bool = False,
                  device='cpu',
-                 state_measurements: Optional[list[str]] = None,
-                 action_measurements: Optional[list[str]] = None,
+                 state_obs: Optional[tuple[str]] = None,
+                 action_obs: Optional[tuple[str]] = None,
                  ):
         super().__init__()
         if system_cfg is None:
             system_cfg = {}
         self._data_path = data_path
         self.system_cfg = system_cfg if system_cfg is not None else {}
-        self.noise_level = self.system_cfg.get('noise_level', 0)
+        self.noise_level = self.system_cfg.get('noise_level', None)
         self.augment = augment
         self.frames_per_step = frames_per_step
         if isinstance(pred_horizon, float):
@@ -53,8 +54,8 @@ class DynamicsDataModule(LightningDataModule):
         self.num_workers = num_workers
         # Metadata and dynamics information
         self.metadata, self.dt = None, None
-        self.state_measurements = state_measurements
-        self.action_measurements = action_measurements
+        self.state_obs = state_obs
+        self.action_obs = action_obs
         self._val_dataloader, self._test_dataloader, self._train_dataloader = None, None, None
         # Symmetry parameters
         self.symm_group = None
@@ -78,8 +79,13 @@ class DynamicsDataModule(LightningDataModule):
         start_time = time.time()
         log.info(f"Preparing datasets {self._data_path}")
 
+        a = list(self._data_path.rglob('*train.pkl'))
         dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
-        system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
+        if self.noise_level is not None:
+            system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
+        else:
+            system_data_path = dyn_sys_data
+
         if len(system_data_path) > 1:
             raise RuntimeError(f"Multiple potential paths {system_data_path} found")
         elif len(system_data_path) == 0:
@@ -88,35 +94,40 @@ class DynamicsDataModule(LightningDataModule):
 
         train_data, test_data, val_data = get_train_test_val_file_paths(system_data_path)
         # Obtain hugging face Iterable datasets instances
-        datasets, metadata = get_dynamics_dataset(train_shards=train_data,
-                                                  test_shards=test_data,
-                                                  val_shards=val_data,
-                                                  train_pred_horizon=self.pred_horizon,
-                                                  eval_pred_horizon=self.eval_pred_horizon,
-                                                  frames_per_step=self.frames_per_step,
-                                                  state_measurements=self.state_measurements,
-                                                  action_measurements=self.action_measurements)
-        self.metadata = metadata
-        self.dt = metadata.dynamics_parameters['dt']
+        datasets, dynamics_recording = get_dynamics_dataset(train_shards=train_data,
+                                                            test_shards=test_data,
+                                                            val_shards=val_data,
+                                                            train_pred_horizon=self.pred_horizon,
+                                                            eval_pred_horizon=self.eval_pred_horizon,
+                                                            frames_per_step=self.frames_per_step,
+                                                            state_obs=self.state_obs,
+                                                            action_obs=self.action_obs)
+        self.metadata: DynamicsRecording = dynamics_recording
+        # observations_names = self.metadata.
+        self.dt = dynamics_recording.dynamics_parameters['dt']
         # In case no measurements are passed, we recover the ones from the DynamicsRecording
-        self.state_measurements = metadata.state_measurements
-        self.action_measurements = metadata.action_measurements
+        self.state_obs = dynamics_recording.state_obs if self.state_obs is None else self.state_obs
+        self.action_obs = dynamics_recording.action_obs if self.action_obs is None else self.action_obs
 
         # Ensure samples contain torch.Tensors and not numpy arrays.
         # Apply map to obtain flat state/next_state action/next_action values
         train_dataset, test_dataset, val_dataset = datasets
 
         # Ensure what we shuffle the train dataset:
-        train_dataset = train_dataset.shuffle(buffer_size=train_dataset.dataset_size / 2)
-        test_dataset = test_dataset.shuffle(buffer_size=test_dataset.dataset_size, seed=18)
-        val_dataset = val_dataset.shuffle(buffer_size=val_dataset.dataset_size, seed=18)
+        train_dataset = train_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 5000))
+        test_dataset = test_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
+        val_dataset = val_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
         # Convert to torch. Apply map to get samples containing state and next state
+        obs_to_remove = train_dataset.features.keys()
         train_dataset = train_dataset.with_format("torch").map(
-            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
+            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
+            remove_columns=tuple(obs_to_remove))
         test_dataset = test_dataset.with_format("torch").map(
-            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
+            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
+            remove_columns=tuple(obs_to_remove))
         val_dataset = val_dataset.with_format("torch").map(
-            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
+            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
+            remove_columns=tuple(obs_to_remove))
 
         self._train_dataset = train_dataset
         self._test_dataset = test_dataset
@@ -124,20 +135,14 @@ class DynamicsDataModule(LightningDataModule):
 
         # Rebuilt the ESCNN representations of measurements _________________________________________________________
         # TODO: Handle dyn systems without symmetries
-        G_domain = escnn.group.O3()
-        G_id = metadata.dynamics_parameters['group']['subgroup_id']  # Identifier of symmetry group
-        self.symm_group, _, _ = G_domain.subgroup(G_id)
-        for measurement, irreps_ids in metadata.reps_irreps.items():
-            Q = metadata.reps_change_of_basis[measurement]
-            rep = Representation(self.symm_group, name=measurement,
-                                 irreps=list(irreps_ids), change_of_basis=np.asarray(Q))
-            self.measurements_reps[measurement] = rep
+        # G_domain = escnn.group.O3()
+        self.symm_group = dynamics_recording.dynamics_parameters['group']
 
         # Construct state (and action) representations considering the `frames_per_step` and the concatenation
         # convention of the function `map_state_next_state` in `DynamicsRecording.py`. Which defines the state
         # with `F=frames_per_step` delayed coordinates as s_t = [m1_f,..., m1_f+F, m2_f,..., m2_f+F, ...] where mi_k
         # is the measurement i at frame k.
-        state_reps = [[self.measurements_reps[m]] * self.frames_per_step for m in self.state_measurements]
+        state_reps = [[dynamics_recording.obs_representations[m]] * self.frames_per_step for m in self.state_obs]
         state_reps = [rep for frame_reps in state_reps for rep in frame_reps]  # flatten list of reps
 
         # Use as default no basis space # TODO make more flexible
@@ -146,9 +151,9 @@ class DynamicsDataModule(LightningDataModule):
         self.state_field_type = FieldType(self.gspace, representations=state_reps)
         # Define the action field type
         self.action_field_type = None
-        if len(self.action_measurements) > 0:
+        if len(self.action_obs) > 0:
             # construct action representations analog to the state representations
-            action_reps = [[self.measurements_reps[m]] * self.frames_per_step for m in self.action_measurements]
+            action_reps = [[dynamics_recording.obs_representations[m]] * self.frames_per_step for m in self.action_obs]
             action_reps = [rep for frame_reps in action_reps for rep in frame_reps]  # flatten list of reps
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
@@ -171,18 +176,18 @@ class DynamicsDataModule(LightningDataModule):
                                           collate_fn=self.collate_fn)
 
         # Configure the prediction dataloader for the approximating and evaluating the transfer operator. This will
-        # be a dataloader passing state and next state single step measuremants:
-        datasets, metadata = get_dynamics_dataset(train_shards=train_data,
-                                                  test_shards=test_data,
-                                                  val_shards=val_data,
-                                                  train_pred_horizon=1,
-                                                  eval_pred_horizon=1,
-                                                  frames_per_step=self.frames_per_step,
-                                                  state_measurements=self.state_measurements,
-                                                  action_measurements=self.action_measurements)
+        # be a dataloader passing state and next state single step measurements:
+        datasets, dynamics_recording = get_dynamics_dataset(train_shards=train_data,
+                                                            test_shards=test_data,
+                                                            val_shards=val_data,
+                                                            train_pred_horizon=1,
+                                                            eval_pred_horizon=1,
+                                                            frames_per_step=self.frames_per_step,
+                                                            state_obs=self.state_obs,
+                                                            action_obs=self.action_obs)
         transfer_op_train_dataset, _, _ = datasets
         transfer_op_train_dataset = transfer_op_train_dataset.with_format("torch").map(
-            map_state_next_state, batched=True, fn_kwargs={'state_measurements': self.state_measurements})
+            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs})
 
         self._trans_op_dataloader = DataLoader(dataset=transfer_op_train_dataset,
                                                batch_size=transfer_op_train_dataset.dataset_size,  # Single batch
@@ -251,59 +256,67 @@ class DynamicsDataModule(LightningDataModule):
             batch['next_action'] = g_next_action
         return batch
 
+    def plot_sample_trajs(self):
+        num_trajs = 5
+        fig = None
+        styles = {'Train': dict(width=3, dash='solid'),
+                  'Test': dict(width=2, dash='2px'),
+                  'Val': dict(width=1, dash='5px')}
+        for partition, dataloader in zip(['Train', 'Test', 'Val'],
+                                         [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
+            batch = next(iter(dataloader))
+            state = batch['state']
+            next_state = batch['next_state']
+            state_traj = traj_from_states(state, next_state)
+
+            fig = plot_trajectories(state_traj, fig=fig, dt=self.dt, main_style=styles[partition],
+                                    main_legend_label=partition, n_trajs_to_show=num_trajs, title="Sample Trajectories")
+        fig.show()
+
 
 if __name__ == "__main__":
     path_to_data = Path(__file__).parent
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= 'linear_system'
+    path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
 
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=10,
-                                     eval_pred_horizon=50,
+                                     eval_pred_horizon=100,
                                      frames_per_step=1,
                                      num_workers=1,
                                      batch_size=1000,
-                                     augment=True
+                                     augment=False,
+                                     state_obs=('q',),
+                                     action_obs=tuple(),
                                      )
 
     # Test loading of the DynamicsRecording
     data_module.prepare_data()
-
-    # Get the dynamical system dynamics parameters
-    A_G = data_module.metadata.dynamics_parameters['transition_matrix']
-    P_symm = data_module.metadata.dynamics_parameters['constraint_matrix']
-    offset = data_module.metadata.dynamics_parameters['constraint_vector']
-    state_dim = A_G.shape[0]
-
+    data_module.plot_sample_trajs()
+    s = next(iter(data_module._train_dataset))
     states, state_trajs = None, None
     fig = None
 
-    # Time the time taken to iterate over train test and validation datasets and divide it by the number of samples
-    # in each partition, accessible through the dataset.dataset_size attribute
-    train_data = {}
-    for batch in data_module.train_dataloader():
-        for key, value in batch.items():
-            if key not in train_data:
-                train_data[key] = torch.squeeze(value)
-            else:
-                torch.cat([train_data[key], torch.squeeze(value)], dim=0)
-    for key, value in train_data.items():
-        train_data[key] = value[:6]
-
-
-    for partition, dataloader in zip(['Train', 'Test', 'Validation'],
-                                     [data_module.train_dataloader(), data_module.test_dataloader(),
+    for partition, dataloader in zip(['Test', 'Train', 'Validation'],
+                                     [data_module.test_dataloader(), data_module.train_dataloader(),
                                       data_module.val_dataloader()]):
         start_time = time.time()
+        print(f"Testing {partition} set")
+        print(f"Shuffling...")
+        next(iter(dataloader))
+        print(f"Shuffling done in {time.time() - start_time:.2f} [s]")
         n_samples = 0
         for i, batch in enumerate(dataloader):
             states = batch['state']
+            next_states = batch['next_state']
             n_samples += states.shape[0]
+            if n_samples > 1000:
+                break
         # print the time in [ms]
         print(f"Average time per sample in {partition} set: {(time.time() - start_time) / n_samples * 1000:.2f} [ms]")
-        print(f"Total time iters over {partition} set: {(time.time() - start_time):.2f}[s]")
+        # break

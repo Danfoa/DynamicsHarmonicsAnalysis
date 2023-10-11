@@ -3,8 +3,13 @@ defaults:
 
 name: E-DPNet
 
+# Optimization hyperparameters parameters
+lr: 1e-3
+
 # Symmetry exploitation parameters
 equivariant: True
-group_avg_trick: True
 
-activation: ELU
+# Model hyperparameters
+group_avg_trick: True
+ck_w: 0.0
+

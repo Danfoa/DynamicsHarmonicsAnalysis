@@ -61,7 +61,9 @@ def main(cfg: DictConfig):
                                         system_cfg=cfg.system,
                                         num_workers=cfg.num_workers,
                                         device=device,
-                                        augment=cfg.model.augment)
+                                        augment=cfg.model.augment,
+                                        state_obs=cfg.system.get('state_obs', None),
+                                        action_obs=cfg.system.get('action_obs', None))
         datamodule.prepare_data()
         obs_state_dim = math.ceil(
             cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
@@ -135,7 +137,7 @@ def main(cfg: DictConfig):
 
         log.info(f"Model \n {model}")
 
-        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(10, int(cfg.max_epochs * 0.1)))
+        stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(30, int(cfg.max_epochs * 0.2)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
