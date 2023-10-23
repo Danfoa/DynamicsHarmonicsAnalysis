@@ -55,7 +55,7 @@ class DPNet(LatentMarkovDynamics):
             orth_w: float = 0.1,
             enforce_constant_fn: bool = True,
             use_spectral_score: bool = True,
-            aux_obs_space: bool = False,
+            shared_encoder: bool = True,
             obs_fn_params: Optional[dict] = None,
             linear_decoder: bool = True,
             **markov_dyn_params
@@ -67,7 +67,7 @@ class DPNet(LatentMarkovDynamics):
         self.ck_w = ck_w
         self.orth_w = orth_w
         self.use_spectral_score = use_spectral_score
-        self.aux_obs_space = aux_obs_space
+        self.shared_encoder = shared_encoder
         self.inverse_projector = None  # if linear decoder is true, this is the map between obs to states.
         self.inverse_projector_bias = None
         self.linear_decoder = linear_decoder
@@ -169,7 +169,7 @@ class DPNet(LatentMarkovDynamics):
         return loss, obs_space_metrics
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None) -> dict:
-        if obs_state_traj_aux is None and self.aux_obs_space:
+        if obs_state_traj_aux is None and self.shared_encoder:
             raise ValueError("aux_obs_space is True but obs_state_traj_aux is None")
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
@@ -270,14 +270,18 @@ class DPNet(LatentMarkovDynamics):
     def build_obs_fn(self, num_layers, identity=False, **kwargs):
         if identity:
             return lambda x: (x, x)
-        obs_fn = MLP(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers,
-                     head_with_activation=False, **kwargs)
-        obs_fn_aux = None
-        if self.aux_obs_space:
-            obs_fn_aux = MLP(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers,
-                             head_with_activation=False, **kwargs)
+        num_hidden_units = kwargs['num_hidden_units']
+        # Define the feature extractor used by the observable function.
+        encoder = MLP(in_dim=self.state_dim,
+                      out_dim=num_hidden_units,
+                      num_layers=num_layers,
+                      head_with_activation=True, **kwargs)
+        aux_encoder = None
+        if not self.shared_encoder:
+            aux_encoder = MLP(in_dim=self.state_dim, out_dim=num_hidden_units, num_layers=num_layers,
+                              head_with_activation=True, **kwargs)
 
-        return ObservableNet(obs_fn=obs_fn, obs_fn_aux=obs_fn_aux)
+        return ObservableNet(encoder=encoder, aux_encoder=aux_encoder, obs_dim=self.obs_state_dim)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, identity=False, **kwargs):
         if identity:

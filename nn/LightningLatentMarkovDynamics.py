@@ -66,7 +66,7 @@ class LightLatentMarkovDynamics(LightningModule):
 
         self.log("loss/train", loss, prog_bar=False)
         self.log_metrics(scalar_metrics, suffix="train", batch_size=self._batch_size)
-        # self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
+        self.log_vector_metrics(vector_metrics, type_sufix="train", batch_size=self._batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -76,7 +76,7 @@ class LightLatentMarkovDynamics(LightningModule):
 
         self.log("loss/val", loss, prog_bar=False)
         self.log_metrics(scalar_metrics, suffix="val", batch_size=self._batch_size)
-        # self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
+        self.log_vector_metrics(vector_metrics, type_sufix="val", batch_size=self._batch_size)
         return {'output': outputs, 'input': batch}
 
     def test_step(self, batch, batch_idx):
@@ -117,7 +117,7 @@ class LightLatentMarkovDynamics(LightningModule):
         self._loss_metrics_fn = loss_metrics_fn
 
     def on_train_start(self):
-        self.log("noise_level", self.trainer.datamodule.noise_level, prog_bar=False, on_epoch=True)
+        # self.log("noise_level", self.trainer.datamodule.noise_level, prog_bar=False, on_epoch=True)
 
         if hasattr(self.model, "approximate_transfer_operator"):
             metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
@@ -147,7 +147,7 @@ class LightLatentMarkovDynamics(LightningModule):
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
 
     def on_validation_start(self) -> None:
-        if hasattr(self.model, "approximate_transfer_operator"):
+        if hasattr(self.model, "approximate_transfer_operator") and self.trainer.current_epoch % 2 == 0:
             metrics = self.model.approximate_transfer_operator(self.trainer.datamodule.predict_dataloader())
             vector_metrics, scalar_metrics = self.separate_vector_scalar_metrics(metrics)
             self.log_metrics(scalar_metrics, suffix='')
@@ -192,13 +192,18 @@ class LightLatentMarkovDynamics(LightningModule):
 
         for metric, vector in flat_metrics.items():
             assert vector.ndim >= 1, f"Vector metric {metric} has to be of shape (n_samples,) or (batch, time_steps)."
-            # Separate the last _sufix part from the key to obtain the metric name.
-            tmp = metric.split('_')   # Average value will use this name, vector metric will use the full name.
-            metric_name, metric_sufix = '_'.join(tmp[:-1]), tmp[-1]
-
             metric_log_name = f"{metric}/{type_sufix}"
-            # self.log(metric_log_name, torch.mean(vector), prog_bar=False, batch_size=batch_size)
+            if "_t/" in metric_log_name or "_dist/" in metric_log_name:
+                # Separate the last _sufix part from the key to obtain the metric name.
+                tmp = metric.split('_')   # Average value will use this name, vector metric will use the full name.
+                metric_name, metric_sufix = '_'.join(tmp[:-1]), tmp[-1]
+                self.log(f"{metric_name}/{type_sufix}", torch.mean(vector), prog_bar=False, batch_size=batch_size)
+            else:
+                self.log(metric_log_name, torch.mean(vector), prog_bar=False, batch_size=batch_size)
 
+            if type_sufix == 'train' or type_sufix == 'val':
+                continue
+                
             if metric_log_name in self._log_cache:
                 self._log_cache[metric_log_name] = np.concatenate([self._log_cache[metric_log_name], vector.detach().cpu().numpy()], axis=0)
             else:

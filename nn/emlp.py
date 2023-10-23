@@ -120,7 +120,7 @@ class EMLP(EquivariantModule):
                                              irreps=list(unique_irreps),
                                              function=f"p_{activation.lower()}",
                                              inplace=True,
-                                             type='regular' if not group.continuous else 'rand',
+                                             type='rand', #'regular' if not group.continuous else 'rand'#TODO: fix this
                                              N=grid_length)
 
     def forward(self, x):

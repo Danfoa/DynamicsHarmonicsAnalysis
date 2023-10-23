@@ -273,20 +273,20 @@ class EquivDPNet(DPNet):
                                   in_type=self.state_type_iso,
                                   desired_hidden_units=num_hidden_units)
 
-        obs_fn = EMLP(in_type=self.state_type_iso,
-                      out_type=self.obs_state_type,
-                      num_layers=num_layers,
-                      activation=act,
-                      **kwargs)
-        obs_fn_aux = None
-        if self.aux_obs_space:
-            obs_fn_aux = EMLP(in_type=self.state_type_iso,
-                              out_type=self.obs_state_type,
-                              num_layers=num_layers,
-                              activation=act,
-                              **kwargs)
+        encoder = EMLP(in_type=self.state_type_iso,
+                       out_type=act.out_type,
+                       num_layers=num_layers,
+                       activation=act,
+                       **kwargs)
+        aux_encoder = None
+        if not self.shared_encoder:
+            aux_encoder = EMLP(in_type=self.state_type_iso,
+                               out_type=act.out_type,
+                               num_layers=num_layers,
+                               activation=act,
+                               **kwargs)
 
-        return ObservableNet(obs_fn=obs_fn, obs_fn_aux=obs_fn_aux)
+        return ObservableNet(encoder=encoder, aux_encoder=aux_encoder, obs_type=self.obs_state_type)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, **kwargs):
         if linear_decoder:
