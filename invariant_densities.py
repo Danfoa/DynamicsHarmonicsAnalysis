@@ -32,8 +32,7 @@ if __name__ == "__main__":
                  out_type=out_field_type,
                  num_layers=6,  # Input layer + 3 hidden layers + output/head layer
                  num_hidden_units=16,  # Number of hidden units per layer
-                 activation=escnn.nn.ReLU,  # Activarions must be `EquivariantModules` instances
-                 with_bias=True  # Use bias in the linear layers
+                 bias=True  # Use bias in the linear layers
                  )
 
     mesh = np.stack([x.flatten(), y.flatten()], axis=1)

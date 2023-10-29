@@ -34,7 +34,8 @@ from utils.mysc import format_si
 def mat_to_dynamics_recordings(data_path: Path,
                                partitions_ratio=(0.7, 0.15, 0.15),
                                partitions_name=("train", "val", "test")):
-    robot, G = load_symmetric_system(robot_name='mini_cheetah')
+    robot_name = 'mini_cheetah-c2'
+    robot, G = load_symmetric_system(robot_name=robot_name)
     # rep_QJ = G.representations['Q_js']
     rep_TqJ = G.representations['TqQ_js']
     # rep_Ed = G.representations['Ed']

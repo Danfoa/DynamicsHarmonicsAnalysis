@@ -17,8 +17,8 @@ lr: 1e-3
 max_ck_window_length: ${system.pred_horizon}    # Maximum length of the Chapman-Kolmogorov window
 ck_w: 0.0                                       # Weight of the Chapman-Kolmogorov regularization term in the loss function
 orth_w: 1.0                                     # Weight of the orthonormal regularization term in the loss function
-aux_obs_space: True                             # Whether to use an auxiliary observable space.
+explicit_transfer_op: True                      # Whether to use a shared encoder network for the computation of the observations in H and H' (True) or to use two separate encoder networks (False)
 use_spectral_score: True                        # Whether to use the spectral or the correlation score
 
-summary: ${model.name}-CK_w:${model.ck_w}-Orth_w:${model.orth_w}-Win:${model.max_ck_window_length}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.num_layers}-${model.num_hidden_units}-AOS:${model.aux_obs_space}-SS:${model.use_spectral_score}
+summary: ${model.name}-CK_w:${model.ck_w}-Orth_w:${model.orth_w}-Win:${model.max_ck_window_length}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.num_layers}-${model.num_hidden_units}-ETO:${model.explicit_transfer_op}-SS:${model.use_spectral_score}
 

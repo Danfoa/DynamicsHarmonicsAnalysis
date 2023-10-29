@@ -51,13 +51,15 @@ def main(cfg: DictConfig):
     if not training_done:
         # Load the dynamics dataset.
         data_path = root_path / "data" / cfg.system.data_path
-        device = torch.device(f"cuda:{cfg.device}" if torch.cuda.is_available() and cfg.device != "cpu" else None)
+        device = torch.device(f"cuda:{cfg.device}" if torch.cuda.is_available() and cfg.device != "cpu" else "cpu")
         log.info(f"Configuring to use device {device}")
+        # Get the Lightning data module handling training/test/val data loaders
         datamodule = DynamicsDataModule(data_path,
                                         batch_size=cfg.model.batch_size,
                                         frames_per_step=cfg.system.frames_per_state,
                                         pred_horizon=cfg.system.pred_horizon,
                                         eval_pred_horizon=cfg.system.eval_pred_horizon,
+                                        test_pred_horizon=cfg.system.test_pred_horizon,
                                         system_cfg=cfg.system,
                                         num_workers=cfg.num_workers,
                                         device=device,
@@ -65,83 +67,14 @@ def main(cfg: DictConfig):
                                         state_obs=cfg.system.get('state_obs', None),
                                         action_obs=cfg.system.get('action_obs', None))
         datamodule.prepare_data()
-        obs_state_dim = math.ceil(
-            cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
-        num_hidden_neurons = max(cfg.model.num_hidden_units, 2 * obs_state_dim)
-
-        # Get the selected model for observation learning _____________________________________________________________
-        if cfg.model.equivariant:
-            activation = cfg.model.activation
-        else:
-            activation = class_from_name('torch.nn', cfg.model.activation)
-
-        obs_fn_params = dict(num_layers=cfg.model.num_layers,
-                             num_hidden_units=num_hidden_neurons,
-                             activation=activation,
-                             bias=cfg.model.bias,
-                             batch_norm=cfg.model.batch_norm,
-                             )
-
-        if cfg.model.name.lower() == "dae":
-            assert cfg.system.pred_horizon >= 1
-            model = DAE(state_dim=datamodule.state_field_type.size,
-                        obs_state_dim=obs_state_dim,
-                        dt=datamodule.dt,
-                        obs_pred_w=cfg.model.obs_pred_w,
-                        orth_w=cfg.model.orth_w,
-                        corr_w=cfg.model.corr_w,
-                        obs_fn_params=obs_fn_params,
-                        enforce_constant_fn=cfg.model.constant_function,
-                        )
-        elif cfg.model.name.lower() == "e-dae":
-            assert cfg.system.pred_horizon >= 1
-            model = EquivDAE(state_rep=datamodule.state_field_type.representation,
-                             obs_state_dim=obs_state_dim,
-                             dt=datamodule.dt,
-                             orth_w=cfg.model.orth_w,
-                             obs_fn_params=obs_fn_params,
-                             group_avg_trick=cfg.model.group_avg_trick,
-                             state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn,
-                             enforce_constant_fn=cfg.model.constant_function,
-                             )
-
-
-        elif cfg.model.name.lower() == "e-dpnet":
-            assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
-            model = EquivDPNet(state_rep=datamodule.state_field_type.representation,
-                               obs_state_dim=obs_state_dim,
-                               max_ck_window_length=cfg.model.max_ck_window_length,
-                               dt=datamodule.dt,
-                               ck_w=cfg.model.ck_w,
-                               orth_w=cfg.model.orth_w,
-                               use_spectral_score=cfg.model.use_spectral_score,
-                               enforce_constant_fn=cfg.model.constant_function,
-                               aux_obs_space=cfg.model.aux_obs_space,
-                               obs_fn_params=obs_fn_params,
-                               group_avg_trick=cfg.model.group_avg_trick)
-
-        elif cfg.model.name.lower() == "dpnet":
-            assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
-            model = DPNet(state_dim=datamodule.state_field_type.size,
-                          obs_state_dim=obs_state_dim,
-                          max_ck_window_length=cfg.model.max_ck_window_length,
-                          dt=datamodule.dt,
-                          ck_w=cfg.model.ck_w,
-                          orth_w=cfg.model.orth_w,
-                          use_spectral_score=cfg.model.use_spectral_score,
-                          enforce_constant_fn=cfg.model.constant_function,
-                          aux_obs_space=cfg.model.aux_obs_space,
-                          obs_fn_params=obs_fn_params)
-        else:
-            raise NotImplementedError(f"Model {cfg.model.name} not implemented")
-
-        log.info(f"Model \n {model}")
+        # Get the MarkovDynamics model to train _________________________________________________________________
+        model = get_model(cfg, datamodule)
 
         stop_call = EarlyStopping(monitor='loss/val', mode='min', patience=max(30, int(cfg.max_epochs * 0.2)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
         run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
-        run_hps['model']['num_hidden_neurons'] = num_hidden_neurons
+        # run_hps['model']['num_hidden_neurons'] = num_hidden_neurons
 
         run_name = run_path.name
         wandb_logger = WandbLogger(project=f'{cfg.system.name}',
@@ -152,8 +85,8 @@ def main(cfg: DictConfig):
                                    job_type='debug' if (cfg.debug or cfg.debug_loops) else None)
 
         # Configure Lightning trainer
-        trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and device != 'cpu' else 'cpu',
-                          devices=[cfg.device] if torch.cuda.is_available() and device != 'cpu' else 1,
+        trainer = Trainer(accelerator='cuda' if torch.cuda.is_available() and cfg.device != 'cpu' else 'cpu',
+                          devices=[cfg.device] if torch.cuda.is_available() and cfg.device != 'cpu' else 'auto',
                           logger=wandb_logger,
                           log_every_n_steps=1,
                           max_epochs=cfg.max_epochs if not cfg.debug_loops else 2,
@@ -176,32 +109,18 @@ def main(cfg: DictConfig):
                                              val_epoch_metrics_fn=epoch_metrics_fn,
                                              log_figs_every_n_epochs=10)
         pl_model.set_model(model)
-        # pl_model.to(device)
-        # wandb_logger.watch(model, log_graph=False, log='all', log_freq=10)
 
-        # trainer.test(model=pl_model, datamodule=datamodule)
-
-        # profiler = cProfile.Profile()
-        # profiler.enable()
-        log.info("\nTraining Started\n")
+        if cfg.debug_loops:
+            profiler = cProfile.Profile()
+            profiler.enable()
         trainer.fit(model=pl_model, datamodule=datamodule)
-        log.info("\nTraining Done\n")
 
-        if cfg.model == "dpnet":
-            # Train non-linear inverse observable function
-            log.info("\nTraining Inverse Observable\n")
-            pl_model.model.train_mode = DPNet.INV_PROJECTION
-            trainer.fit(model=pl_model, datamodule=datamodule)
-            log.info("\nTraining Done\n")
+        # Create a pstats object
+        if cfg.debug_loops:
+            stats = pstats.Stats(profiler)
+            stats.sort_stats('cumulative')  # Sort stats by the cumulative time spent in the function
+            stats.print_stats('koopman_robotics')
 
-        # # Create a pstats object
-        # stats = pstats.Stats(profiler)
-        # # Sort stats by the cumulative time spent in the function
-        # stats.sort_stats('cumulative')
-        # # Print only the info for the functions defined in your script
-        # # Assuming your script's name is 'your_script.py'
-        # stats.print_stats('koopman_robotics')
-        # Plot performance of best model
         if not cfg.debug:
             log.info("Loading best model and testing")
             best_ckpt = torch.load(best_path)
@@ -216,6 +135,74 @@ def main(cfg: DictConfig):
         return test_pred_loss
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
+
+
+def get_model(cfg, datamodule):
+    obs_state_dim = math.ceil(
+        cfg.system.obs_state_dim / datamodule.state_field_type.size) * datamodule.state_field_type.size
+    num_hidden_neurons = max(cfg.model.num_hidden_units, 2 * obs_state_dim)
+    # Get the selected model for observation learning _____________________________________________________________
+    if cfg.model.equivariant:
+        activation = cfg.model.activation
+    else:
+        activation = class_from_name('torch.nn', cfg.model.activation)
+    obs_fn_params = dict(num_layers=cfg.model.num_layers,
+                         num_hidden_units=num_hidden_neurons,
+                         activation=activation,
+                         bias=cfg.model.bias,
+                         batch_norm=cfg.model.batch_norm,
+                         )
+    if cfg.model.name.lower() == "dae":
+        assert cfg.system.pred_horizon >= 1
+        model = DAE(state_dim=datamodule.state_field_type.size,
+                    obs_state_dim=obs_state_dim,
+                    dt=datamodule.dt,
+                    obs_pred_w=cfg.model.obs_pred_w,
+                    orth_w=cfg.model.orth_w,
+                    corr_w=cfg.model.corr_w,
+                    obs_fn_params=obs_fn_params,
+                    enforce_constant_fn=cfg.model.constant_function,
+                    )
+    elif cfg.model.name.lower() == "e-dae":
+        assert cfg.system.pred_horizon >= 1
+        model = EquivDAE(state_rep=datamodule.state_field_type.representation,
+                         obs_state_dim=obs_state_dim,
+                         dt=datamodule.dt,
+                         orth_w=cfg.model.orth_w,
+                         obs_fn_params=obs_fn_params,
+                         group_avg_trick=cfg.model.group_avg_trick,
+                         state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn,
+                         enforce_constant_fn=cfg.model.constant_function,
+                         )
+    elif cfg.model.name.lower() == "e-dpnet":
+        assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
+        model = EquivDPNet(state_rep=datamodule.state_field_type.representation,
+                           obs_state_dim=obs_state_dim,
+                           max_ck_window_length=cfg.model.max_ck_window_length,
+                           dt=datamodule.dt,
+                           ck_w=cfg.model.ck_w,
+                           orth_w=cfg.model.orth_w,
+                           use_spectral_score=cfg.model.use_spectral_score,
+                           enforce_constant_fn=cfg.model.constant_function,
+                           explicit_transfer_op=cfg.model.explicit_transfer_op,
+                           obs_fn_params=obs_fn_params,
+                           group_avg_trick=cfg.model.group_avg_trick)
+    elif cfg.model.name.lower() == "dpnet":
+        assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
+        model = DPNet(state_dim=datamodule.state_field_type.size,
+                      obs_state_dim=obs_state_dim,
+                      max_ck_window_length=cfg.model.max_ck_window_length,
+                      dt=datamodule.dt,
+                      ck_w=cfg.model.ck_w,
+                      orth_w=cfg.model.orth_w,
+                      use_spectral_score=cfg.model.use_spectral_score,
+                      enforce_constant_fn=cfg.model.constant_function,
+                      explicit_transfer_op=cfg.model.explicit_transfer_op,
+                      obs_fn_params=obs_fn_params)
+    else:
+        raise NotImplementedError(f"Model {cfg.model.name} not implemented")
+    log.info(f"Model \n {model}")
+    return model
 
 
 if __name__ == '__main__':

@@ -11,11 +11,8 @@ from torch import Tensor
 
 from nn.DynamicsAutoEncoder import DAE
 from nn.EquivLinearDynamics import EquivLinearDynamics
-from nn.LinearDynamics import LinearDynamics
-from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
-from nn.mlp import MLP
-from nn.emlp import EMLP
+from morpho_symm.nn.EMLP import EMLP
 from utils.losses_and_metrics import obs_state_space_metrics
 from utils.mysc import batched_to_flat_trajectory
 from utils.representation_theory import isotypic_basis
@@ -23,13 +20,10 @@ from utils.representation_theory import isotypic_basis
 log = logging.getLogger(__name__)
 
 
-
-
-
 class EquivDAE(DAE):
     _default_obs_fn_params = dict(
         num_layers=4,
-        num_hidden_units=128,   # Approximate number of neurons in hidden layers. Actual number depends on group order.
+        num_hidden_units=128,  # Approximate number of neurons in hidden layers. Actual number depends on group order.
         activation="p_elu",
         batch_norm=True,
         bias=False,

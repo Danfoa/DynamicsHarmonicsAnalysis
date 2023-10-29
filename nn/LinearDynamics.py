@@ -56,8 +56,8 @@ class LinearDynamics(MarkovDynamics):
             # Initialize weights of the linear layer such that it represents a stable system
             self.reset_parameters(init_mode=init_mode)
 
-    def forward(self, state: Tensor, next_state: Tensor, **kwargs) -> [dict[str, Tensor]]:
-        pred_horizon = next_state.shape[1]
+    def forward(self, state: Tensor, next_state: Optional[Tensor]=None, **kwargs) -> [dict[str, Tensor]]:
+        pred_horizon = next_state.shape[1] if next_state is not None else 1
         pre_processed_state = self.pre_process_state(state=state)
 
         if self.is_trainable:
@@ -147,6 +147,8 @@ class LinearDynamics(MarkovDynamics):
     def reset_parameters(self, init_mode: str):
         if init_mode == "stable":
             self.transfer_op.weight.data = torch.eye(self.state_dim)
+            if self.bias:
+                self.transfer_op.bias.data = torch.zeros(self.state_dim)
         else:
             raise NotImplementedError(f"Eival init mode {init_mode} not implemented")
         log.info(f"Eigenvalues initialization to {init_mode}")

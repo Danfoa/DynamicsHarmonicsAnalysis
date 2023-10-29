@@ -13,7 +13,7 @@ device: 0
 num_workers: 0           # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 200
+max_epochs: 150
 
 # Markov Dynamics Model
 model: dpnet
@@ -37,7 +37,7 @@ hydra:
     chdir: True
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: 'false'
-      HYDRA_FULL_ERROR: 1
+      HYDRA_FULL_ERROR: '1'
 #      CUDA_VISIBLE_DEVICES: ${.device}
     config:
       override_dirname:
@@ -59,7 +59,7 @@ hydra:
           - model.lr
           - model.batch_norm
           - model.bias
-          - model.aux_obs_space
+          - model.explicit_transfer_op
           - model.use_spectral_score
           - system.state_dim     # Metrics included in system.summary
           - system.obs_state_dim

@@ -1,16 +1,14 @@
 import logging
 from typing import Optional, Tuple, Union
 import torch
+from morpho_symm.nn.MLP import MLP
 from plotly.graph_objs import Figure
 from torch import Tensor
 
 from nn.LinearDynamics import LinearDynamics
 from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
-from nn.mlp import MLP
-from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
-from utils.mysc import batched_to_flat_trajectory, traj_from_states
-from utils.plotting import plot_system_2D, plot_system_3D, plot_two_panel_trajectories
+from utils.losses_and_metrics import obs_state_space_metrics
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +96,6 @@ class DAE(LatentMarkovDynamics):
                                  pred_obs_state_traj: Tensor,
                                  pred_obs_state_one_step: Tensor,
                                  ) -> (Tensor, dict[str, Tensor]):
-
         _, forecast_metrics = super(DAE, self).compute_loss_and_metrics(
             state=state,
             next_state=next_state,
@@ -129,9 +126,9 @@ class DAE(LatentMarkovDynamics):
         transfer_op_inv_score = torch.mean(transfer_op_inv_score)  # / self.obs_state_dim
 
         state_loss = torch.mean(state_rec_loss)
-        obs_loss = self.obs_pred_w * torch.mean(obs_pred_loss)
+        obs_loss = (self.obs_pred_w * self.obs_state_dim) * torch.mean(obs_pred_loss)
         orth_regularization = (self.orth_w * self.obs_state_dim) * torch.mean(orth_reg)
-        corr_score = self.corr_w * transfer_op_inv_score
+        corr_score = (self.corr_w * self.obs_state_dim) * transfer_op_inv_score
         return state_loss + obs_loss + orth_regularization + corr_score
 
     def build_obs_fn(self, num_layers, **kwargs):

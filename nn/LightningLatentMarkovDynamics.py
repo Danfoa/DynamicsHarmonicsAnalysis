@@ -127,6 +127,7 @@ class LightLatentMarkovDynamics(LightningModule):
 
         if self.val_metrics_fn is not None:
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback
@@ -145,6 +146,7 @@ class LightLatentMarkovDynamics(LightningModule):
         # Save train plots.
         if self.val_metrics_fn is not None:
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
 
     def on_validation_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator") and self.trainer.current_epoch % 2 == 0:
@@ -156,8 +158,8 @@ class LightLatentMarkovDynamics(LightningModule):
     def on_validation_end(self) -> None:
         self.log_vector_metrics(flush=True)
 
-        if self.val_metrics_fn is not None and self.trainer.current_epoch % self.log_figs_every_n_epochs == 0:
-            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
+        # if self.val_metrics_fn is not None and self.trainer.current_epoch % self.log_figs_every_n_epochs == 0:
+        #     self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
 
     def on_test_start(self) -> None:
         if hasattr(self.model, "approximate_transfer_operator"):

@@ -50,11 +50,17 @@ class DynamicsRecording:
             pickle.dump(self, file, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
-    def load_from_file(file_path: Path, only_metadata=False):
+    def load_from_file(file_path: Path, only_metadata=False, obs_names: Optional[Iterable[str]] = None):
         with file_path.with_suffix(".pkl").open('rb') as file:
             data: DynamicsRecording = pickle.load(file)
             if only_metadata:
                 del data.recordings
+            else:
+                data_obs_names = list(data.recordings.keys())
+                if obs_names is not None:
+                    irrelevant_obs = [k for k in data_obs_names if k not in obs_names and obs_names is not None]
+                    for k in irrelevant_obs:
+                        del data.recordings[k]
 
             if hasattr(data, '_group_name'):
                 group = groups_dict[data._group_name]._generator(**data._group_keys)  # Instanciate symmetry group
@@ -87,7 +93,8 @@ class DynamicsRecording:
 
         Args:
             recordings (list[DynamicsRecording]): List of DynamicsRecordings.
-            frames_per_step: Number of frames to compose a single observation sample at time `t`. E.g. if `f` is provided
+            frames_per_step: Number of frames to compose a single observation sample at time `t`. E.g. if `f` is
+            provided
             the state samples will be of shape [f, obs_dim].
             prediction_horizon (int, float): Number of future time steps to include in the next time samples.
                 E.g: if `n` is an integer the samples will be of shape [n, frames_per_state, obs_dim]
@@ -159,7 +166,8 @@ class DynamicsRecording:
         The state is defined as a set of observations within a window of fps=`frames_per_state`.
         E.g.: Consider the state is defined by the observations [m=momentum, p=position] at `fps` consecutive frames.
             Then the state at time `t` is defined as `s_t = [m_f, m_f+1,..., m_f+fps, p_f, p_f+1, ..., p_f+fps]`.
-            Where we use f to denote frame in time to make the distinction from the time index `t` of the Markov Process.
+            Where we use f to denote frame in time to make the distinction from the time index `t` of the Markov
+            Process.
             Then, the next state is defined as `s_t+1 = [m_f+fps,..., m_fps+fps, p_f+fps, ..., p_f+fps+fps]`.
         Args:
             sample (dict): Dictionary containing the observations of the system of shape [state_time, f].
@@ -173,6 +181,7 @@ class DynamicsRecording:
         state_obs = [sample[m] for m in state_observations]
         # Define the state at time t and the states at time [t+1, t+pred_horizon]
         state_traj = np.concatenate(state_obs, axis=-1).reshape(batch_size, time_horizon, -1)
+        a = dict(state=state_traj[:, 0], next_state=state_traj[:, 1:])
         return dict(state=state_traj[:, 0], next_state=state_traj[:, 1:])
 
     @staticmethod
@@ -185,7 +194,6 @@ class DynamicsRecording:
         action_sample["next_action"] = action_sample.pop("next_state")
         flat_sample.update(action_sample)
         return flat_sample
-
 
 
 def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizon: Union[int, float] = 1,
@@ -211,23 +219,28 @@ def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizo
 
 
 def get_dynamics_dataset(train_shards: list[Path],
-                         test_shards: list[Path],
-                         val_shards: List[Path],
+                         test_shards: Optional[list[Path]] = None,
+                         val_shards: Optional[list[Path]] = None,
                          num_proc: int = 1,
                          frames_per_step: int = 1,
                          train_pred_horizon: Union[int, float] = 1,
                          eval_pred_horizon: Union[int, float] = 10,
+                         test_pred_horizon: Union[int, float] = 10,
                          state_obs: Optional[tuple[str]] = None,
                          action_obs: Optional[tuple[str]] = None
                          ) -> tuple[list[IterableDataset], DynamicsRecording]:
     """Load Markov Dynamics recordings from a list of files and return a train, test and validation dataset."""
     # TODO: ensure all shards come from the same dynamical system
     metadata: DynamicsRecording = DynamicsRecording.load_from_file(train_shards[0])
-    test_metadata = DynamicsRecording.load_from_file(test_shards[0], only_metadata=True)
+    test_shards = [] if test_shards is None else test_shards
+    val_shards = [] if val_shards is None else val_shards
 
-    dyn_params_diff = compare_dictionaries(metadata.dynamics_parameters, test_metadata.dynamics_parameters)
-    assert len(dyn_params_diff) == 0, "Different dynamical systems loaded in train/test sets"
+    if len(test_shards) > 0:
+        test_metadata = DynamicsRecording.load_from_file(test_shards[0], only_metadata=True)
+        dyn_params_diff = compare_dictionaries(metadata.dynamics_parameters, test_metadata.dynamics_parameters)
+        assert len(dyn_params_diff) == 0, "Different dynamical systems loaded in train/test sets"
 
+    # Define the relevant observations of the recording to load.
     state_obs = state_obs if state_obs is not None else metadata.state_obs
     action_obs = action_obs if action_obs is not None else metadata.action_obs
     relevant_obs = set(state_obs).union(set(action_obs))
@@ -240,13 +253,17 @@ def get_dynamics_dataset(train_shards: list[Path],
 
     part_datasets = []
     for partition, partition_shards in zip(["train", "test", "val"], [train_shards, test_shards, val_shards]):
-        recordings = [DynamicsRecording.load_from_file(f) for f in partition_shards]
+        if len(partition_shards) == 0:
+            part_datasets.append(None)
+            continue
+
+        recordings = [DynamicsRecording.load_from_file(f, obs_names=relevant_obs) for f in partition_shards]
         if partition == "train":
             pred_horizon = train_pred_horizon
         elif partition == "val":
             pred_horizon = eval_pred_horizon
         else:
-            pred_horizon = eval_pred_horizon
+            pred_horizon = test_pred_horizon
 
         num_trajs, num_samples = estimate_dataset_size(recordings, pred_horizon, frames_per_step)
         dataset = IterableDataset.from_generator(DynamicsRecording.load_data_generator,
@@ -261,9 +278,9 @@ def get_dynamics_dataset(train_shards: list[Path],
         # for sample in dataset:
         log.debug(f"[Dataset {partition} - Trajs:{num_trajs} - Samples: {num_samples} - "
                   f"Frames per sample : {frames_per_step}]-----------------------------")
-            # log.debug(f"\tstate: {state.shape} = (frames_per_step, state_dim)")
-            # log.debug(f"\tnext_state: {next_state.shape} = (pred_horizon, frames_per_step, state_dim)")
-            # break
+        # log.debug(f"\tstate: {state.shape} = (frames_per_step, state_dim)")
+        # log.debug(f"\tnext_state: {next_state.shape} = (pred_horizon, frames_per_step, state_dim)")
+        # break
 
         dataset.info.dataset_size = num_samples
         dataset.info.dataset_name = f"[{partition}] Linear dynamics"

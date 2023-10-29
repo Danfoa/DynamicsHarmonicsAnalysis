@@ -256,7 +256,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
-    order = 10
+    order = 5
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -355,11 +355,8 @@ if __name__ == '__main__':
                     n_constraints=n_constraints,
                     group=dict(subgroup_id=G_id, group_name=G.name, group_order=G.order()),
                     ),
-                measurements=dict(state=state_trajs[0].shape[-1]),
-                state_measurements=['state'],
-                reps_irreps=dict(state=rep_X.irreps),  # Store the irreps composing the measurements representations
-                reps_change_of_basis=dict(state=rep_X.change_of_basis),  # Store the change of basis matrices
-                measurements_representations=dict(state='state'),
+                state_obs=('state',),
+                obs_representations=dict(state=rep_X),
                 recordings=dict(state=np.asarray(state_trajs[idx], dtype=np.float32)))
 
             path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"

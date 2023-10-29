@@ -152,7 +152,8 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
                     upper_left_coord = [-bound, bound, z_coord(-bound, bound)]
                     upper_right_coord = [bound, bound, z_coord(bound, bound)]
                     plane_corners = np.array([lower_left_coord, lower_right_coord, upper_right_coord, upper_left_coord])
-                    fig.add_trace(go.Mesh3d(x=plane_corners[:, 0], y=plane_corners[:, 1],
+                    fig.add_trace(go.Mesh3d(x=plane_corners[:, 0],
+                                            y=plane_corners[:, 1],
                                             z=plane_corners[:, 2], opacity=0.2))
 
     # Trajectory plotting (for both initial and subsequent calls)
@@ -226,7 +227,7 @@ from plotly import colors
 def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
                       main_style=None, secondary_style=None, dt=1, dim_names=None,
                       main_legend_label='traj', secondary_legend_label=None, shade_area=False,
-                      n_trajs_to_show=5, plot_error=True, col_shift=0, show_legend=True):
+                      n_trajs_to_show=5, plot_error=True, col_shift=0, show_legend=True, title=None):
     """
     Updated plot_trajectories function with error calculation and limited number of trajectories to display.
     """
@@ -251,7 +252,8 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
     # Create a new figure if none is provided
     if fig is None:
         fig = make_subplots(rows=num_rows, cols=num_cols,
-                            subplot_titles=dim_names + (["MSE"] if plot_error else []))
+                            subplot_titles=dim_names + (["MSE"] if plot_error else []),
+                            shared_xaxes=True)
 
     # Set default styles if not provided
     if main_style is None:
@@ -324,7 +326,8 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
         fig.update_xaxes(title_text=f"Time[{'s' if dt != 1 else 'steps'}]", row=num_rows, col=num_cols + col_shift)
 
     # Update layout
-    fig.update_layout(plot_bgcolor='rgba(245, 245, 245, 1)',
+    fig.update_layout(title=title,
+                      plot_bgcolor='rgba(245, 245, 245, 1)',
                       paper_bgcolor='rgba(245, 245, 245, 1)')
     return fig
 
@@ -371,7 +374,8 @@ def plot_two_panel_trajectories(state_trajs, obs_state_trajs, pred_obs_state_tra
     # Create an empty figure with subplots
     fig = make_subplots(rows=max(state_num_rows, obs_state_num_rows),
                         cols=state_num_cols + obs_state_num_cols,
-                        column_widths=[0.5] * state_num_cols + [0.5] * obs_state_num_cols)
+                        column_widths=[0.5] * state_num_cols + [0.5] * obs_state_num_cols,
+                        shared_xaxes=True)
 
     # Plot the state space trajectories in the left panel
     fig = plot_trajectories(state_trajs, pred_state_trajs, fig=fig, dt=dt,

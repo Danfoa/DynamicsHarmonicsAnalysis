@@ -1,7 +1,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import escnn.group
 import numpy as np
@@ -26,6 +26,7 @@ class DynamicsDataModule(LightningDataModule):
                  data_path: Path,
                  pred_horizon: Union[int, float] = 0.25,
                  eval_pred_horizon: Union[int, float] = 0.5,
+                 test_pred_horizon: Union[int, float] = 0.5,
                  system_cfg: Optional[dict] = None,
                  batch_size: int = 256,
                  frames_per_step: int = 1,
@@ -50,6 +51,7 @@ class DynamicsDataModule(LightningDataModule):
             assert pred_horizon >= 1, "At least we need to forecast a single dynamics step"
             self.pred_horizon = pred_horizon
         self.eval_pred_horizon = eval_pred_horizon
+        self.test_pred_horizon = test_pred_horizon
         self.batch_size = batch_size
         self.num_workers = num_workers
         # Metadata and dynamics information
@@ -63,12 +65,14 @@ class DynamicsDataModule(LightningDataModule):
         self.gspace = None
         self.state_field_type, self.action_field_type = None, None
         self.device = device
+        self.train_dataset, self.val_dataset, self.test_dataset = None, None, None
 
     def prepare_data(self):
 
         if self.prepared:
-            self._train_dataset = self._train_dataset.shuffle(buffer_size=self._train_dataset.dataset_size / 2)
-            self._train_dataloader = DataLoader(dataset=self._train_dataset, batch_size=self.batch_size,
+            self.train_dataset = self.train_dataset.shuffle(
+                buffer_size=min(self.train_dataset.dataset_size // 4, 5000))
+            self._train_dataloader = DataLoader(dataset=self.train_dataset, batch_size=self.batch_size,
                                                 num_workers=self.num_workers,
                                                 persistent_workers=True if self.num_workers > 0 else False,
                                                 collate_fn=self.data_augmentation_collate_fn if self.augment else
@@ -79,7 +83,6 @@ class DynamicsDataModule(LightningDataModule):
         start_time = time.time()
         log.info(f"Preparing datasets {self._data_path}")
 
-        a = list(self._data_path.rglob('*train.pkl'))
         dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
         if self.noise_level is not None:
             system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
@@ -99,6 +102,7 @@ class DynamicsDataModule(LightningDataModule):
                                                             val_shards=val_data,
                                                             train_pred_horizon=self.pred_horizon,
                                                             eval_pred_horizon=self.eval_pred_horizon,
+                                                            test_pred_horizon=self.test_pred_horizon,
                                                             frames_per_step=self.frames_per_step,
                                                             state_obs=self.state_obs,
                                                             action_obs=self.action_obs)
@@ -118,20 +122,33 @@ class DynamicsDataModule(LightningDataModule):
         test_dataset = test_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
         val_dataset = val_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
         # Convert to torch. Apply map to get samples containing state and next state
-        obs_to_remove = train_dataset.features.keys()
-        train_dataset = train_dataset.with_format("torch").map(
+        # After mapping to state next state, remove all other observations
+        obs_to_remove = set(train_dataset.features.keys())
+        obs_to_remove.discard('state')
+        self.train_dataset = train_dataset.with_format("torch").map(
             DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
             remove_columns=tuple(obs_to_remove))
-        test_dataset = test_dataset.with_format("torch").map(
+        self.test_dataset = test_dataset.with_format("torch").map(
             DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
             remove_columns=tuple(obs_to_remove))
-        val_dataset = val_dataset.with_format("torch").map(
+        self.val_dataset = val_dataset.with_format("torch").map(
             DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
             remove_columns=tuple(obs_to_remove))
 
-        self._train_dataset = train_dataset
-        self._test_dataset = test_dataset
-        self._val_dataset = val_dataset
+        # Configure the prediction dataloader for the approximating and evaluating the transfer operator. This will
+        # be a dataloader passing state and next state single step measurements:
+        datasets, dynamics_recording = get_dynamics_dataset(train_shards=train_data,
+                                                            test_shards=None,
+                                                            val_shards=None,
+                                                            train_pred_horizon=1,
+                                                            eval_pred_horizon=1,
+                                                            frames_per_step=self.frames_per_step,
+                                                            state_obs=self.state_obs,
+                                                            action_obs=self.action_obs)
+        transfer_op_train_dataset, _, _ = datasets
+        self._transfer_op_train_dataset = transfer_op_train_dataset.with_format("torch").map(
+            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
+            remove_columns=tuple(obs_to_remove))
 
         # Rebuilt the ESCNN representations of measurements _________________________________________________________
         # TODO: Handle dyn systems without symmetries
@@ -157,44 +174,10 @@ class DynamicsDataModule(LightningDataModule):
             action_reps = [rep for frame_reps in action_reps for rep in frame_reps]  # flatten list of reps
             self.action_field_type = FieldType(self.gspace, representations=action_reps)
 
-        self._train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.batch_size,
-                                            num_workers=self.num_workers,
-                                            persistent_workers=True if self.num_workers > 0 else False,
-                                            collate_fn=self.data_augmentation_collate_fn if self.augment else
-                                            self.collate_fn)
-        batch_size = min(self.batch_size, test_dataset.dataset_size)
-        self._test_dataloader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
-                                           persistent_workers=True if self.num_workers > 0 else False,
-                                           num_workers=self.num_workers,
-                                           # pin_memory=True,
-                                           collate_fn=self.collate_fn)
-        batch_size = min(self.batch_size, test_dataset.dataset_size)
-        self._val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False,
-                                          persistent_workers=True if self.num_workers > 0 else False,
-                                          num_workers=self.num_workers,
-                                          # pin_memory=True,
-                                          collate_fn=self.collate_fn)
-
-        # Configure the prediction dataloader for the approximating and evaluating the transfer operator. This will
-        # be a dataloader passing state and next state single step measurements:
-        datasets, dynamics_recording = get_dynamics_dataset(train_shards=train_data,
-                                                            test_shards=test_data,
-                                                            val_shards=val_data,
-                                                            train_pred_horizon=1,
-                                                            eval_pred_horizon=1,
-                                                            frames_per_step=self.frames_per_step,
-                                                            state_obs=self.state_obs,
-                                                            action_obs=self.action_obs)
-        transfer_op_train_dataset, _, _ = datasets
-        transfer_op_train_dataset = transfer_op_train_dataset.with_format("torch").map(
-            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs})
-
-        self._trans_op_dataloader = DataLoader(dataset=transfer_op_train_dataset,
-                                               batch_size=transfer_op_train_dataset.dataset_size,  # Single batch
-                                               pin_memory=False, num_workers=self.num_workers, shuffle=False,
-                                               collate_fn=self.collate_fn)
-
         log.info(f"Data preparation done in {time.time() - start_time:.2f} [s]")
+
+    def setup(self, stage: str) -> None:
+        log.info(f"Setting up {stage} dataset")
 
     def compute_loss_metrics(self, predictions: dict, inputs: dict) -> (torch.Tensor, dict):
         """
@@ -206,20 +189,35 @@ class DynamicsDataModule(LightningDataModule):
         raise NotImplementedError("Implement this function in the derived class")
 
     def train_dataloader(self):
-        return self._train_dataloader
+        return DataLoader(dataset=self.train_dataset, batch_size=self.batch_size,
+                          num_workers=self.num_workers,
+                          collate_fn=self.collate_fn,
+                          persistent_workers=True if self.num_workers > 0 else False, drop_last=False)
 
     def val_dataloader(self):
-        return self._val_dataloader
+        return DataLoader(dataset=self.val_dataset, batch_size=self.batch_size, shuffle=False,
+                          persistent_workers=True if self.num_workers > 0 else False,
+                          num_workers=self.num_workers,
+                          collate_fn=self.collate_fn,
+                          drop_last=False)
 
     def test_dataloader(self):
-        return self._test_dataloader
+        return DataLoader(dataset=self.test_dataset, batch_size=self.batch_size, shuffle=False,
+                          persistent_workers=True if self.num_workers > 0 else False,
+                          collate_fn=self.collate_fn,
+                          num_workers=self.num_workers, drop_last=False)
 
     def predict_dataloader(self):
-        return self._trans_op_dataloader
+        return DataLoader(dataset=self._transfer_op_train_dataset, batch_size=self.batch_size, pin_memory=False,
+                          collate_fn=self.collate_fn,
+                          num_workers=self.num_workers, shuffle=False, drop_last=False)
+
+    def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     @property
     def prepared(self):
-        return self._train_dataloader is not None
+        return self.train_dataset is not None
 
     def collate_fn(self, batch_list: list) -> dict:
         batch = torch.utils.data.default_collate(batch_list)
@@ -260,8 +258,8 @@ class DynamicsDataModule(LightningDataModule):
         num_trajs = 5
         fig = None
         styles = {'Train': dict(width=3, dash='solid'),
-                  'Test': dict(width=2, dash='2px'),
-                  'Val': dict(width=1, dash='5px')}
+                  'Test':  dict(width=2, dash='2px'),
+                  'Val':   dict(width=1, dash='5px')}
         for partition, dataloader in zip(['Train', 'Test', 'Val'],
                                          [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
             batch = next(iter(dataloader))
@@ -280,25 +278,28 @@ if __name__ == "__main__":
 
     # Find all dynamic systems recordings
     path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
+    # path_to_data = Path('/home/danfoa/Projects/koopman_robotics/data/linear_system/group=C10-dim=10/n_constraints=0
+    # /f_time_constant=1.5[s]-frames=200-horizon=8.7[s]/noise_level=0')
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
 
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=10,
-                                     eval_pred_horizon=100,
+                                     eval_pred_horizon=200,
                                      frames_per_step=1,
                                      num_workers=1,
                                      batch_size=1000,
                                      augment=False,
-                                     state_obs=('q',),
-                                     action_obs=tuple(),
+                                     state_obs=('v'),
+                                     # action_obs=tuple(),
                                      )
 
     # Test loading of the DynamicsRecording
     data_module.prepare_data()
+    s = next(iter(data_module.train_dataset))
+
     data_module.plot_sample_trajs()
-    s = next(iter(data_module._train_dataset))
     states, state_trajs = None, None
     fig = None
 

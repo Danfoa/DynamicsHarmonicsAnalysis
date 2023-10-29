@@ -4,11 +4,11 @@ defaults:
 name: DAE
 # Model hyperparameters
 obs_pred_w: 1.0                                  # Cost function weight for prediction in observation space Z
-orth_w: 0.0                                      # Weight of the orthonormal regularization term in the loss function
+orth_w: 0.1                                      # Weight of the orthonormal regularization term in the loss function
 corr_w: 0.0
 
 # Optimization hyperparameters parameters
-lr: 5e-4
+lr: 1e-3
 equivariant: False
 
 summary: ${model.name}-Obs_w:${model.obs_pred_w}-Orth_w:${model.orth_w}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.num_layers}-${model.num_hidden_units}

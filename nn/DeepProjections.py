@@ -19,7 +19,7 @@ from nn.LinearDynamics import LinearDynamics
 from nn.ObservableNet import ObservableNet
 from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
-from nn.mlp import MLP
+from morpho_symm.nn.MLP import MLP
 from utils.losses_and_metrics import (
     forecasting_loss_and_metrics,
     obs_state_space_metrics,
@@ -55,7 +55,7 @@ class DPNet(LatentMarkovDynamics):
             orth_w: float = 0.1,
             enforce_constant_fn: bool = True,
             use_spectral_score: bool = True,
-            shared_encoder: bool = True,
+            explicit_transfer_op: bool = True,
             obs_fn_params: Optional[dict] = None,
             linear_decoder: bool = True,
             **markov_dyn_params
@@ -67,7 +67,7 @@ class DPNet(LatentMarkovDynamics):
         self.ck_w = ck_w
         self.orth_w = orth_w
         self.use_spectral_score = use_spectral_score
-        self.shared_encoder = shared_encoder
+        self.explicit_transfer_op = explicit_transfer_op
         self.inverse_projector = None  # if linear decoder is true, this is the map between obs to states.
         self.inverse_projector_bias = None
         self.linear_decoder = linear_decoder
@@ -169,7 +169,7 @@ class DPNet(LatentMarkovDynamics):
         return loss, obs_space_metrics
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None) -> dict:
-        if obs_state_traj_aux is None and self.shared_encoder:
+        if obs_state_traj_aux is None and self.explicit_transfer_op:
             raise ValueError("aux_obs_space is True but obs_state_traj_aux is None")
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
@@ -276,12 +276,9 @@ class DPNet(LatentMarkovDynamics):
                       out_dim=num_hidden_units,
                       num_layers=num_layers,
                       head_with_activation=True, **kwargs)
-        aux_encoder = None
-        if not self.shared_encoder:
-            aux_encoder = MLP(in_dim=self.state_dim, out_dim=num_hidden_units, num_layers=num_layers,
-                              head_with_activation=True, **kwargs)
-
-        return ObservableNet(encoder=encoder, aux_encoder=aux_encoder, obs_dim=self.obs_state_dim)
+        return ObservableNet(encoder=encoder,
+                             obs_dim=self.obs_state_dim,
+                             explicit_transfer_op=self.explicit_transfer_op)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, identity=False, **kwargs):
         if identity:

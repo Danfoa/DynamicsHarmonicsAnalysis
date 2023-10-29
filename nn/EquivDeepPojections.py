@@ -22,7 +22,7 @@ from data.DynamicsDataModule import DynamicsDataModule
 from nn.DeepProjections import DPNet
 from nn.EquivLinearDynamics import EquivLinearDynamics
 from nn.ObservableNet import ObservableNet
-from nn.emlp import EMLP
+from morpho_symm.nn.EMLP import EMLP
 from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
 from utils.mysc import traj_from_states
@@ -278,15 +278,8 @@ class EquivDPNet(DPNet):
                        num_layers=num_layers,
                        activation=act,
                        **kwargs)
-        aux_encoder = None
-        if not self.shared_encoder:
-            aux_encoder = EMLP(in_type=self.state_type_iso,
-                               out_type=act.out_type,
-                               num_layers=num_layers,
-                               activation=act,
-                               **kwargs)
-
-        return ObservableNet(encoder=encoder, aux_encoder=aux_encoder, obs_type=self.obs_state_type)
+        return ObservableNet(encoder=encoder, obs_type=self.obs_state_type,
+                             explicit_transfer_op=self.explicit_transfer_op)
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, **kwargs):
         if linear_decoder:

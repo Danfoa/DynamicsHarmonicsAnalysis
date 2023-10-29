@@ -14,11 +14,11 @@ from escnn.nn.modules.basismanager import BlocksBasisExpansion
 from torch import Tensor
 
 from nn.LinearDynamics import DmdSolver, LinearDynamics
-from nn.markov_dynamics import MarkovDynamics
-from utils.linear_algebra import full_rank_lstsq, full_rank_lstsq_symmetric, represent_linear_map_in_basis
+from utils.linear_algebra import full_rank_lstsq_symmetric, represent_linear_map_in_basis
 from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
+
 
 class EquivLinearDynamics(LinearDynamics):
 
@@ -43,7 +43,8 @@ class EquivLinearDynamics(LinearDynamics):
 
         ordered_irreps = [id for iso_rep in self.state_iso_reps.values() for id in iso_rep.irreps]
         self.state_type = state_type
-        if ordered_irreps == state_type.irreps and np.allclose(self.state_rep.change_of_basis, np.eye(self.state_rep.size)):
+        if ordered_irreps == state_type.irreps and np.allclose(self.state_rep.change_of_basis,
+                                                               np.eye(self.state_rep.size)):
             self.state_type_iso = state_type
             Q_iso2state = Q_state2iso = None
         else:
@@ -100,13 +101,19 @@ class EquivLinearDynamics(LinearDynamics):
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 
-    def pre_process_state(self, state: Tensor, next_state: Optional[Tensor] = None) -> GeometricTensor:
+    def pre_process_state(self,
+                          state: Union[Tensor, GeometricTensor],
+                          next_state: Optional[Union[Tensor, GeometricTensor]] = None) -> GeometricTensor:
         # Change basis to Isotypic basis.
-        state_trajectory_iso_basis = super().pre_process_state(state=state, next_state=next_state)
+        if isinstance(state, Tensor):
+            state_trajectory_iso_basis = super().pre_process_state(state=state, next_state=next_state)
+        else:
+            state_trajectory_iso_basis = super().pre_process_state(
+                state=state.tensor, next_state=next_state.tensor if next_state is not None else None)
         # Convert to Geometric Tensor
         return self.state_type_iso(state_trajectory_iso_basis)
 
-    def post_process_state(self, state_traj: Union[GeometricTensor]) -> Tensor:
+    def post_process_state(self, state_traj: GeometricTensor) -> Tensor:
         # Change back from Isotypic basis to original basis. Return Tensor instead of Geometric Tensor
         state_traj_input_basis = super().post_process_state(
             state_traj=state_traj.tensor if isinstance(state_traj, GeometricTensor) else state_traj)
@@ -136,7 +143,7 @@ class EquivLinearDynamics(LinearDynamics):
             next_state_iso = next_state[..., self.state_iso_dims[irrep_id]]
 
             # Generate the data matrices of x(w_t) and x(w_t+1)
-            X_iso = state_iso.T             # (iso_state_dim, num_samples)
+            X_iso = state_iso.T  # (iso_state_dim, num_samples)
             X_iso_prime = next_state_iso.T  # (iso_state_dim, num_samples)
 
             # Compute the empirical transfer operator of this Observable Isotypic subspace
@@ -235,6 +242,10 @@ class EquivLinearDynamics(LinearDynamics):
                 f"Eigenvalues with real part different from 1: {eigvals_real}"
             assert np.allclose(eigvals_imag, np.zeros_like(eigvals_imag), rtol=1e-4, atol=1e-4), \
                 f"Eigenvalues with imaginary part: {eigvals_imag}"
+            
+            if self.bias and self.transfer_op.bias is not None:  # Set the bias to zero
+                self.transfer_op.bias.data = torch.zeros_like(self.transfer_op.bias.data)
+
         elif init_mode == "isotypic_identity":
             # Incredibly shady hack in order to set the identity operator between all irreps of the same type.
             block_coeff = []
@@ -286,9 +297,13 @@ class EquivLinearDynamics(LinearDynamics):
 
 
 if __name__ == "__main__":
-
     G = escnn.group.DihedralGroup(4)
     rep = G.representations["regular"]
-    test_equiv_lin = EquivLinearDynamics(state_rep=rep,
-                                         dt=1,
-                                         trainable=True),
+    test_equiv_lin = EquivLinearDynamics(state_rep=rep, dt=1, trainable=True)
+
+
+
+
+
+
+
