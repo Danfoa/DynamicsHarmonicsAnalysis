@@ -30,6 +30,7 @@ def compute_correlation_score(cov_x, cov_y, cov_xy):
     traces = M.diagonal(offset=0, dim1=-1, dim2=-2).sum(dim=-1)
     return traces
 
+
 def compute_spectral_score(cov_x, cov_y, cov_xy):
     """ Computes the spectral score of the covariance matrices. This is a looser bound on the correlation score, but a
     more numerically stable metric, since it avoids computing the inverse of the covariance matrices.
@@ -488,7 +489,7 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
 
     # Compute the Chapman-Kolmogorov regularization scores for all possible step transitions. In return, we get:
     # ck_regularization[i,j] = || Cov(i, j) - ( Cov(i, i+1), ... Cov(j-1, j) ) ||_2  | j >= i + 2
-    ck_regularization = chapman_kolmogorov_regularization(CCov=CCov, #Cov=Cov, Cov_prime=Cov_prime,
+    ck_regularization = chapman_kolmogorov_regularization(CCov=CCov,  # Cov=Cov, Cov_prime=Cov_prime,
                                                           ck_window_length=max_ck_window_length,
                                                           debug=debug)
 
@@ -499,6 +500,78 @@ def obs_state_space_metrics(obs_state_traj: Tensor,
                 cov_cond_num=cond_num_Cov,
                 # projection_score_t=torch.nanmean(projection_score_t, dim=0, keepdim=True),  # (batch, time)
                 # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)       # (batch, time)
+                )
+
+def iso_metrics_2_obs_space_metrics(iso_spaces_metrics: dict, obs_iso_reps: dict) -> dict:
+    """ Compute the observable space metrics from the isotypic subspace metrics.
+
+    This function exploits the fact that the Hilbert-Schmidt (HS) norm of an operator (or the Frobenious norm
+    of a matrix) that is block-diagonal is defined as the square root of the sum of the squared norms of the blocks:
+     ||A||_HS = sqrt(||A_o||_HS^2 + ... + ||A_i||_HS^2)  | A := block_diag(A_o, ..., A_i).
+    Thus, we have that the projection score defined as:
+     P_score = ||CovX^-1/2 CovXY CovY^-1/2||_HS, can be decomposed into the projection score of the Iso spaces
+             = sqrt(sum_iso(||Cov_iso(X)^-1/2 Cov_iso(XY) Cov_iso(Y)^-1/2||_HS))
+    Likewise for the orthogonal and the Chapman-Kolmogorov (Markovian) regularization terms.
+    Args:
+        iso_spaces_metrics:
+    Returns:
+        Dictionary containing:
+        - spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps
+        separated
+         apart by a shift of `dt` [steps/time]. That is:
+            spectral_score[dt - 1] = avg(||Cov(x_i, x'_i+dt)||_HS^2/(||Cov(x_i, x_i)||_2*||Cov(x'_i+dt,
+            x'_i+dt)||_2))
+             | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+        - corr_score: (time_horizon - 1) Tensor containing the correlation scores between time steps separated
+         apart by a shift of `dt` [steps/time]. That is:
+            corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
+             | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
+        - orth_reg: (time_horizon) Tensor containing the orthonormality regularization term for each time step.
+         That is: orth_reg[t] = || Cov(t,t) - I ||_2
+        - ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
+            ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
+            ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
+        TODO:
+            - cov_cond_num: (float) Average condition number of the Covariance matrix of the entire observation
+            space.
+    """
+
+    # Compute the entire obs space Orthonormal regularization terms for all time horizon.
+    # orth_reg[t] = ||Cov(t, t) - I_obs ||_Fro = sqrt(sum_iso(||Cov_iso(t, t) - I_iso ||^2_Fro))
+    iso_orth_reg = torch.vstack(
+        [iso_spaces_metrics[irrep_id]['orth_reg'] for irrep_id in obs_iso_reps.keys()])
+    obs_space_orth_reg = torch.sqrt(torch.sum(iso_orth_reg ** 2, dim=0))
+
+    # Compute the entire obs space CK regularization terms.
+    # ck_reg[t, t+d] = ||Cov(t, t+d) - (Cov(t, t+1)...Cov(t+d-1, t+d))||_Fro
+    #                = sqrt(sum_iso(||Cov_iso(t, t+d) - (Cov_iso(t, t+1)...Cov_iso(t+d-1, t+d))||^2_Fro))
+    iso_ck_reg = torch.stack(
+        [iso_spaces_metrics[irrep_id]['ck_reg'] for irrep_id in obs_iso_reps.keys()], dim=0)
+    obs_space_ck_reg = torch.sqrt(torch.sum(iso_ck_reg ** 2, dim=0))
+
+    # Compute the Correlation/Projection score
+    # P_score[t, t+d] = ||Cov(t)^-1/2 Cov[t, t+d] Cov(t+d)^-1/2||_HS^2
+    #                 = sum_iso ||Cov_iso(t)^-1/2 Cov_iso(t, t+d) Cov_iso(t+d)^-1/2||_HS^2)
+    #                 = sum_iso (P_score_iso[t, t+d])
+    iso_corr_score = torch.stack(
+        [iso_spaces_metrics[irrep_id]['corr_score'] for irrep_id in obs_iso_reps.keys()], dim=0)
+    obs_space_corr_score = torch.sum(iso_corr_score, dim=0)
+
+    # Compute the Spectral scores for the entire obs-space
+    # S_score[t, t+d] = ||Cov(t, t+d)||_HS / (||Cov(t)||_HS ||Cov(t+d)||_HS)
+    #                 <= ||Cov(t)^-1/2 Cov(t,t+d) Cov(t+d)^-1/2||_HS
+    #                 <= sum_iso((||Cov_iso(X,Y)||_HS / (||Cov_iso(X)||_HS ||Cov_iso(Y)||_HS)^2))
+    #                 <= sum_iso(S_score_iso[t, t+d])
+    iso_S_score = torch.stack(
+        [iso_spaces_metrics[irrep_id]['spectral_score'] for irrep_id in obs_iso_reps.keys()], dim=0)
+    obs_space_S_score = torch.sum(iso_S_score, dim=0)
+
+    return dict(orth_reg=obs_space_orth_reg,
+                ck_reg=obs_space_ck_reg,
+                spectral_score=obs_space_S_score,
+                corr_score=obs_space_corr_score,
+                # corr_score_t=torch.nanmean(corr_score_t, dim=0, keepdim=True),  # (batch, time)
+                # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)  # (batch, time)
                 )
 
 
@@ -521,7 +594,7 @@ def batch_matrix_sqrt_inv(C, epsilon=None, debug=False):
     dim = C.shape[-1]
     # Perform batched eigenvalue decomposition
     eigenvalues, Q = torch.linalg.eigh(C)  # C = Q @ Lambda @ Q^T
-    cond_num = eigenvalues[:, -1] / eigenvalues[:, 0]
+    cond_num = torch.abs(eigenvalues[:, -1] / eigenvalues[:, 0])
     if epsilon is None:
         epsilon = torch.finfo(eigenvalues.dtype).eps
 
@@ -531,8 +604,9 @@ def batch_matrix_sqrt_inv(C, epsilon=None, debug=False):
     C_inv_sqrt = Q @ torch.diag_embed(Lambda_inv_sqrt) @ Q.mT
 
     # Determine if some matrices are defective.
-    max_eigvals = eigenvalues[:, -1]
-    relevant_eigvals_mask = eigenvalues > (max_eigvals * epsilon).unsqueeze(-1)
+    max_eigval = eigenvalues[:, -1]
+    min_eigval = eigenvalues[:, 0]
+    relevant_eigvals_mask = eigenvalues > (max_eigval * epsilon).unsqueeze(-1)
     ranks = relevant_eigvals_mask.sum(dim=-1)
     defective_mask = ranks < dim
     # Recompute defective matrix inversion and sqrt by ignoring defective eigenvalues and eigenvectors
@@ -540,9 +614,9 @@ def batch_matrix_sqrt_inv(C, epsilon=None, debug=False):
         # Eigvals are sorted in ascending order, so we can just remove the first `dim-rank` dimensions.
         unique_def_ranks = torch.unique(ranks[defective_mask])
         for rank in unique_def_ranks:
-            matrix_mask = defective_mask & (ranks == rank)    # Select defective matrices of rank `rank`
-            Q_low_rank = Q[matrix_mask, :, -rank:]            # Select the last `rank` eigenvectors
-            eig_low_rank = eigenvalues[matrix_mask, -rank:]   # Select the last `rank` eigenvalues
+            matrix_mask = defective_mask & (ranks == rank)  # Select defective matrices of rank `rank`
+            Q_low_rank = Q[matrix_mask, :, -rank:]  # Select the last `rank` eigenvectors
+            eig_low_rank = eigenvalues[matrix_mask, -rank:]  # Select the last `rank` eigenvalues
             Lambda_inv_sqrt_low_rank = 1.0 / torch.sqrt(eig_low_rank)
             C_inv_sqrt[matrix_mask] = Q_low_rank @ torch.diag_embed(Lambda_inv_sqrt_low_rank) @ Q_low_rank.mT
 

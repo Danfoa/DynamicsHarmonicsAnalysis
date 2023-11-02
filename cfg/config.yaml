@@ -13,10 +13,9 @@ device: 0
 num_workers: 0           # Dataloader workers
 debug: False
 debug_loops: False
-max_epochs: 150
 
 # Markov Dynamics Model
-model: dpnet
+model: dae
 # Dynamical system
 system: linear_system
 
@@ -28,8 +27,6 @@ hydra:
     n_jobs: 1 # ${hydra.sweeper.n_jobs}
   run:
     dir: ./experiments/${hydra.job.name}/${system.summary}_${model.summary}_${hydra.job.override_dirname}
-
-
   job:
     # TODO: Reorganize output dir
     name: ${exp_name}
@@ -49,6 +46,7 @@ hydra:
           - exp_name
           - model.max_epochs     # Metrics included in model.summary
           - model.dynamic_regime
+          - model.obs_pred_w
           - model.orth_w
           - model.ck_w
           - model.equivariant
@@ -62,7 +60,7 @@ hydra:
           - model.explicit_transfer_op
           - model.use_spectral_score
           - system.state_dim     # Metrics included in system.summary
-          - system.obs_state_dim
+          - system.obs_state_ratio
           - system.frames_per_state
           - system.pred_horizon
           - system.eval_pred_horizon

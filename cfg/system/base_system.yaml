@@ -1,9 +1,11 @@
 
 
 name: ??
-state_dim: ?? # State dimension
-obs_state_dim: ??   # Observation dimension
+state_dim: ??           # State dimension
+obs_state_ratio: ??     # Ratio between dim of observation space and state space dimension. obs_state_dim = obs_state_ratio * state_dim
 
 frames_per_state: 1        # Number of time-frames to use as a Markov Process state time step
 pred_horizon: 1            # Number (or percentage) of Markov Process state time steps to predict into the future
 eval_pred_horizon: .5      # Number (or percentage) of Markov Process state time steps to predict into the future
+
+train_ratio: 1.0           # Percentage of the training dataset used for training the models

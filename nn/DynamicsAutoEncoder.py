@@ -1,5 +1,7 @@
 import logging
 from typing import Optional, Tuple, Union
+
+import math
 import torch
 from morpho_symm.nn.MLP import MLP
 from plotly.graph_objs import Figure
@@ -77,7 +79,7 @@ class DAE(LatentMarkovDynamics):
 
         obs_state = self.obs_fn(state)
 
-        pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state, n_steps=n_steps)
+        pred_obs_state_traj = self.obs_space_dynamics.forcast(state=obs_state, n_steps=n_steps)
 
         pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
 
@@ -96,6 +98,7 @@ class DAE(LatentMarkovDynamics):
                                  pred_obs_state_traj: Tensor,
                                  pred_obs_state_one_step: Tensor,
                                  ) -> (Tensor, dict[str, Tensor]):
+
         _, forecast_metrics = super(DAE, self).compute_loss_and_metrics(
             state=state,
             next_state=next_state,
@@ -104,32 +107,43 @@ class DAE(LatentMarkovDynamics):
             obs_state_traj=obs_state_traj,
             pred_obs_state_traj=pred_obs_state_traj, )
 
-        time_horizon = pred_state_traj.shape[1]
-        obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
-                                                    obs_state_traj_aux=pred_obs_state_one_step,
-                                                    max_ck_window_length=time_horizon - 1)
+        obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, pred_obs_state_one_step)
 
         loss = self.compute_loss(state_rec_loss=forecast_metrics['state_rec_loss'],
+                                 state_pred_loss=forecast_metrics['state_pred_loss'],
                                  obs_pred_loss=forecast_metrics['obs_pred_loss'],
-                                 orth_reg=obs_space_metrics["orth_reg"],
-                                 spectral_score=obs_space_metrics["spectral_score"],
-                                 corr_score=obs_space_metrics["corr_score"])
+                                 orth_reg=obs_space_metrics["orth_reg"])
 
         metrics = dict(**forecast_metrics, **obs_space_metrics)
         return loss, metrics
 
-    def compute_loss(self,
-                     state_rec_loss: Tensor, obs_pred_loss: Tensor,
-                     orth_reg: Tensor, spectral_score: Tensor, corr_score: Tensor):
-        # transfer_op_inv_score = spectral_score if self.use_spectral_score else corr_score
-        transfer_op_inv_score = corr_score
-        transfer_op_inv_score = torch.mean(transfer_op_inv_score)  # / self.obs_state_dim
+    def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None) -> dict:
+        if obs_state_traj_aux is None and self.explicit_transfer_op:
+            raise ValueError("aux_obs_space is True but obs_state_traj_aux is None")
+        # Compute Covariance and Cross-Covariance operators for the observation state space.
+        # Spectral and Projection scores, and CK loss terms.
+        time_horizon = obs_state_traj.shape[1]
+        obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
+                                                    obs_state_traj_aux=obs_state_traj_aux,
+                                                    max_ck_window_length=time_horizon - 1)
+        return obs_space_metrics
 
-        state_loss = torch.mean(state_rec_loss)
-        obs_loss = (self.obs_pred_w * self.obs_state_dim) * torch.mean(obs_pred_loss)
-        orth_regularization = (self.orth_w * self.obs_state_dim) * torch.mean(orth_reg)
-        corr_score = (self.corr_w * self.obs_state_dim) * transfer_op_inv_score
-        return state_loss + obs_loss + orth_regularization + corr_score
+    def compute_loss(self,
+                     state_rec_loss: Tensor,
+                     state_pred_loss: Tensor,
+                     obs_pred_loss: Tensor,
+                     orth_reg: Tensor):
+
+        state_loss = state_rec_loss + state_pred_loss
+
+        # Set the weight of the observation prediction loss to be proportional to the state dimension
+        obs_dim_state_dim_ratio = math.sqrt(self.obs_state_dim / self.state_dim)
+
+        obs_pred_loss = (self.obs_pred_w * obs_dim_state_dim_ratio) * torch.mean(obs_pred_loss)
+
+        orth_regularization = (self.orth_w * obs_dim_state_dim_ratio) * torch.mean(orth_reg)
+
+        return state_loss + obs_pred_loss + orth_regularization
 
     def build_obs_fn(self, num_layers, **kwargs):
         return MLP(in_dim=self.state_dim, out_dim=self.obs_state_dim, num_layers=num_layers, **kwargs)

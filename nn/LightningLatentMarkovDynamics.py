@@ -128,6 +128,7 @@ class LightLatentMarkovDynamics(LightningModule):
         if self.val_metrics_fn is not None:
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.train_dataloader(), suffix="train")
             self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.val_dataloader(), suffix="val")
+            self.compute_figure_metrics(self.val_metrics_fn, self.trainer.datamodule.test_dataloader(), suffix="test")
 
     def on_train_end(self) -> None:
         ckpt_call = self.trainer.checkpoint_callback

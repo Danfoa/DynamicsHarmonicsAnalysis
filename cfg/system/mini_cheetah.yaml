@@ -2,8 +2,10 @@ defaults:
   - base_system
 
 name: 'mini_cheetah'
+max_epochs: 100
+early_stop_epochs: 20
 
-obs_state_dim: 32             # Dimension of the system's observable state
+obs_state_ratio: 3                             # obs_state_dim = obs_state_ratio * state_dim
 
 state_obs: ['q']
 action_obs: []
@@ -11,11 +13,11 @@ action_obs: []
 # dt = 0.0012 s   this is the average delta time between observations.
 frames_per_state: 1                                 # Number of time-frames to use as a Markov Process state time step
 pred_horizon: 10                                    # Number (or percentage) of Markov Process state time steps to predict into the future
-eval_pred_horizon: ${system.pred_horizon}           # Number (or percentage) of Markov Process state time steps to predict into the future
+eval_pred_horizon: 20                               # Number (or percentage) of Markov Process state time steps to predict into the future
 test_pred_horizon: 200
 
 dynamic_mode: grass
 
 data_path: '${system.name}/recordings/${system.dynamic_mode}'
 
-summary: S:${system.dynamic_mode}-OS:${system.obs_state_dim}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}
+summary: S:${system.dynamic_mode}-OS:${system.obs_state_ratio}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}

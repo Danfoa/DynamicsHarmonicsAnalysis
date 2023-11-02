@@ -6,10 +6,6 @@ name: DPNet
 # Symmetry exploitation parameters
 equivariant: False
 
-# Model hyperparameters
-batch_norm: True
-bias: False
-
 # Optimization hyperparameters parameters
 lr: 1e-3
 

@@ -41,7 +41,7 @@ class LatentMarkovDynamics(MarkovDynamics):
         self.obs_state_rep = obs_state_rep
         self.obs_fn = obs_fn
         self.inv_obs_fn = inv_obs_fn
-        self.obs_state_dynamics = obs_state_dynamics
+        self.obs_space_dynamics = obs_state_dynamics
 
     def forward(self, state: Tensor, next_state: Optional[Tensor]) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
@@ -79,21 +79,26 @@ class LatentMarkovDynamics(MarkovDynamics):
         # Extract the observable state trajectory
         assert 'obs_state_traj' in pre_obs_fn_output, f"Missing 'obs_state_traj' in {pre_obs_fn_output}"
         obs_state_traj = pre_obs_fn_output.pop('obs_state_traj')
+
         # Evolution of observable states ===============================================
-        # Feed the pre-processed observable state trajectory to the observable state dynamics
-        # pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state_traj[:, 0, :], n_steps=pred_horizon)
-        obs_dyn_output = self.obs_state_dynamics(state=obs_state_traj[:, 0, :],
+        # Evolve the observable state with the current observable dynamics model.
+        obs_dyn_output = self.obs_space_dynamics(state=obs_state_traj[:, 0, :],
                                                  next_state=obs_state_traj[:, 1:, :],
                                                  **pre_obs_fn_output)
         obs_dyn_output = {k.replace('state', 'obs_state'): v for k, v in obs_dyn_output.items()}
         pred_obs_state_traj = obs_dyn_output.pop('pred_obs_state_traj')
+
         # Observation function inversion ===============================================
-        # Compute the prediction of the state trajectory
         # This post-processing of observables ensures the input to the inverse function is of the correct shape.
+        # Predicted trajectory of observable state in observable space
         post_pred_obs_dyn_output = self.post_process_obs_state(pred_obs_state_traj)
-        post_obs_dyn_output = self.post_process_obs_state(obs_state_traj)
+        # Predicted trajectory of the state of the system in the original state space
         pred_state_traj = self.inv_obs_fn(post_pred_obs_dyn_output.pop('obs_state_traj'))
+        # Ground-truth trajectory of observable state in observable space
+        post_obs_dyn_output = self.post_process_obs_state(obs_state_traj)
+        # Reconstruction of the state of the system in the original state space
         rec_state_traj = self.inv_obs_fn(post_obs_dyn_output.pop('obs_state_traj'))
+
         # Apply the required post-processing of the state.
         pred_state_traj = self.post_process_state(pred_state_traj)
         rec_state_traj = self.post_process_state(rec_state_traj)
@@ -157,15 +162,19 @@ class LatentMarkovDynamics(MarkovDynamics):
 
         obs_pred_loss, obs_pred_metrics = forecasting_loss_and_metrics(
             gt=obs_state_traj, pred=pred_obs_state_traj, prefix='obs_pred')
+
         state_pred_loss, state_pred_metrics = forecasting_loss_and_metrics(
             gt=state_traj, pred=pred_state_traj, prefix='state_pred')
+
         state_rec_loss, state_rec_metrics = forecasting_loss_and_metrics(
             gt=state_traj, pred=rec_state_traj, prefix='state_rec')
 
         metrics = dict(obs_pred_loss=obs_pred_loss,
                        state_rec_loss=state_rec_loss,
                        state_pred_loss=state_pred_loss,
-                       **obs_pred_metrics, **state_pred_metrics, **state_rec_metrics)
+                       **obs_pred_metrics,
+                       **state_pred_metrics,
+                       **state_rec_metrics)
 
         return state_pred_loss, metrics
 
@@ -239,8 +248,8 @@ class LatentMarkovDynamics(MarkovDynamics):
         if hasattr(self.inv_obs_fn, 'get_hparams'):
             inv_obs_fn_params = self.inv_obs_fn.get_hparams()
             hparams['inv_obs_fn'] = inv_obs_fn_params
-        if hasattr(self.obs_state_dynamics, 'get_hparams'):
-            obs_state_dyn_params = self.obs_state_dynamics.get_hparams()
+        if hasattr(self.obs_space_dynamics, 'get_hparams'):
+            obs_state_dyn_params = self.obs_space_dynamics.get_hparams()
             hparams['obs_state_dynamics'] = obs_state_dyn_params
         hparams['state_dim'] = self.state_dim
         hparams['obs_state_dim'] = self.obs_state_dim
@@ -248,6 +257,9 @@ class LatentMarkovDynamics(MarkovDynamics):
         return hparams
 
     def __repr__(self):
-        str = super().__repr__()
+        try:
+            str = super().__repr__()
+        except:
+            str = ""
         return (f"{str} \n {self.__class__.__name__}(state_dim={self.state_dim} "
                 f"obs_state_dim={self.obs_state_dim}, dt={self.dt:.1e})")

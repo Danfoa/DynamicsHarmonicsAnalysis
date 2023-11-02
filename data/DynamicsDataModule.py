@@ -27,6 +27,7 @@ class DynamicsDataModule(LightningDataModule):
                  pred_horizon: Union[int, float] = 0.25,
                  eval_pred_horizon: Union[int, float] = 0.5,
                  test_pred_horizon: Union[int, float] = 0.5,
+                 train_ratio: float = 1.0,
                  system_cfg: Optional[dict] = None,
                  batch_size: int = 256,
                  frames_per_step: int = 1,
@@ -42,6 +43,7 @@ class DynamicsDataModule(LightningDataModule):
         self._data_path = data_path
         self.system_cfg = system_cfg if system_cfg is not None else {}
         self.noise_level = self.system_cfg.get('noise_level', None)
+        self.train_ratio = train_ratio
         self.augment = augment
         self.frames_per_step = frames_per_step
         if isinstance(pred_horizon, float):
@@ -63,20 +65,14 @@ class DynamicsDataModule(LightningDataModule):
         self.symm_group = None
         self.measurements_reps = {}
         self.gspace = None
-        self.state_field_type, self.action_field_type = None, None
+        self.state_type, self.action_field_type = None, None
         self.device = device
         self.train_dataset, self.val_dataset, self.test_dataset = None, None, None
 
     def prepare_data(self):
 
         if self.prepared:
-            self.train_dataset = self.train_dataset.shuffle(
-                buffer_size=min(self.train_dataset.dataset_size // 4, 5000))
-            self._train_dataloader = DataLoader(dataset=self.train_dataset, batch_size=self.batch_size,
-                                                num_workers=self.num_workers,
-                                                persistent_workers=True if self.num_workers > 0 else False,
-                                                collate_fn=self.data_augmentation_collate_fn if self.augment else
-                                                self.collate_fn)
+            self.train_dataset = self.train_dataset.shuffle(buffer_size=self.train_dataset.dataset_size // 4)
             log.info(f"Train dataset reshuffled")
             return
 
@@ -84,10 +80,13 @@ class DynamicsDataModule(LightningDataModule):
         log.info(f"Preparing datasets {self._data_path}")
 
         dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
+        log.info(f"Found recordings \n {dyn_sys_data}")
         if self.noise_level is not None:
             system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
         else:
             system_data_path = dyn_sys_data
+
+        log.info(f"Loading recordings {system_data_path}")
 
         if len(system_data_path) > 1:
             raise RuntimeError(f"Multiple potential paths {system_data_path} found")
@@ -165,7 +164,7 @@ class DynamicsDataModule(LightningDataModule):
         # Use as default no basis space # TODO make more flexible
         self.gspace = escnn.gspaces.no_base_space(self.symm_group)
         # Define the state field type
-        self.state_field_type = FieldType(self.gspace, representations=state_reps)
+        self.state_type = FieldType(self.gspace, representations=state_reps)
         # Define the action field type
         self.action_field_type = None
         if len(self.action_obs) > 0:
@@ -238,7 +237,7 @@ class DynamicsDataModule(LightningDataModule):
         if g == self.symm_group.identity:  # Avoid the computational overhead of applying the identity
             return batch
 
-        rep_state = self.state_field_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
+        rep_state = self.state_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
         # Use einsum notation to apply the tensor operations required. Here o=state_dim is the output dimension,
         # s=state_dim is the input dimension, b=batch_size, t=horizon, ... = arbitrary dimensions
         g_state = torch.einsum("os,bs...->bo...", rep_state, state)

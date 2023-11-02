@@ -24,7 +24,8 @@ from nn.EquivLinearDynamics import EquivLinearDynamics
 from nn.ObservableNet import ObservableNet
 from morpho_symm.nn.EMLP import EMLP
 from nn.markov_dynamics import MarkovDynamics
-from utils.losses_and_metrics import forecasting_loss_and_metrics, obs_state_space_metrics
+from utils.losses_and_metrics import (forecasting_loss_and_metrics, iso_metrics_2_obs_space_metrics,
+                                      obs_state_space_metrics)
 from utils.mysc import traj_from_states
 from utils.linear_algebra import full_rank_lstsq_symmetric
 from utils.representation_theory import isotypic_basis
@@ -137,81 +138,10 @@ class EquivDPNet(DPNet):
 
         # Now use the metrics of each Isotypic observable subspace to compute the loss and metrics of the entire
         # observable space.
-        obs_space_metrics = self.iso_metrics_2_obs_space_metrics(iso_spaces_metrics=iso_spaces_metrics)
+        obs_space_metrics = iso_metrics_2_obs_space_metrics(iso_spaces_metrics=iso_spaces_metrics,
+                                                            obs_iso_reps=self.obs_iso_reps)
 
         return obs_space_metrics
-
-    def iso_metrics_2_obs_space_metrics(self, iso_spaces_metrics: dict) -> dict:
-        """ Compute the observable space metrics from the isotypic subspace metrics.
-
-        This function exploits the fact that the Hilbert-Schmidt (HS) norm of an operator (or the Frobenious norm
-        of a matrix) that is block-diagonal is defined as the square root of the sum of the squared norms of the blocks:
-         ||A||_HS = sqrt(||A_o||_HS^2 + ... + ||A_i||_HS^2)  | A := block_diag(A_o, ..., A_i).
-        Thus, we have that the projection score defined as:
-         P_score = ||CovX^-1/2 CovXY CovY^-1/2||_HS, can be decomposed into the projection score of the Iso spaces
-                 = sqrt(sum_iso(||Cov_iso(X)^-1/2 Cov_iso(XY) Cov_iso(Y)^-1/2||_HS))
-        Likewise for the orthogonal and the Chapman-Kolmogorov (Markovian) regularization terms.
-        Args:
-            iso_spaces_metrics:
-        Returns:
-            Dictionary containing:
-            - spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps
-            separated
-             apart by a shift of `dt` [steps/time]. That is:
-                spectral_score[dt - 1] = avg(||Cov(x_i, x'_i+dt)||_HS^2/(||Cov(x_i, x_i)||_2*||Cov(x'_i+dt,
-                x'_i+dt)||_2))
-                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
-            - corr_score: (time_horizon - 1) Tensor containing the correlation scores between time steps separated
-             apart by a shift of `dt` [steps/time]. That is:
-                corr_score[dt - 1] = avg(||Cov(x_i, x_i)^-1 Cov(x_i, x'_i+dt) Cov(x'_i+dt, x'_i+dt)^-1||_HS^2)
-                 | ∀ i in [0, time_horizon - dt], dt in [1, min(time_horizon - i, window_size)]
-            - orth_reg: (time_horizon) Tensor containing the orthonormality regularization term for each time step.
-             That is: orth_reg[t] = || Cov(t,t) - I ||_2
-            - ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
-                ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
-                ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
-            TODO:
-                - cov_cond_num: (float) Average condition number of the Covariance matrix of the entire observation
-                space.
-        """
-
-        # Compute the entire obs space Orthonormal regularization terms for all time horizon.
-        # orth_reg[t] = ||Cov(t, t) - I_obs ||_Fro = sqrt(sum_iso(||Cov_iso(t, t) - I_iso ||^2_Fro))
-        iso_orth_reg = torch.vstack(
-            [iso_spaces_metrics[irrep_id]['orth_reg'] for irrep_id in self.obs_iso_reps.keys()])
-        obs_space_orth_reg = torch.sqrt(torch.sum(iso_orth_reg ** 2, dim=0))
-
-        # Compute the entire obs space CK regularization terms.
-        # ck_reg[t, t+d] = ||Cov(t, t+d) - (Cov(t, t+1)...Cov(t+d-1, t+d))||_Fro
-        #                = sqrt(sum_iso(||Cov_iso(t, t+d) - (Cov_iso(t, t+1)...Cov_iso(t+d-1, t+d))||^2_Fro))
-        iso_ck_reg = torch.stack(
-            [iso_spaces_metrics[irrep_id]['ck_reg'] for irrep_id in self.obs_iso_reps.keys()], dim=0)
-        obs_space_ck_reg = torch.sqrt(torch.sum(iso_ck_reg ** 2, dim=0))
-
-        # Compute the Correlation/Projection score
-        # P_score[t, t+d] = ||Cov(t)^-1/2 Cov[t, t+d] Cov(t+d)^-1/2||_HS^2
-        #                 = sum_iso ||Cov_iso(t)^-1/2 Cov_iso(t, t+d) Cov_iso(t+d)^-1/2||_HS^2)
-        #                 = sum_iso (P_score_iso[t, t+d])
-        iso_corr_score = torch.stack(
-            [iso_spaces_metrics[irrep_id]['corr_score'] for irrep_id in self.obs_iso_reps.keys()], dim=0)
-        obs_space_corr_score = torch.sum(iso_corr_score, dim=0)
-
-        # Compute the Spectral scores for the entire obs-space
-        # S_score[t, t+d] = ||Cov(t, t+d)||_HS / (||Cov(t)||_HS ||Cov(t+d)||_HS)
-        #                 <= ||Cov(t)^-1/2 Cov(t,t+d) Cov(t+d)^-1/2||_HS
-        #                 <= sum_iso((||Cov_iso(X,Y)||_HS / (||Cov_iso(X)||_HS ||Cov_iso(Y)||_HS)^2))
-        #                 <= sum_iso(S_score_iso[t, t+d])
-        iso_S_score = torch.stack(
-            [iso_spaces_metrics[irrep_id]['spectral_score'] for irrep_id in self.obs_iso_reps.keys()], dim=0)
-        obs_space_S_score = torch.sum(iso_S_score, dim=0)
-
-        return dict(orth_reg=obs_space_orth_reg,
-                    ck_reg=obs_space_ck_reg,
-                    spectral_score=obs_space_S_score,
-                    corr_score=obs_space_corr_score,
-                    # corr_score_t=torch.nanmean(corr_score_t, dim=0, keepdim=True),  # (batch, time)
-                    # spectral_score_t=torch.nanmean(spectral_score_t, dim=0, keepdim=True)  # (batch, time)
-                    )
 
     def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
         """ Compute the empirical inverse projector from the observable state to the pre-processed state.
@@ -346,12 +276,12 @@ if __name__ == "__main__":
     dt = data_module.dt
     num_encoder_layers = 4
 
-    state_type = data_module.state_field_type
+    state_type = data_module.state_type
     obs_state_dimension = state_type.size * 1
     num_encoder_hidden_neurons = obs_state_dimension * 2
     max_ck_window_length = pred_horizon
 
-    dp_net = EquivDPNet(state_type=data_module.state_field_type,
+    dp_net = EquivDPNet(state_type=data_module.state_type,
                         obs_state_dim=obs_state_dimension,
                         num_layers=num_encoder_layers,
                         num_hidden_units=num_encoder_hidden_neurons,

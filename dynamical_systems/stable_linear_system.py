@@ -1,11 +1,13 @@
+import itertools
 import shutil
 from pathlib import Path
 from typing import Optional
 
 import escnn
+import morpho_symm.utils.rep_theory_utils
 import numpy as np
 import scipy
-from escnn.group import Representation
+from escnn.group import Representation, directsum
 from tqdm import tqdm
 
 from data.DynamicsRecording import DynamicsRecording
@@ -147,9 +149,10 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
         max_period = 2 * time_constant
 
     state_dim = rep_X.size
-    rep_X, Q_iso = identify_isotypic_spaces(rep_X)
-
-    isotypic_reps = rep_X.attributes['isotypic_reps']
+    rep_X_iso = morpho_symm.utils.rep_theory_utils.isotypic_decomp_representation(rep_X)
+    isotypic_reps = rep_X_iso.attributes['isotypic_reps']
+    rep_X_iso = directsum([iso_rep for iso_rep in rep_X_iso.attributes['isotypic_reps'].values()],
+                          name=rep_X_iso.name)
 
     # Define the linear dynamical system as a function of smaller linear dynamical system each evolving an
     # Isotypic subspace of the observable state space.
@@ -173,12 +176,12 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     # Apply an arbitrary change of basis to the system matrix, to lose the isotypic basis.
     T = random_orthogonal_matrix(state_dim)
     A_G = T @ A_G @ T.T
-    rep_X = Representation(G, irreps=rep_X.irreps, name=rep_X.name, change_of_basis=T @ rep_X.change_of_basis)
+    rep_X_iso = Representation(G, irreps=rep_X_iso.irreps, name=rep_X_iso.name, change_of_basis=T @ rep_X_iso.change_of_basis)
 
     # Test commutativity / G-equivariance
     elements = G.elements if not G.continuous else G.testing_elements(len(G.representations))
     for g in elements:
-        assert np.allclose(rep_X(g) @ A_G, A_G @ rep_X(g)), f"G-equiv err:{np.max((rep_X(g) @ A_G) - (A_G @ rep_X(g)))}"
+        assert np.allclose(rep_X_iso(g) @ A_G, A_G @ rep_X_iso(g)), f"G-equiv err:{np.max((rep_X_iso(g) @ A_G) - (A_G @ rep_X_iso(g)))}"
 
     # Ensure stability
     eigvals = np.linalg.eigvals(A_G)
@@ -193,9 +196,10 @@ def stable_equivariant_lin_dynamics(rep_X: Representation, time_constant=1, min_
     fastest_period = np.min(periods)
     print(f"System has eigenvalues \n {eigvals}")
     print(f"Empirical periods MIN:{np.min(periods)}, MAX:{np.max(periods)}")
-    print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
+    if len(time_constants) > 0:
+        print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
     # print(f"Empirical time constants MIN:{np.min(time_constants)}, MAX:{np.max(time_constants)}")
-    return A_G, rep_X, fastest_period, fastest_time_constant
+    return A_G, rep_X_iso, fastest_period, fastest_time_constant
 
 
 def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim_time: float, noise_std=0.1,
@@ -256,7 +260,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
 
-    order = 5
+    order = 10
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -272,8 +276,11 @@ if __name__ == '__main__':
     G, g_dynamics_2_Gsub_domain, g_domain_2_g_dynamics = G_domain.subgroup(G_id)
 
     # Define the state representation.
-    rep_X = Representation(group=G, name="state", irreps=G.regular_representation.irreps,
-                           change_of_basis=np.eye(G.order()))   # + G.irrep(1)
+    multiplicity = 5
+    irrep = G.irrep(1)
+    for g in G.elements:
+        print(f"{g}: \n{irrep(g)}")
+    rep_X = directsum([irrep] * multiplicity, name="State Space")   # + G.irrep(1)
 
     # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
     state_dim = rep_X.size
@@ -359,6 +366,7 @@ if __name__ == '__main__':
                 obs_representations=dict(state=rep_X),
                 recordings=dict(state=np.asarray(state_trajs[idx], dtype=np.float32)))
 
+            assert data.obs_dims['state'] == state_dim
             path_to_file = path_2_system / f"n_trajs={len(state_trajs[idx])}-{partition}"
 
             data.save_to_file(path_to_file)

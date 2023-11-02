@@ -111,7 +111,7 @@ class DPNet(LatentMarkovDynamics):
 
         obs_state, obs_state_aux = self.obs_fn(preprocessed_state)
 
-        pred_obs_state_traj = self.obs_state_dynamics.forcast(state=obs_state, n_steps=n_steps)
+        pred_obs_state_traj = self.obs_space_dynamics.forcast(state=obs_state, n_steps=n_steps)
 
         pred_state_traj = self.inv_obs_fn(batched_to_flat_trajectory(pred_obs_state_traj))
 
@@ -252,7 +252,7 @@ class DPNet(LatentMarkovDynamics):
         # Generate the data matrices of x(w_t) and x(w_t+1)
         X = obs_state.T  # (obs_state_dim, n_samples)
         X_prime = next_obs_state.T  # (obs_state_dim, n_samples)
-        solution_op_metrics = self.obs_state_dynamics.update_transfer_op(X=X, X_prime=X_prime)
+        solution_op_metrics = self.obs_space_dynamics.update_transfer_op(X=X, X_prime=X_prime)
 
         metrics = solution_op_metrics
         metrics['rank_obs_state'] = torch.linalg.matrix_rank(X).detach().to(torch.float)
