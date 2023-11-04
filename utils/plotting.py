@@ -123,10 +123,21 @@ def plot_system_2D(trajs, secondary_trajs=None, P=None, z_constraint=None, fig=N
     return fig
 
 
-def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint_matrix=None, constraint_offset=None,
+def plot_system_3D(trajectories,
+                   secondary_trajectories=None,
+                   A=None,
+                   constraint_matrix=None,
+                   constraint_offset=None,
                    fig=None, initial_call=False,
-                   flow_field_colorscale='Blues', traj_colorscale='Viridis', num_trajs_to_show=-1,
-                   init_state_color='red', initial_point_radius=3, title='', legendgroup=None):
+                   flow_field_colorscale='Blues',
+                   traj_colorscale='Viridis',
+                   num_trajs_to_show=-1,
+                   init_state_color='red',
+                   initial_point_radius=3,
+                   title='',
+                   legendgroup=None,
+                   col=1,
+                   row=1):
     trajs = np.asarray(trajectories[:num_trajs_to_show])
     assert trajs.shape[-1] == 3, f"Trajectories {trajs.shape} must be 3D"
     if trajs.ndim == 2:  # Add a trajectory index dimension if it is missing
@@ -142,11 +153,10 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
 
     if initial_call:
         if constraint_matrix is not None:
-            for i, row in enumerate(constraint_matrix):
-                if row[2] != 0:  # Ensure z-coefficient isn't zero
-                    z_coord = lambda x, y: (-row[0] * x - row[1] * y + constraint_offset[i]) / row[2] if row[
-                                                                                                             2] != 0 \
-                        else 0
+            for i, constraint_id in enumerate(constraint_matrix):
+                if constraint_id[2] != 0:  # Ensure z-coefficient isn't zero
+                    z_coord = lambda x, y: (-constraint_id[0] * x - constraint_id[1] * y + constraint_offset[i]) / constraint_id[2]
+
                     lower_left_coord = [-bound, -bound, z_coord(-bound, -bound)]
                     lower_right_coord = [bound, -bound, z_coord(bound, -bound)]
                     upper_left_coord = [-bound, bound, z_coord(-bound, bound)]
@@ -154,7 +164,9 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
                     plane_corners = np.array([lower_left_coord, lower_right_coord, upper_right_coord, upper_left_coord])
                     fig.add_trace(go.Mesh3d(x=plane_corners[:, 0],
                                             y=plane_corners[:, 1],
-                                            z=plane_corners[:, 2], opacity=0.2))
+                                            z=plane_corners[:, 2], opacity=0.2),
+                                  # col=col, row=row
+                                  )
 
     # Trajectory plotting (for both initial and subsequent calls)
     for traj_num, traj in enumerate(trajs):
@@ -164,12 +176,16 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
                                    showlegend=traj_num == 0,
                                    name=f'traj{traj_num}' if legendgroup is None else legendgroup,
                                    legendgroup='trajs' if legendgroup is None else legendgroup,
-                                   line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6, )))
+                                   line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6, )),
+                      # col=col, row=row
+                      )
 
         # Initial point with customizable color and radius
         fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers',
                                    showlegend=False, legendgroup='trajs' if legendgroup is None else legendgroup,
-                                   marker=dict(size=initial_point_radius, color=init_state_color)))
+                                   marker=dict(size=initial_point_radius, color=init_state_color)),
+                      # col=col, row=row
+                      )
 
         if secondary_trajectories is not None:
             traj = secondary_trajectories[:num_trajs_to_show][traj_num]
@@ -178,13 +194,17 @@ def plot_system_3D(trajectories, secondary_trajectories=None, A=None, constraint
                                        showlegend=traj_num == 0, name=f'pred{traj_num}',
                                        legendgroup='pred' if legendgroup is None else f"{legendgroup}_pred",
                                        line=dict(color=alpha_scale, colorscale=traj_colorscale, width=6),
-                                       marker=dict(size=initial_point_radius / 2)))
+                                       marker=dict(size=initial_point_radius / 2)),
+                          # col=col, row=row
+                          )
 
             # Initial point with customizable color and radius
             fig.add_trace(go.Scatter3d(x=[traj[0, 0]], y=[traj[0, 1]], z=[traj[0, 2]], mode='markers', showlegend=False,
                                        opacity=0.3,
                                        legendgroup='pred' if legendgroup is None else f"{legendgroup}_pred",
-                                       marker=dict(size=initial_point_radius, color=init_state_color)))
+                                       marker=dict(size=initial_point_radius, color=init_state_color)),
+                          # col=col, row=row
+                          )
 
     # Layout
     # current_bound = fig.layout.scene.xaxis.range[1]

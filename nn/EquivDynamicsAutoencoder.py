@@ -15,7 +15,7 @@ from nn.markov_dynamics import MarkovDynamics
 from morpho_symm.nn.EMLP import EMLP
 from utils.losses_and_metrics import obs_state_space_metrics, iso_metrics_2_obs_space_metrics
 from utils.mysc import batched_to_flat_trajectory
-from utils.representation_theory import isotypic_basis
+from morpho_symm.utils.rep_theory_utils import isotypic_basis
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +57,9 @@ class EquivDAE(DAE):
                              f"obs_dim:{obs_state_dim}")
 
         # Define the observation space representation in the isotypic basis.
-        self.obs_iso_reps, self.obs_iso_dims, _ = isotypic_basis(representation=state_rep,
-                                                                 multiplicity=multiplicity,
-                                                                 prefix='Obs')
+        self.obs_iso_reps, self.obs_iso_dims = isotypic_basis(representation=state_rep,
+                                                              multiplicity=multiplicity,
+                                                              prefix='Obs')
         # Each Field for ESCNN will be an Isotypic Subspace.
         self.state_type = FieldType(self.gspace, [state_rep])
         # Field type on isotypic basis.

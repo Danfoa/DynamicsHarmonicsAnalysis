@@ -28,7 +28,7 @@ from utils.losses_and_metrics import (forecasting_loss_and_metrics, iso_metrics_
                                       obs_state_space_metrics)
 from utils.mysc import traj_from_states
 from utils.linear_algebra import full_rank_lstsq_symmetric
-from utils.representation_theory import isotypic_basis
+from morpho_symm.utils.rep_theory_utils import isotypic_basis
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +67,9 @@ class EquivDPNet(DPNet):
 
         # Find the Isotypic basis of the state space and define the observation space representation as
         # `num_spect_field` copies of state representation (in isotypic basis).
-        self.state_iso_reps, self.state_iso_dims, Q_iso2state = isotypic_basis(representation=state_rep,
-                                                                               multiplicity=1,
-                                                                               prefix='State')
+        self.state_iso_reps, self.state_iso_dims = isotypic_basis(representation=state_rep,
+                                                                  multiplicity=1,
+                                                                  prefix='State')
         # Store the change of basis from original input basis to the isotypic basis of the space.
         if np.allclose(Q_iso2state, np.eye(state_rep.size)):
             Q_iso2state, Q_state2iso = None, None

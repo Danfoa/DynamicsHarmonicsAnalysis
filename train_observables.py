@@ -26,7 +26,7 @@ from utils.mysc import check_if_resume_experiment, class_from_name, format_scien
 log = logging.getLogger(__name__)
 
 
-@hydra.main(config_path='cfg', config_name='config', version_base='1.3')
+@hydra.main(config_path='cfg', config_name='config', version_base='1.1')
 def main(cfg: DictConfig):
     torch.set_float32_matmul_precision('medium')
     log.info("\n\n NEW RUN \n\n")

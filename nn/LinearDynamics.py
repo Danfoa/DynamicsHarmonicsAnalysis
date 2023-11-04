@@ -6,14 +6,10 @@ import escnn
 import numpy as np
 import torch
 from escnn.group import Representation
-from escnn.nn import FieldType, GeometricTensor
 from torch import Tensor
-from torch.nn import Module
 
 from nn.markov_dynamics import MarkovDynamics
-from utils.mysc import random_orthogonal_matrix
 from utils.linear_algebra import full_rank_lstsq
-from utils.representation_theory import identify_isotypic_spaces
 
 log = logging.getLogger(__name__)
 

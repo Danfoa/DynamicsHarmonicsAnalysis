@@ -15,7 +15,6 @@ from torch import Tensor
 
 from nn.LinearDynamics import DmdSolver, LinearDynamics
 from utils.linear_algebra import full_rank_lstsq_symmetric, represent_linear_map_in_basis
-from utils.representation_theory import isotypic_basis
 
 log = logging.getLogger(__name__)
 
