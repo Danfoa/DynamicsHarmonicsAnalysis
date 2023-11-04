@@ -99,6 +99,7 @@ class DynamicsDataModule(LightningDataModule):
         datasets, dynamics_recording = get_dynamics_dataset(train_shards=train_data,
                                                             test_shards=test_data,
                                                             val_shards=val_data,
+                                                            train_ratio=self.train_ratio,
                                                             train_pred_horizon=self.pred_horizon,
                                                             eval_pred_horizon=self.eval_pred_horizon,
                                                             test_pred_horizon=self.test_pred_horizon,

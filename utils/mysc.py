@@ -13,6 +13,17 @@ from itertools import chain, combinations
 
 from torch import Tensor
 
+class TemporaryNumpySeed:
+    def __init__(self, seed):
+        self.seed = seed
+        self.state = None
+
+    def __enter__(self):
+        self.state = np.random.get_state()
+        np.random.seed(self.seed)
+
+    def __exit__(self, *args):
+        np.random.set_state(self.state)
 
 def powerset(iterable):
     "Return the list of all subsets of the input iterable"

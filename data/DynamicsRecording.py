@@ -11,7 +11,7 @@ import numpy as np
 from datasets import Features, IterableDataset
 from escnn.group import Representation, groups_dict
 
-from utils.mysc import compare_dictionaries
+from utils.mysc import TemporaryNumpySeed, compare_dictionaries
 
 log = logging.getLogger(__name__)
 
@@ -217,12 +217,62 @@ def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizo
     log.debug(f"Steps in prediction horizon {int(steps_pred_horizon)}")
     return num_trajs, num_samples
 
+def reduce_dataset_size(recordings: Iterable[DynamicsRecording], train_ratio: float = 1.0):
+    assert 0.0 < train_ratio <= 1.0, f"Invalid train ratio {train_ratio}"
+    if train_ratio == 1.0:
+        return recordings
+    log.info(f"Reducing dataset size to {train_ratio * 100}%")
+    # Ensure all training seeds use the same training data partitions
+    with TemporaryNumpySeed(10):
+        for r in recordings:
+            # Decide to keep a ratio of the original trajectories
+            num_trajs = r.info['num_traj']
+            if num_trajs < 10:  # Do not discard entire trajectories, but rather parts of the trajectories
+                time_horizon = r.recordings[r.state_obs[0]].shape[1]  # Take the time horizon from the first observation
+
+                # Split the trajectory into "virtual" subtrajectories, and discard some of them
+                idx = np.arange(time_horizon)
+                n_partitions = math.ceil((1 / (1 - train_ratio)))
+                n_partitions = n_partitions * 10 if n_partitions < 10 else n_partitions
+                # Ensure partitions of the same time duration
+                partitions_idx = np.split(idx[:-(time_horizon % n_partitions)], indices_or_sections=n_partitions)
+                partition_length = partitions_idx[0].shape[0]
+                n_partitions_to_keep = math.ceil(n_partitions * train_ratio)
+                partitions_to_keep = np.random.choice(range(n_partitions),
+                                                      size=n_partitions_to_keep,
+                                                      replace=False)
+                print(partitions_to_keep)
+                partitions_to_keep = [partitions_idx[i] for i in partitions_to_keep]
+
+                ratio_of_samples_removed = (time_horizon - (len(partitions_to_keep) * partition_length)) / time_horizon
+                assert ratio_of_samples_removed - (1 - train_ratio) < 0.05, \
+                    (f"Requested to remove {(1 - train_ratio) * 100}% of the samples, "
+                     f"but removed {ratio_of_samples_removed * 100}%")
+
+                new_recordings = {}
+                for obs_name, obs in r.recordings.items():
+                    new_obs_trajs = []
+                    for part_time_idx in partitions_to_keep:
+                        new_obs_trajs.append(obs[:, part_time_idx])
+                    new_recordings[obs_name] = np.concatenate(new_obs_trajs, axis=0)
+                r.recordings = new_recordings
+                r.info['num_traj'] = len(partitions_to_keep)
+                r.info['trajectory_length'] = partition_length
+            else:  # Discard entire trajectories
+                # Sample int(num_trajs * train_ratio) trajectories from the original recordings
+                num_trajs_to_keep = math.ceil(num_trajs * train_ratio)
+                idx = range(num_trajs)
+                idx_to_keep = np.random.choice(idx, size=num_trajs_to_keep, replace=False)
+                # Keep only the selected trajectories
+                new_recordings = {k: v[idx_to_keep] for k, v in r.recordings.items()}
+                r.recordings = new_recordings
 
 def get_dynamics_dataset(train_shards: list[Path],
                          test_shards: Optional[list[Path]] = None,
                          val_shards: Optional[list[Path]] = None,
                          num_proc: int = 1,
                          frames_per_step: int = 1,
+                         train_ratio: float = 1.0,
                          train_pred_horizon: Union[int, float] = 1,
                          eval_pred_horizon: Union[int, float] = 10,
                          test_pred_horizon: Union[int, float] = 10,
@@ -260,6 +310,8 @@ def get_dynamics_dataset(train_shards: list[Path],
         recordings = [DynamicsRecording.load_from_file(f, obs_names=relevant_obs) for f in partition_shards]
         if partition == "train":
             pred_horizon = train_pred_horizon
+            if train_ratio < 1.0:
+                reduce_dataset_size(recordings, train_ratio)
         elif partition == "val":
             pred_horizon = eval_pred_horizon
         else:
@@ -275,12 +327,8 @@ def get_dynamics_dataset(train_shards: list[Path],
                                                                  action_obs=tuple(action_obs))
                                                  )
 
-        # for sample in dataset:
         log.debug(f"[Dataset {partition} - Trajs:{num_trajs} - Samples: {num_samples} - "
                   f"Frames per sample : {frames_per_step}]-----------------------------")
-        # log.debug(f"\tstate: {state.shape} = (frames_per_step, state_dim)")
-        # log.debug(f"\tnext_state: {next_state.shape} = (pred_horizon, frames_per_step, state_dim)")
-        # break
 
         dataset.info.dataset_size = num_samples
         dataset.info.dataset_name = f"[{partition}] Linear dynamics"
