@@ -277,9 +277,9 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
-    # path_to_data = Path('/home/danfoa/Projects/koopman_robotics/data/linear_system/group=C10-dim=10/n_constraints=0
-    # /f_time_constant=1.5[s]-frames=200-horizon=8.7[s]/noise_level=0')
+    # path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
+    path_to_data = Path('/home/danfoa/Projects/koopman_robotics/data/linear_system/group=C10-dim=10/n_constraints=0/'
+                        'f_time_constant=1.5[s]-frames=200-horizon=8.7[s]/noise_level=0')
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()

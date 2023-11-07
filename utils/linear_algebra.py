@@ -148,3 +148,13 @@ def full_rank_lstsq(X: Tensor, Y: Tensor, driver='gelsd', bias=True) -> [Tensor,
         assert A_sol.shape == (Y.shape[0], X.shape[0])
         A, B = A_sol, None
         return A.to(dtype=X.dtype, device=X.device), B
+
+
+def matrix_average_trick(
+        A: Union[np.ndarray, torch.Tensor],
+        Bs: Union[list[np.ndarray], list[torch.Tensor]]
+        ) -> Union[np.ndarray, torch.Tensor]:
+    if isinstance(A, np.ndarray):
+        return sum([B @ A @ B.conj().T for B in Bs]) / len(Bs)
+    else:
+        return torch.sum([B @ A @ B.conj().T for B in Bs]) / len(Bs)

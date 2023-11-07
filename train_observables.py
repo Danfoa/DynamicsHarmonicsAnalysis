@@ -96,7 +96,7 @@ def main(cfg: DictConfig):
                           logger=wandb_logger,
                           log_every_n_steps=1,
                           max_epochs=cfg.system.max_epochs if not cfg.debug_loops else 2,
-                          check_val_every_n_epoch=1,
+                          check_val_every_n_epoch=2,
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
                           enable_progress_bar=True,  # cfg.debug_loops or cfg.debug,
@@ -150,6 +150,11 @@ def get_model(cfg, datamodule):
     state_dim = datamodule.state_type.size
     obs_state_dim = math.ceil(cfg.system.obs_state_ratio * state_dim)
     num_hidden_neurons = cfg.model.num_hidden_units
+
+    if obs_state_dim > num_hidden_neurons:
+        # Set num_hidden_neurons to be the closest power of 2 to obs_state_dim from above
+        # For obs_state_dim=210 -> num_hidden_neurons=256
+        num_hidden_neurons = 2 ** math.ceil(math.log2(obs_state_dim))
     # Get the selected model for observation learning _____________________________________________________________
     if cfg.model.equivariant:
         activation = cfg.model.activation

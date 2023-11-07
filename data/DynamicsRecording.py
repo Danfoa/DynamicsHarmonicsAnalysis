@@ -11,6 +11,7 @@ import numpy as np
 from datasets import Features, IterableDataset
 from escnn.group import Representation, groups_dict
 
+from utils.linear_algebra import matrix_average_trick
 from utils.mysc import TemporaryNumpySeed, compare_dictionaries
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,9 @@ class DynamicsRecording:
 
     # Map from observation name to the observation representation name. This name should be in `group_representations`.
     obs_representations: Dict[str, Representation] = field(default_factory=dict)
-
     recordings: Dict[str, Iterable] = field(default_factory=dict)
+    # Map from observation name to the observation moments (mean, var) of the recordings.
+    obs_moments: Dict[str, tuple] = field(default_factory=dict)
 
     def save_to_file(self, file_path: Path):
         # Store representations and groups without serializing
@@ -48,6 +50,111 @@ class DynamicsRecording:
 
         with file_path.with_suffix(".pkl").open('wb') as file:
             pickle.dump(self, file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @property
+    def obs_dims(self):
+        """ Dictionary providing the map between observation name and observation dimension """
+        return {k: v.shape[-1] for k, v in self.recordings.items()}
+
+    def compute_obs_moments(self, obs_name: str) -> [np.ndarray, np.ndarray]:
+        """Compute the mean and standard deviation of observations."""
+        assert obs_name in self.recordings.keys(), f"Observation {obs_name} not found in recordings"
+        is_symmetric_obs = obs_name in self.obs_representations.keys()
+        if is_symmetric_obs:
+            rep_obs = self.obs_representations[obs_name]
+            obs_original_basis = np.asarray(self.recordings[obs_name])
+            G = rep_obs.group
+            # Allocate the mean and variance arrays.
+            mean, var = np.zeros(rep_obs.size), np.ones(rep_obs.size)
+            # Change basis of the observation to expose the irrep G-stable subspaces
+            Q_inv = rep_obs.change_of_basis_inv  # Orthogonal transformation to irrep basis (Q^T = Q^-1)
+            Q = rep_obs.change_of_basis
+            # Get the dimensions of each irrep.
+
+            S = np.zeros((rep_obs.size, rep_obs.size))
+            irreps_dimension = []
+            cum_dim = 0
+            for irrep_id in rep_obs.irreps:
+                irrep = G.irrep(*irrep_id)
+                # Get dimensions of the irrep in the original basis
+                irrep_dims = range(cum_dim, cum_dim + irrep.size)
+                irreps_dimension.append(irrep_dims)
+                if irrep_id == G.trivial_representation.id:
+                    S[irrep_dims, irrep_dims] = 1
+                cum_dim += irrep.size
+
+            # Compute the mean of the observation.
+            # The mean of a symmetric random variable (rv) lives in the subspaces associated with the trivial irreps.
+            has_trivial_irreps = G.trivial_representation.id in rep_obs.irreps
+            if has_trivial_irreps:
+                avg_projector = rep_obs.change_of_basis @ S @ rep_obs.change_of_basis_inv
+                # Compute the mean in a single vectorized operation
+                mean_empirical = np.mean(obs_original_basis, axis=(0, 1))
+                mean = np.einsum('...ij,...j->...i', avg_projector, mean_empirical)
+
+            # Compute the variance of the observable by computing a single variance per irrep G-stable subspace.
+            # To do this, we project the observations to the basis exposing the irreps, compute the variance per
+            # G-stable subspace, and map the variance back to the original basis.
+            centered_obs_irrep_basis = np.einsum('...ij,...j->...i', Q_inv, obs_original_basis - mean)
+            var_irrep_basis = np.ones_like(var)
+            for irrep_id, irrep_dims in zip(rep_obs.irreps, irreps_dimension):
+                irrep = G.irrep(*irrep_id)
+                centered_obs_irrep = centered_obs_irrep_basis[..., irrep_dims]
+                assert centered_obs_irrep.shape[-1] == irrep.size, \
+                    f"Obs irrep shape {centered_obs_irrep.shape} != {irrep.size}"
+
+                # Since the irreps are unitary/orthogonal transformations, we are constrained compute a unique variance
+                # for all dimensions of the irrep G-stable subspace, as scaling the dimensions independently would break
+                # the symmetry of the rv. As a centered rv the variance is the expectation of the squared rv.
+                var_irrep = np.mean(centered_obs_irrep ** 2)  # Single scalar variance per G-stable subspace
+                # Store the irrep mean and variance in the entire representation mean and variance
+                var_irrep_basis[irrep_dims] = var_irrep
+            # Convert the variance from the irrep basis to the original basis
+            Cov = Q @ np.diag(var_irrep_basis) @ Q_inv
+            var = np.diagonal(Cov)
+
+            # # TODO: Move this check to Unit test as it is computationally demanding to check this at runtime.
+            # # Ensure the mean is equivalent to computing the mean of the orbit of the recording under the group action
+            # aug_obs = []
+            # for g in G.elements:
+            #     g_obs = np.einsum('...ij,...j->...i', rep_obs(g), obs_original_basis)
+            #     aug_obs.append(g_obs)
+            #
+            # aug_obs = np.concatenate(aug_obs, axis=0)   # Append over the trajectory dimension
+            # mean_emp = np.mean(aug_obs, axis=(0, 1))
+            # assert np.allclose(mean, mean_emp, rtol=1e-3, atol=1e-3), f"Mean {mean} != {mean_emp}"
+            #
+            # var_emp = np.var(aug_obs, axis=(0, 1))
+            # assert np.allclose(var, var_emp, rtol=1e-2, atol=1e-2), f"Var {var} != {var_emp}"
+        else:
+            mean = np.mean(np.asarray(self.recordings[obs_name]), axis=(0, 1))
+            var = np.var(np.asarray(self.recordings[obs_name]), axis=(0, 1))
+        assert mean.shape == (self.obs_dims[obs_name],), f"mean shape ({mean.shape},)!= ({self.obs_dims[obs_name]},)"
+        assert var.shape == (self.obs_dims[obs_name],), f"var shape ({var.shape},)!= ({self.obs_dims[obs_name]},)"
+
+        self.obs_moments[obs_name] = mean, var
+
+    def state_moments(self) -> [np.ndarray, np.ndarray]:
+        """Compute the mean and standard deviation of the state observations."""
+        mean, var = [], []
+        for obs_name in self.state_obs:
+            if obs_name not in self.obs_moments.keys():
+                self.compute_obs_moments(obs_name)
+            obs_mean, obs_var = self.obs_moments[obs_name]
+            mean.append(obs_mean)
+            var.append(obs_var)
+        mean, var = np.concatenate(mean), np.concatenate(var)
+        return mean, var
+
+    def action_moments(self) -> [np.ndarray, np.ndarray]:
+        """Compute the mean and standard deviation of the action observations."""
+        mean, var = [], []
+        for obs_name in self.action_obs:
+            obs_mean, obs_var = self.obs_moments(obs_name)
+            mean.append(obs_mean)
+            var.append(obs_var)
+        mean, var = np.concatenate(mean), np.concatenate(var)
+        return mean, var
 
     @staticmethod
     def load_from_file(file_path: Path, only_metadata=False, obs_names: Optional[Iterable[str]] = None):
@@ -77,11 +184,6 @@ class DynamicsRecording:
                                                                             irreps=irreps_ids, change_of_basis=rep_Q)
                     group.representations[rep_name] = data.obs_representations[obs_name]
         return data
-
-    @property
-    def obs_dims(self):
-        """ Dictionary providing the map between observation name and observation dimension """
-        return {k: v.shape[-1] for k, v in self.recordings.items()}
 
     @staticmethod
     def load_data_generator(dynamics_recordings: list["DynamicsRecording"],
@@ -217,6 +319,7 @@ def estimate_dataset_size(recordings: list[DynamicsRecording], prediction_horizo
     log.debug(f"Steps in prediction horizon {int(steps_pred_horizon)}")
     return num_trajs, num_samples
 
+
 def reduce_dataset_size(recordings: Iterable[DynamicsRecording], train_ratio: float = 1.0):
     assert 0.0 < train_ratio <= 1.0, f"Invalid train ratio {train_ratio}"
     if train_ratio == 1.0:
@@ -267,17 +370,19 @@ def reduce_dataset_size(recordings: Iterable[DynamicsRecording], train_ratio: fl
                 new_recordings = {k: v[idx_to_keep] for k, v in r.recordings.items()}
                 r.recordings = new_recordings
 
+
 def get_dynamics_dataset(train_shards: list[Path],
                          test_shards: Optional[list[Path]] = None,
                          val_shards: Optional[list[Path]] = None,
-                         num_proc: int = 1,
                          frames_per_step: int = 1,
                          train_ratio: float = 1.0,
                          train_pred_horizon: Union[int, float] = 1,
                          eval_pred_horizon: Union[int, float] = 10,
                          test_pred_horizon: Union[int, float] = 10,
                          state_obs: Optional[tuple[str]] = None,
-                         action_obs: Optional[tuple[str]] = None
+                         action_obs: Optional[tuple[str]] = None,
+                         hard_test_augment: bool = False,
+                         hard_val_augment: bool = False,
                          ) -> tuple[list[IterableDataset], DynamicsRecording]:
     """Load Markov Dynamics recordings from a list of files and return a train, test and validation dataset."""
     # TODO: ensure all shards come from the same dynamical system
@@ -308,6 +413,8 @@ def get_dynamics_dataset(train_shards: list[Path],
             continue
 
         recordings = [DynamicsRecording.load_from_file(f, obs_names=relevant_obs) for f in partition_shards]
+        a = recordings[0]
+        mean, var = a.state_moments()
         if partition == "train":
             pred_horizon = train_pred_horizon
             if train_ratio < 1.0:
@@ -359,8 +466,9 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= 'linear_system'
-    path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
+    path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
+    # path_to_data = Path('/home/danfoa/Projects/koopman_robotics/data/linear_system/group=C3-dim=6/n_constraints=1/')
+    path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*test.pkl'))])
     # Select a dynamical system
     mock_path = path_to_dyn_sys_data.pop()
     # Obtain the training, testing and validation file paths containing distinct trajectories of motion.

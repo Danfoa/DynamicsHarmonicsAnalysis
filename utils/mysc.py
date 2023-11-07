@@ -2,7 +2,6 @@ import importlib
 import json
 import pathlib
 import warnings
-from typing import Union
 
 import numpy as np
 import torch.nn
@@ -42,16 +41,6 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
-
-
-def matrix_average_trick(
-        A: Union[np.ndarray, torch.Tensor],
-        Bs: Union[list[np.ndarray], list[torch.Tensor]]
-        ) -> Union[np.ndarray, torch.Tensor]:
-    if isinstance(A, np.ndarray):
-        return sum([B @ A @ B.conj().T for B in Bs]) / len(Bs)
-    else:
-        return torch.sum([B @ A @ B.conj().T for B in Bs]) / len(Bs)
 
 
 def best_rectangular_grid(n):

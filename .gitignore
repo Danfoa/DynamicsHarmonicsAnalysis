@@ -6,3 +6,5 @@ __pycache__/
 
 experiments/
 /data/linear_systems/
+*.pkl
+*.html

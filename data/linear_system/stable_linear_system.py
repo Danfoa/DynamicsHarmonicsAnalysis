@@ -1,4 +1,5 @@
 import itertools
+import math
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -12,7 +13,8 @@ from escnn.group import Representation, directsum
 from tqdm import tqdm
 
 from data.DynamicsRecording import DynamicsRecording
-from utils.mysc import companion_matrix, matrix_average_trick, random_orthogonal_matrix
+from utils.mysc import companion_matrix, random_orthogonal_matrix
+from utils.linear_algebra import matrix_average_trick
 from utils.plotting import plot_system_2D, plot_system_3D, plot_trajectories
 
 
@@ -220,9 +222,11 @@ def stable_equivariant_lin_dynamics(rep_X: Representation,
         z_G = np.delete(z_G, zero_rows, axis=0)
         iso_constraint_id = [id for i, id in enumerate(iso_constraint_id) if i not in zero_rows]
         # Add component of the constraint plane along the trivial representations to break 180 deg rotational symmetry
-        for trivial_dim_idx, constraint_id in zip(tr_iso_idx, set(iso_constraint_id)):
+        # And introduce a non-linearity in the dynamics that relates the different Isotypic subspaces.
+        for constraint_id in set(iso_constraint_id):
             G_constraint_idx = np.where(np.asarray(iso_constraint_id) == constraint_id)[0]
-            P_G[G_constraint_idx, trivial_dim_idx] = np.random.uniform(-1, 1)
+            tr_plane_component = np.random.uniform(-1, 1, size=(1, len(tr_iso_idx)))
+            P_G[np.ix_(G_constraint_idx, tr_iso_idx)] = tr_plane_component
         # Change constraints to the new basis
 
     # Apply an arbitrary change of basis to the system matrix, to lose the isotypic basis.
@@ -335,17 +339,15 @@ if __name__ == '__main__':
     G_domain = escnn.group.O3(maximum_frequency=10)
     # Select the subgroup  of the dynamics of the system
     G_id = subgroups_ids['Cyclic']
+    # G_id = subgroups_ids['Dihedral']
     G, g_dynamics_2_Gsub_domain, g_domain_2_g_dynamics = G_domain.subgroup(G_id)
 
     rep_X = G.regular_representation  # directsum([irrep] * multiplicity, name="State Space")  # + G.irrep(1)
 
     # Parameters of the state space.
-    for n_constraints in [0, 1]:
+    for n_constraints in [1]: # [0, 1]:
         # Define the state representation.
-        for multiplicity in [1, 5, 10, 20]:
-            irrep = G.irrep(1)
-            for g in G.elements:
-                print(f"{g}: \n{irrep(g)}")
+        for multiplicity in [2]:
             # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
             max_time_constant = 5  # [s] Maximum time constant of the system.
             min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.
@@ -364,7 +366,7 @@ if __name__ == '__main__':
             if np.isinf(fastest_time_constant):  # Stable system on limit cycle. no transient dynamics.
                 T = fastest_period  # Simulate until the slowest stable mode has completed a full period.
             else:  # System has transient dynamics that vanish to 36.8% in fastest_time_constant seconds.
-                T = 6 * fastest_time_constant  # Required time for this transient dynamics to vanish.
+                T = max(6 * fastest_time_constant, fastest_period)  # Required time for this transient dynamics to vanish.
             dt = T * 0.005  # Sample time to obtain 200 samples per trajectory
 
             # Generate trajectories of the system dynamics
@@ -383,7 +385,7 @@ if __name__ == '__main__':
 
             for noise_level, state_trajs in tqdm(enumerate(trajs_per_noise_level), desc="saving recordings"):
                 # Save the recordings to train test val splits
-                path_2_system = Path(__file__).parents[1] / 'data'
+                path_2_system = Path(__file__).parents[1]
                 assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
                 path_2_system = (path_2_system / 'linear_system' / f"group={G.name}-dim={state_dim:d}" /
                                  f"n_constraints={n_constraints:d}" /
