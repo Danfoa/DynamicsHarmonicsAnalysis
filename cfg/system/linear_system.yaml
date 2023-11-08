@@ -7,6 +7,7 @@ name: 'linear_system'
 max_epochs: 400
 early_stop_epochs: 50
 train_ratio: 1.0                               # Percentage of the training dataset used for training the models
+standardize: False
 
 # Dynamics parameters
 state_dim: 3                                   # Dimension of the system's state

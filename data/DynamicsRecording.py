@@ -148,9 +148,14 @@ class DynamicsRecording:
 
     def action_moments(self) -> [np.ndarray, np.ndarray]:
         """Compute the mean and standard deviation of the action observations."""
+        if len(self.action_obs) == 0:
+            return None, None
+
         mean, var = [], []
         for obs_name in self.action_obs:
-            obs_mean, obs_var = self.obs_moments(obs_name)
+            if obs_name not in self.obs_moments.keys():
+                self.compute_obs_moments(obs_name)
+            obs_mean, obs_var = self.obs_moments[obs_name]
             mean.append(obs_mean)
             var.append(obs_var)
         mean, var = np.concatenate(mean), np.concatenate(var)
@@ -261,7 +266,10 @@ class DynamicsRecording:
                     yield sample
 
     @staticmethod
-    def map_state_next_state(sample: dict, state_observations: List[str]) -> dict:
+    def map_state_next_state(sample: dict,
+                             state_observations: List[str],
+                             state_mean: Optional[np.ndarray] = None,
+                             state_std: Optional[np.ndarray] = None) -> dict:
         """Map composing multiple frames of observations into a flat vectors `state` and `next_state` samples.
 
         This method constructs the state `s_t` and history of nex steps `s_t+1` of the Markov Process.
@@ -283,7 +291,8 @@ class DynamicsRecording:
         state_obs = [sample[m] for m in state_observations]
         # Define the state at time t and the states at time [t+1, t+pred_horizon]
         state_traj = np.concatenate(state_obs, axis=-1).reshape(batch_size, time_horizon, -1)
-        a = dict(state=state_traj[:, 0], next_state=state_traj[:, 1:])
+        if state_mean is not None and state_std is not None:
+            state_traj = (state_traj - state_mean) / state_std
         return dict(state=state_traj[:, 0], next_state=state_traj[:, 1:])
 
     @staticmethod

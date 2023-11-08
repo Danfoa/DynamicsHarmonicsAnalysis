@@ -67,7 +67,8 @@ def main(cfg: DictConfig):
                                         train_ratio=cfg.system.train_ratio,
                                         augment=cfg.model.augment,
                                         state_obs=cfg.system.get('state_obs', None),
-                                        action_obs=cfg.system.get('action_obs', None))
+                                        action_obs=cfg.system.get('action_obs', None),
+                                        standardize=cfg.system.standardize)
         datamodule.prepare_data()
         if cfg.system.state_dim != '??':
             assert datamodule.state_type.size == cfg.system.state_dim, \
@@ -80,12 +81,12 @@ def main(cfg: DictConfig):
                                   patience=max(cfg.system.early_stop_epochs, int(cfg.system.max_epochs * 0.1)))
         # Get the Hyperparameters for the run
         run_hps = OmegaConf.to_container(cfg, resolve=True)
-        run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
+        # run_hps['dynamics_parameters'] = datamodule.metadata.dynamics_parameters
 
         run_name = run_path.name
         wandb_logger = WandbLogger(project=f'{cfg.system.name}',
                                    save_dir=seed_path.absolute(),
-                                   config=run_hps,
+                                   # config=run_hps,
                                    name=run_name,
                                    group=f'{cfg.exp_name}',
                                    job_type='debug' if (cfg.debug or cfg.debug_loops) else None)

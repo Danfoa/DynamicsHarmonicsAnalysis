@@ -49,8 +49,8 @@ def mat_to_dynamics_recordings(data_path: Path,
         q_js_t = raw_data['q']  # Joint positions
         v_js_t = raw_data['qd']  # Joint Velocities
         # Convert the joint positions to a symmetry-enabled reference frame, and the appropriate joint parametrization.
-        q_js_ms = q_js_t + q0[7:]  # Joint positions in MorphoSymm reference frame
-        cos_q_js, sin_q_js = np.cos(q_js_ms), np.sin(q_js_ms)
+        q_js_ms = q_js_t + q0[7:]  # Add offset to the measurements from UMich
+        cos_q_js, sin_q_js = np.cos(q_js_ms), np.sin(q_js_ms)  # convert from angle to unit circle parametrization
         # Define joint positions [q1, q2, ..., qn] -> [cos(q1), sin(q1), ..., cos(qn), sin(qn)] format.
         q_js_unit_circle_t = np.stack([cos_q_js, sin_q_js], axis=2)
         q_js_unit_circle_t = q_js_unit_circle_t.reshape(q_js_unit_circle_t.shape[0], -1)
@@ -77,13 +77,15 @@ def mat_to_dynamics_recordings(data_path: Path,
         min_idx = 0
         target_path = data_path.parent / 'recordings' / data_name.stem
         target_path.mkdir(parents=True, exist_ok=True)
+
+        train_moments = None
         for partition, ratio in zip(partitions_name, partitions_ratio):
             max_idx = min_idx + int(num_samples * ratio)
             idx = range(min_idx, max_idx)
             partition_num_samples = max_idx - min_idx
             min_idx = min_idx + int(num_samples * ratio)
 
-            data = DynamicsRecording(
+            data_recording = DynamicsRecording(
                 description=f"Mini Cheetah {Path(data_name).stem}",
                 info=dict(num_traj=1, trajectory_length=q_js_t.shape[0]),
                 dynamics_parameters=dict(dt=dt, group=dict(group_name=G.name, group_order=G.order())),
@@ -96,7 +98,7 @@ def mat_to_dynamics_recordings(data_path: Path,
                                 # feet_vel=feet_vel[None, idx].astype(np.float32),
                                 # contact_forces=contact_forces[None, idx].astype(np.float32)
                                 ),
-                state_obs=('q_js', 'v_js',),
+                state_obs=('q_js', 'v_js', 'imu_ang_vel'),
                 action_obs=('torques',),
                 obs_representations=dict(q_js=rep_Q_js,
                                          v_js=rep_TqQ_js,
@@ -111,7 +113,29 @@ def mat_to_dynamics_recordings(data_path: Path,
                 obs_moments=dict(q_js=(np.zeros(q_js_unit_circle_t.shape[-1]), np.ones(q_js_unit_circle_t.shape[-1]))),
                 )
 
-            data.save_to_file(target_path / f"n_trajs=1-frames={format_si(partition_num_samples)}-{partition}.pkl")
+            if partition == "train":
+                for obs_name in data_recording.recordings.keys():
+                    if obs_name in data_recording.obs_moments:
+                        continue
+                    data_recording.compute_obs_moments(obs_name=obs_name)
+                train_moments = data_recording.obs_moments
+            else:
+                data_recording.obs_moments = train_moments
+                # Do "Hard" data-augmentation, as we want to evaluate the capacity of the models to predict the
+                # physics of the dynamics of the system. Although data comes from a single trajectory, because of the
+                # equivariance of Newtonian physics, the models should be able to predict the dynamics of the system
+                # for symmetric trajectories.
+                for obs_name in data_recording.recordings.keys():
+                    obs_rep = data_recording.obs_representations[obs_name]
+                    obs_traj = data_recording.recordings[obs_name]
+                    orbit = [obs_traj]
+                    for g in G.elements:
+                        if g == G.identity: continue  # Already added
+                        orbit.append(np.einsum('...ij,...j->...i', obs_rep(g), obs_traj))
+                    obs_traj_orbit = np.concatenate(orbit, axis=0)
+                    data_recording.recordings[obs_name] = obs_traj_orbit
+
+            data_recording.save_to_file(target_path / f"n_trajs=1-frames={format_si(partition_num_samples)}-{partition}.pkl")
         print(f"Saved recording {data_name.stem} data to {target_path}")
 
 if __name__ == "__main__":

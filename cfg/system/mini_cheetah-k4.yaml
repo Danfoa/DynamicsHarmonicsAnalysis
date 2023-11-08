@@ -1,0 +1,4 @@
+defaults:
+  - mini_cheetah
+
+subgroup_id: '(1, (0, 2))'  # ESCNN id for the K4 subgroup of the mini_cheetah

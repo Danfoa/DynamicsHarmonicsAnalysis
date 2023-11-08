@@ -2,21 +2,24 @@ defaults:
   - base_system
 
 name: 'mini_cheetah'
+subgroup_id: null
+
 max_epochs: 100
 early_stop_epochs: 20
+standardize: True
 
-obs_state_ratio: 3                             # obs_state_dim = obs_state_ratio * state_dim
+obs_state_ratio: 2                             # obs_state_dim = obs_state_ratio * state_dim
 
-state_obs: ['q']
+state_obs: ['q_js', 'v_js']
 action_obs: []
 
 # dt = 0.0012 s   this is the average delta time between observations.
-frames_per_state: 1                                 # Number of time-frames to use as a Markov Process state time step
-pred_horizon: 10                                    # Number (or percentage) of Markov Process state time steps to predict into the future
-eval_pred_horizon: 20                               # Number (or percentage) of Markov Process state time steps to predict into the future
+frames_per_state: 1                            # Number of time-frames to use as a Markov Process state time step
+pred_horizon: 10                               # Number (or percentage) of Markov Process state time steps to predict into the future
+eval_pred_horizon: 20                          # Number (or percentage) of Markov Process state time steps to predict into the future
 test_pred_horizon: 200
 
-dynamic_mode: grass
+dynamic_mode: concrete_galloping
 
 data_path: '${system.name}/recordings/${system.dynamic_mode}'
 

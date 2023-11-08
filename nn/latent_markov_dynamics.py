@@ -92,11 +92,11 @@ class LatentMarkovDynamics(MarkovDynamics):
         # This post-processing of observables ensures the input to the inverse function is of the correct shape.
         # Predicted trajectory of observable state in observable space
         post_pred_obs_dyn_output = self.post_process_obs_state(pred_obs_state_traj)
-        # Predicted trajectory of the state of the system in the original state space
+        # Predicted trajectory of the system's state in the original state space
         pred_state_traj = self.inv_obs_fn(post_pred_obs_dyn_output.pop('obs_state_traj'))
         # Ground-truth trajectory of observable state in observable space
         post_obs_dyn_output = self.post_process_obs_state(obs_state_traj)
-        # Reconstruction of the state of the system in the original state space
+        # Reconstruction of the system's state in the original state space
         rec_state_traj = self.inv_obs_fn(post_obs_dyn_output.pop('obs_state_traj'))
 
         # Apply the required post-processing of the state.
