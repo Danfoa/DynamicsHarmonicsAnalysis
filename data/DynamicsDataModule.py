@@ -173,7 +173,7 @@ class DynamicsDataModule(LightningDataModule):
         # G_domain = escnn.group.O3()
         self.symm_group = recording_metadata.dynamics_parameters['group']
 
-        if 'subgroup_id' in self.system_cfg:
+        if 'subgroup_id' in self.system_cfg and self.system_cfg['subgroup_id'] is not None:
             subgroup_id = eval(self.system_cfg['subgroup_id'])
             if subgroup_id is not None:
                 # Restrict the symmetry group of the system to the subgroup with the given id

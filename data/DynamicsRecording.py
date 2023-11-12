@@ -11,9 +11,6 @@ import numpy as np
 from datasets import Features, IterableDataset
 from escnn.group import Representation, groups_dict
 
-from utils.linear_algebra import matrix_average_trick
-from utils.mysc import TemporaryNumpySeed, compare_dictionaries
-
 log = logging.getLogger(__name__)
 
 
@@ -53,7 +50,7 @@ class DynamicsRecording:
 
     @property
     def obs_dims(self):
-        """ Dictionary providing the map between observation name and observation dimension """
+        """Dictionary providing the map between observation name and observation dimension."""
         return {k: v.shape[-1] for k, v in self.recordings.items()}
 
     def compute_obs_moments(self, obs_name: str) -> [np.ndarray, np.ndarray]:
@@ -162,9 +159,10 @@ class DynamicsRecording:
         return mean, var
 
     @staticmethod
-    def load_from_file(file_path: Path, only_metadata=False, obs_names: Optional[Iterable[str]] = None):
+    def load_from_file(file_path: Path, only_metadata=False,
+                       obs_names: Optional[Iterable[str]] = None) -> 'DynamicsRecording':
         with file_path.with_suffix(".pkl").open('rb') as file:
-            data: DynamicsRecording = pickle.load(file)
+            data = pickle.load(file)
             if only_metadata:
                 del data.recordings
             else:
@@ -279,9 +277,11 @@ class DynamicsRecording:
             Where we use f to denote frame in time to make the distinction from the time index `t` of the Markov
             Process.
             Then, the next state is defined as `s_t+1 = [m_f+fps,..., m_fps+fps, p_f+fps, ..., p_f+fps+fps]`.
+
         Args:
             sample (dict): Dictionary containing the observations of the system of shape [state_time, f].
             state_observations: Ordered list of observations names composing the state space.
+
         Returns:
             A dictionary containing the MDP state `s_t` and the next_state/s `[s_t+1, s_t+2, ..., s_t+pred_horizon]`.
         """
@@ -335,6 +335,7 @@ def reduce_dataset_size(recordings: Iterable[DynamicsRecording], train_ratio: fl
         return recordings
     log.info(f"Reducing dataset size to {train_ratio * 100}%")
     # Ensure all training seeds use the same training data partitions
+    from utils.mysc import TemporaryNumpySeed
     with TemporaryNumpySeed(10):
         for r in recordings:
             # Decide to keep a ratio of the original trajectories
@@ -400,6 +401,7 @@ def get_dynamics_dataset(train_shards: list[Path],
     val_shards = [] if val_shards is None else val_shards
 
     if len(test_shards) > 0:
+        from utils.mysc import compare_dictionaries
         test_metadata = DynamicsRecording.load_from_file(test_shards[0], only_metadata=True)
         dyn_params_diff = compare_dictionaries(metadata.dynamics_parameters, test_metadata.dynamics_parameters)
         assert len(dyn_params_diff) == 0, "Different dynamical systems loaded in train/test sets"
@@ -409,7 +411,7 @@ def get_dynamics_dataset(train_shards: list[Path],
     action_obs = action_obs if action_obs is not None else metadata.action_obs
     relevant_obs = set(state_obs).union(set(action_obs))
     features = {}
-    assert len(relevant_obs) > 0, f"Provide the names of the observations to be included in state (and action)"
+    assert len(relevant_obs) > 0, "Provide the names of the observations to be included in state (and action)"
     for obs_name in relevant_obs:
         assert obs_name in metadata.recordings.keys(), f"Observation {obs_name} not found in recordings"
     for obs_name in relevant_obs:
