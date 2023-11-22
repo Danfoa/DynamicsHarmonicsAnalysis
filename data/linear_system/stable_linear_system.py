@@ -326,7 +326,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
     seed_everything(120)
-    order = 3
+    order = 5
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -347,7 +347,7 @@ if __name__ == '__main__':
     # Parameters of the state space.
     for n_constraints in [1]: # [0, 1]:
         # Define the state representation.
-        for multiplicity in [2]:
+        for multiplicity in [20]:
             # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
             max_time_constant = 5  # [s] Maximum time constant of the system.
             min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.

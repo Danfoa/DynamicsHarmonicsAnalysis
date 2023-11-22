@@ -5,22 +5,22 @@ name: 'mini_cheetah'
 subgroup_id: null
 
 max_epochs: 100
-early_stop_epochs: 20
+early_stop_epochs: 30
 standardize: True
 
-obs_state_ratio: 2                             # obs_state_dim = obs_state_ratio * state_dim
+obs_state_ratio: 5                             # obs_state_dim = obs_state_ratio * state_dim
 
-state_obs: ['q_js', 'v_js']
+state_obs: ['joint_pos', 'joint_vel', 'base_z', 'base_vel', 'base_ori', 'base_ang_vel']
 action_obs: []
 
 # dt = 0.0012 s   this is the average delta time between observations.
-frames_per_state: 1                            # Number of time-frames to use as a Markov Process state time step
-pred_horizon: 10                               # Number (or percentage) of Markov Process state time steps to predict into the future
-eval_pred_horizon: 20                          # Number (or percentage) of Markov Process state time steps to predict into the future
-test_pred_horizon: 200
+frames_per_state:  1                                 # Number of time-frames to use as a Markov Process state time step
+pred_horizon:      30                                # Number (or percentage) of Markov Process state time steps to predict into the future
+eval_pred_horizon: ${system.pred_horizon}            # Number (or percentage) of Markov Process state time steps to predict into the future
+test_pred_horizon: 150
 
-dynamic_mode: concrete_galloping
+dynamic_mode: forward_minus_0_4
 
-data_path: '${system.name}/recordings/${system.dynamic_mode}'
+data_path: '${system.name}/raysim_recordings/flat/${system.dynamic_mode}'
 
 summary: S:${system.dynamic_mode}-OS:${system.obs_state_ratio}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}

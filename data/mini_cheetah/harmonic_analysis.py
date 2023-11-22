@@ -99,7 +99,7 @@ if __name__ == "__main__":
     train_data = train_data[0]  # Get the first file path
     dyn_recording = DynamicsRecording.load_from_file(train_data)
 
-    robot, G = load_symmetric_system(robot_name='mini_cheetah')
+    robot, G = load_symmetric_system(robot_name='mini_cheetah-c2')
     q0 = robot._q0
 
     rep_Qjs = G.representations['Q_js']
@@ -125,17 +125,31 @@ if __name__ == "__main__":
     tau_js_t_iso_signal, tau_js_t_iso_comps = decom_signal_into_isotypic_components(tau_js_t, rep_TqQjs)
 
     # Compute approximate work done by the torques on the system
-    work_t = v_js_t * tau_js_t
+    work_t = np.sum(v_js_t * tau_js_t, axis=-1)
     work_iso_decomp_t = {}  # Decomposition of the work into work done by isotypic components forces.
     for irrep_id, v_js_t_iso in v_js_t_iso_signal.items():
         tau_js_t_iso = tau_js_t_iso_signal[irrep_id]
         work_iso_dims = v_js_t_iso * tau_js_t_iso
-        work_iso_t = v_js_t_iso * tau_js_t_iso
+        work_iso_t = np.sum(v_js_t_iso * tau_js_t_iso, axis=-1)
         work_iso_decomp_t[irrep_id] = work_iso_t
         # Check that computing the work in the original basis is equivalent to computing the work in the isotypic basis
         # v_js_t_iso_comp = v_js_t_iso_comps[irrep_id]
         # tau_js_t_iso_comp = tau_js_t_iso_comps[irrep_id]
         # assert np.allclose(work_iso_t, np.sum(v_js_t_iso_comp * tau_js_t_iso_comp, axis=-1))
+
+    work_iso_trajs = np.concatenate([work_iso[None, :, None] for work_iso in work_iso_decomp_t.values()], axis=0)
+    
+    fig = plot_trajectories(trajs=work_iso_trajs,
+                            # secondary_trajs=work[None, :, None],
+                            main_legend_label="Work_Iso",
+                            colorscale='G10',
+                            plot_error=False)
+
+    # fig = plot_trajectories(trajs=work_t[None, :, None],
+    #                         main_legend_label="Work",
+    #                         colorscale='Set2',
+    #                         plot_error=False,
+    #                         fig=fig)
 
     # Compute the Kinetic Energy of the system and the kinetic energy of each isotypic component.
     from pinocchio import pinocchio_pywrap as pin
@@ -161,20 +175,30 @@ if __name__ == "__main__":
     import plotly.express as px
     df = px.data.gapminder()
 
-    work_iso_trajs = np.concatenate([work_iso[None, :, None] for work_iso in work_iso_decomp_t.values()], axis=0)
     kin_energy_iso_trajs = np.concatenate([kin_energy_iso[None, :, None] for kin_energy_iso in kin_energy_iso_t.values()], axis=0)
-    fig = plot_trajectories(trajs=kin_energy_iso_trajs,
-                            # secondary_trajs=work[None, :, None],
-                            main_legend_label="KinEnergy_Iso",
-                            colorscale='G10',
-                            plot_error=False)
+    # fig = plot_trajectories(trajs=kin_energy_iso_trajs,
+    #                         # secondary_trajs=work[None, :, None],
+    #                         main_legend_label="Work_Iso",
+    #                         colorscale='G10',
+    #                         plot_error=False)
 
-    # fig = plot_trajectories(trajs=work_t[None, :600, None],
+    # fig = plot_trajectories(trajs=work_t,
     #                         main_legend_label="Work",
     #                         colorscale='Set2',
     #                         plot_error=False,
     #                         fig=fig)
 
+    # fig = plot_trajectories(trajs=work_iso_trajs,
+    #                         # secondary_trajs=work[None, :, None],
+    #                         main_legend_label="Work_Iso",
+    #                         colorscale='G10',
+    #                         plot_error=False)
+    #
+    # fig = plot_trajectories(trajs=work_t,
+    #                         main_legend_label="Work",
+    #                         colorscale='Set2',
+    #                         plot_error=False,
+    #                         fig=fig)
 
     fig.show()
     # Plot the data

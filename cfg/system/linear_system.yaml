@@ -17,7 +17,7 @@ pred_horizon: 2                                # Number (or percentage) of Marko
 eval_pred_horizon: 20                          # Number (or percentage) of Markov Process state time steps to predict into the future
 test_pred_horizon: .5                          # Number (or percentage) of Markov Process state time steps to predict into the future
 noise_level: 2                                 # Scale of the Wiener process noise from 0 to 9 (0 is no noise)
-n_constraints: 0
+n_constraints: 1
 
 # Symmetry parameters
 group: C3

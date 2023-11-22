@@ -13,7 +13,7 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
-from data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
+from morpho_symm.data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
 from utils.mysc import traj_from_states
 from utils.plotting import plot_system_3D, plot_trajectories, plot_two_panel_trajectories
 
@@ -220,7 +220,7 @@ class DynamicsDataModule(LightningDataModule):
     def train_dataloader(self):
         return DataLoader(dataset=self.train_dataset, batch_size=self.batch_size,
                           num_workers=self.num_workers,
-                          collate_fn=self.collate_fn,
+                          collate_fn=self.collate_fn if not self.augment else self.data_augmentation_collate_fn,
                           persistent_workers=True if self.num_workers > 0 else False, drop_last=False)
 
     def val_dataloader(self):
@@ -257,6 +257,8 @@ class DynamicsDataModule(LightningDataModule):
 
     def data_augmentation_collate_fn(self, batch_list: list) -> dict:
         batch = torch.utils.data.default_collate(batch_list)
+        for k, v in batch.items():
+            batch[k] = v.to(self.device)
         state = batch['state']
         next_state = batch['next_state']
 
@@ -307,7 +309,7 @@ if __name__ == "__main__":
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
 
     # Find all dynamic systems recordings
-    path_to_data /= Path('mini_cheetah') / 'recordings' / 'grass'
+    path_to_data /= Path('mini_cheetah') / 'raysim_recordings' / 'flat' / 'forward_minus_0_4'
     # path_to_data = Path('/home/danfoa/Projects/koopman_robotics/data/linear_system/group=C10-dim=10/n_constraints=0/'
     #                     'f_time_constant=1.5[s]-frames=200-horizon=8.7[s]/noise_level=0')
     path_to_dyn_sys_data = set([a.parent for a in list(path_to_data.rglob('*train.pkl'))])
@@ -316,14 +318,14 @@ if __name__ == "__main__":
 
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=10,
-                                     eval_pred_horizon=200,
-                                     test_pred_horizon=300,
+                                     eval_pred_horizon=10,
+                                     test_pred_horizon=150,
                                      frames_per_step=1,
                                      num_workers=1,
                                      batch_size=1000,
                                      augment=False,
                                      standardize=True,
-                                     state_obs=('q_js', 'v_js', 'imu_ang_vel'),
+                                     # state_obs=('base_z_error', 'base_vel_error', 'base_ang_vel_error', ),
                                      # action_obs=tuple(),
                                      )
 
