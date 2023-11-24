@@ -86,7 +86,7 @@ def main(cfg: DictConfig):
         run_name = run_path.name
         wandb_logger = WandbLogger(project=f'{cfg.system.name}',
                                    save_dir=seed_path.absolute(),
-                                   # config=run_hps,
+                                   config=run_hps,
                                    name=run_name,
                                    group=f'{cfg.exp_name}',
                                    job_type='debug' if (cfg.debug or cfg.debug_loops) else None)
@@ -121,9 +121,15 @@ def main(cfg: DictConfig):
             profiler = cProfile.Profile()
             profiler.enable()
 
+        # Flag to track training success
+        training_successful = False
         try:
-            trainer.fit(model=pl_model, datamodule=datamodule)
+            # Train the model
+            trainer.fit(pl_model, datamodule=datamodule)
+            # If training is successful, update the flag
+            training_successful = True
         except Exception as e:
+            # Handle the exception (log it, etc.)
             raise e
 
         # Create a pstats object
@@ -132,19 +138,23 @@ def main(cfg: DictConfig):
             stats.sort_stats('cumulative')  # Sort stats by the cumulative time spent in the function
             stats.print_stats('koopman_robotics')
 
-        if not cfg.debug:  # Loading best model and test it
-            best_ckpt = torch.load(best_path)
-            pl_model.eval()
-            pl_model.model.eval()
-            pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
-        # Test best model. Selected as the model with lowest evaluation loss during training.
-        results = trainer.test(model=pl_model, datamodule=datamodule)
-        test_pred_loss = results[0]['obs_pred_loss/test']
-        # wandb_logger.experiment.unwatch(model)
-        wandb_logger.experiment.finish()
-        return test_pred_loss
+        if training_successful:
+            if not cfg.debug:  # Loading best model and test it
+                best_ckpt = torch.load(best_path)
+                pl_model.eval()
+                pl_model.model.eval()
+                pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
+            # Test best model. Selected as the model with lowest evaluation loss during training.
+            results = trainer.test(model=pl_model, datamodule=datamodule)
+            test_pred_loss = results[0]['obs_pred_loss/test']
+            # wandb_logger.experiment.unwatch(model)
+            wandb_logger.experiment.finish()
+            return test_pred_loss
+        else:
+            raise RuntimeError("Training failed. Check logs for details.")
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
+
 
 
 def get_model(cfg, datamodule):
@@ -168,7 +178,7 @@ def get_model(cfg, datamodule):
                          bias=cfg.model.bias,
                          batch_norm=cfg.model.batch_norm)
 
-    if cfg.model.name.lower() == "dae":
+    if cfg.model.name.lower() in ["dae", "dae-aug"]:
         assert cfg.system.pred_horizon >= 1
         model = DAE(state_dim=state_dim,
                     obs_state_dim=obs_state_dim,
@@ -218,6 +228,7 @@ def get_model(cfg, datamodule):
     else:
         raise NotImplementedError(f"Model {cfg.model.name} not implemented")
     log.info(f"Model \n {model}")
+    # raise NotImplementedError("Testing the output")
     return model
 
 

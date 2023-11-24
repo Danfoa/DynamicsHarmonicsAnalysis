@@ -306,7 +306,7 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
                 row=row, col=col
                 )
 
-            if secondary_trajs is not None:
+            if secondary_trajs is not None and traj_idx < secondary_trajs.shape[0]:
                 y_vals_secondary = secondary_trajs[traj_idx, :, dim]
                 fig.add_trace(
                     go.Scatter(x=x_vals, y=y_vals_secondary, mode='lines', opacity=0.5,

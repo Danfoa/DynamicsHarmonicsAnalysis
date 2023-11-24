@@ -107,14 +107,16 @@ class DAE(LatentMarkovDynamics):
             obs_state_traj=obs_state_traj,
             pred_obs_state_traj=pred_obs_state_traj, )
 
-        obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, pred_obs_state_one_step)
+        # obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, pred_obs_state_one_step)
 
         loss = self.compute_loss(state_rec_loss=forecast_metrics['state_rec_loss'],
                                  state_pred_loss=forecast_metrics['state_pred_loss'],
                                  obs_pred_loss=forecast_metrics['obs_pred_loss'],
-                                 orth_reg=obs_space_metrics["orth_reg"])
+                                 # orth_reg=obs_space_metrics["orth_reg"]
+                                 )
 
-        metrics = dict(**forecast_metrics, **obs_space_metrics)
+        # metrics = dict(**forecast_metrics, **obs_space_metrics)
+        metrics = dict(**forecast_metrics)
         return loss, metrics
 
     def get_obs_space_metrics(self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None) -> dict:
@@ -132,7 +134,7 @@ class DAE(LatentMarkovDynamics):
                      state_rec_loss: Tensor,
                      state_pred_loss: Tensor,
                      obs_pred_loss: Tensor,
-                     orth_reg: Tensor):
+                     orth_reg: Optional[Tensor]=None):
 
         state_loss = state_rec_loss + state_pred_loss
 
@@ -141,7 +143,10 @@ class DAE(LatentMarkovDynamics):
 
         obs_pred_loss = (self.obs_pred_w * obs_dim_state_dim_ratio) * torch.mean(obs_pred_loss)
 
-        orth_regularization = (self.orth_w * obs_dim_state_dim_ratio) * torch.mean(orth_reg)
+        if orth_reg is not None:
+            orth_regularization = (self.orth_w * obs_dim_state_dim_ratio) * torch.mean(orth_reg)
+        else:
+            orth_regularization = torch.zeros(1, device=state_loss.device)
 
         return state_loss + obs_pred_loss + orth_regularization
 
