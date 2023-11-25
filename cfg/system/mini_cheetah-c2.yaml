@@ -2,3 +2,4 @@ defaults:
   - mini_cheetah
 
 subgroup_id: '(2, (None, 1))'  # ESCNN id for the C2 subgroup of the mini_cheetah
+group: 'C2'

@@ -3,8 +3,9 @@ defaults:
 
 name: 'mini_cheetah'
 subgroup_id: null
+group: 'K4xC2'
 
-max_epochs: 100
+max_epochs: 200
 early_stop_epochs: 30
 standardize: True
 
@@ -17,10 +18,11 @@ action_obs: []
 frames_per_state:  1                                 # Number of time-frames to use as a Markov Process state time step
 pred_horizon:      30                                # Number (or percentage) of Markov Process state time steps to predict into the future
 eval_pred_horizon: ${system.pred_horizon}            # Number (or percentage) of Markov Process state time steps to predict into the future
-test_pred_horizon: 150
+test_pred_horizon: 100
 
+terrain: flat
 dynamic_mode: forward_minus_0_4
 
-data_path: '${system.name}/raysim_recordings/flat/${system.dynamic_mode}'
+data_path: '${system.name}/raysim_recordings/${system.terrain}/${system.dynamic_mode}'
 
 summary: S:${system.dynamic_mode}-OS:${system.obs_state_ratio}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}

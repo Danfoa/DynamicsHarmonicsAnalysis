@@ -4,7 +4,7 @@ defaults:
 name: 'linear_system'
 
 # Training parameters
-max_epochs: 400
+max_epochs: 300
 early_stop_epochs: 50
 train_ratio: 1.0                               # Percentage of the training dataset used for training the models
 standardize: False

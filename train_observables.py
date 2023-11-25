@@ -139,11 +139,14 @@ def main(cfg: DictConfig):
             stats.print_stats('koopman_robotics')
 
         if training_successful:
-            if not cfg.debug:  # Loading best model and test it
-                best_ckpt = torch.load(best_path)
-                pl_model.eval()
-                pl_model.model.eval()
-                pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
+            if not cfg.debug :  # Loading best model and test it
+                if best_path.exists():
+                    best_ckpt = torch.load(best_path)
+                    pl_model.eval()
+                    pl_model.model.eval()
+                    pl_model.load_state_dict(best_ckpt['state_dict'], strict=False)
+                else:
+                    log.warning(f"Best model not found, testing with latest model")
             # Test best model. Selected as the model with lowest evaluation loss during training.
             results = trainer.test(model=pl_model, datamodule=datamodule)
             test_pred_loss = results[0]['obs_pred_loss/test']
@@ -154,6 +157,8 @@ def main(cfg: DictConfig):
             raise RuntimeError("Training failed. Check logs for details.")
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
+
+
 
 
 

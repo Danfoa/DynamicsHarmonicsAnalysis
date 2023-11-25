@@ -5,8 +5,8 @@ __pycache__/
 .idea/
 
 experiments/
-#/data/linear_systems/
-*.html
+/data/linear_systems/
+#*.html
 
 .vscode/
 
