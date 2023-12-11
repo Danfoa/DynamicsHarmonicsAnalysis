@@ -1,4 +1,6 @@
 import copy
+import json
+import os
 from typing import Iterable, Optional, Union
 
 import pandas as pd
@@ -9,6 +11,9 @@ import itertools
 from plotly.graph_objs import Figure
 import plotly.graph_objs as go
 import plotly.express as px
+from tqdm import tqdm
+from wandb.apis.public import RunArtifacts
+from wandb.sdk.wandb_summary import SummarySubDict
 
 
 def plot_aggregated_lines(df: pd.DataFrame,
@@ -194,15 +199,15 @@ if __name__ == "__main__":
                                   "DAE-AUG": dict(dash='dot'),
                                   "DAE":     dict(dash='dash')}
                    }
-    color_group = {'system.group': {"K4xC2": color_pallet[0],
-                                    "K4":    color_pallet[10],
-                                    "C2":    color_pallet[1], }
+    color_group = {'system.group': {"K4xC2": color_pallet[1],
+                                    "K4":    color_pallet[7]}
                    }
 
     data_path = Path("mini_cheetah_sample_eff_uneven_easy_terrain.csv")
     print(data_path)
     df = pd.read_csv(data_path)
-
+    # Ignore all records of group = C2
+    df = df[df["system.group"] != "C2"]
     fig = plot_aggregated_lines(df,
                                 x="system.train_ratio",
                                 y="state_pred_loss/test",
@@ -212,9 +217,9 @@ if __name__ == "__main__":
                                 area_metric="std",
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C2":           r"$\mathbb{G}_{\Omega}=\mathbb{C}_2$",
-                                               "K4":           r"$\mathbb{G}_{\Omega}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}_{\Omega}=\mathbb{K}_4 \times \mathbb{"
+                                               "C2":           r"$\mathbb{G}=\mathbb{C}_2$",
+                                               "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
+                                               "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
                                                                r"C}_2$", }
                                 )
     # Set the figure size to a quarter of an A4 page
@@ -233,7 +238,8 @@ if __name__ == "__main__":
     df = pd.read_csv(data_path)
     STATE_DIM = 42
     df['system.obs_state_ratio'] = df['system.obs_state_ratio'] * STATE_DIM
-
+    # Ignore all records of group = C2
+    df = df[df["system.group"] != "C2"]
     fig = plot_aggregated_lines(df,
                                 x="system.obs_state_ratio",
                                 y="state_pred_loss/test",
@@ -243,9 +249,9 @@ if __name__ == "__main__":
                                 area_metric="std",
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C2":           r"$\mathbb{G}_{\Omega}=\mathbb{C}_2$",
-                                               "K4":           r"$\mathbb{G}_{\Omega}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}_{\Omega}=\mathbb{K}_4 \times \mathbb{"
+                                               "C2":           r"$\mathbb{G}=\mathbb{C}_2$",
+                                               "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
+                                               "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
                                                                r"C}_2$", }
                                 )
     # Set the figure size to a quarter of an A4 page
@@ -258,67 +264,85 @@ if __name__ == "__main__":
     fig.write_image(data_path.with_suffix(".svg"))
     fig.write_image(data_path.with_suffix(".png"))
 
-    # MSE vs Time =================================================
-    data_path = Path("mini_cheetah_mse_vs_time_uneven_easy_terrain.csv")
-    print(data_path)
-
+    # # MSE vs Time =================================================
+    # print(f"Mini Cheetah MSE vs Time")
     # import wandb
     # wandb.login()
     # api = wandb.Api()
     # project_path = "dls-csml/mini_cheetah"
-    # group_name = "mse_vs_time"
-    # metric_name = "state_pred_loss_t/test"
+    # group_name = "mse_vs_time_final"
+    # metric_name = "state_pred_loss_t"
     # runs = api.runs(project_path, {"$and": [{"group": group_name}] })
     # print(f"Found {len(runs)} runs for group {group_name}")
-
-    df = pd.read_csv(data_path)
-    # MSE vs time needs a bit of reformat
-    df_reformatted = pd.DataFrame()
-    for col in df.columns:
-        if "time" in col or "step" in col: continue
-        run_name, var_name = col.split(" - ")
-        print(var_name)
-        # var_name = var_name.split("__")[0]
-        if not var_name == "state_pred_loss_t/test": continue
-        model_name = "DAE-AUG" if "DAE-AUG" in run_name else "E-DAE" if "E-DAE" in col else "DAE"
-        system_group = "K4xC2" if "K4xC2" in run_name else "K4" if "K4" in run_name else "C2"
-        df_run = pd.DataFrame({"Name": run_name, "model.name": model_name, "system.group": system_group,
-                               "time":     df["time"], var_name: df[col]})
-        df_reformatted = pd.concat([df_reformatted, df_run], axis=0)
-
-    fig = plot_aggregated_lines(df_reformatted,
-                                x="time",
-                                y="state_pred_loss_t/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="std",
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C2":           r"$\mathbb{G}_{\Omega}=\mathbb{C}_2$",
-                                               "K4":           r"$\mathbb{G}_{\Omega}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}_{\Omega}=\mathbb{K}_4 \times \mathbb{"
-                                                               r"C}_2$", }
-                                )
-    # Determine the range of your data on a logarithmic scale
-    # y_min, y_max = 0.1, 6.0
-    # log_min, log_max = np.log10(y_min), np.log10(y_max)
-    # tickvals = [np.round(10 ** x, 2) for x in np.arange(log_min, log_max, 0.1)]  # Adjust step for more granularity
-    # tickvals = sorted(list(set(tickvals + [y_min, y_max])))  # Ensure start and end values are included
-    # # Format tick labels
-    # ticktext = [f'{val:.1f}' for val in tickvals]
-
-    # Set the figure size to a quarter of an A4 page
-    fig.update_layout(**layout_config)
-    fig.update_xaxes(title_text="Prediction horizon [s]")
-    fig.update_yaxes(title_text="state prediction MSE",
-                     type="log",
-                     )
-    # fig.show()
-    fig.write_html(data_path.with_suffix(".html"))
-    fig.write_image(data_path.with_suffix(".svg"))
-    fig.write_image(data_path.with_suffix(".png"))
-    # fig.show()
+    # df = pd.DataFrame()
+    # download_path = Path("./artifacts")
+    # # Iterate over each run
+    # for i, run in tqdm(enumerate(list(runs))):
+    #     # Access the list of artifacts for the run
+    #     artifacts = run.logged_artifacts()
+    #     print(f"Run {i}")
+    #     df_run = None
+    #     for artifact in artifacts:
+    #         if metric_name in artifact.name:
+    #             # Construct the unique path for this run's artifact
+    #             artifact_file_path = download_path / f"{artifact.name}.json"
+    #             # Check if the file already exists
+    #             if os.path.exists(artifact_file_path):
+    #                 print(f"Artifact already downloaded: {artifact_file_path}")
+    #             else:
+    #                 print(f"Downloading artifact to : {artifact_file_path}")
+    #                 # Download the artifact
+    #                 table_dir = artifact.download()
+    #                 table_files = list(Path(table_dir).rglob('*test.table.json'))
+    #                 if len(table_files) == 0:
+    #                     print(f"Run {run.id} {run.name} did not save the state_pred_loss_t table")
+    #                     continue
+    #                 table_path = table_files[0]
+    #                 # Move the file to the specified base directory
+    #                 os.rename(table_path, artifact_file_path)
+    #
+    #             with artifact_file_path.open('r') as file:
+    #                 json_dict = json.load(file)
+    #             df_run = pd.DataFrame(json_dict["data"], columns=json_dict["columns"])
+    #             break
+    #     if df_run is not None:
+    #         # Search in this run config values for model.name and system.group values and append to df
+    #         config = run.config
+    #         model_name = config["model"]["name"]
+    #         system_group = config["system"]["group"]
+    #         df_run = df_run.assign(**{"model.name": model_name, "system.group": system_group, "Name": run.name})
+    #
+    #         df = pd.concat([df, df_run], axis=0)
+    #     else:
+    #         print(f"Run {run.id} {run.name} did not save the state_pred_loss_t table")
+    #
+    # # Ignore all records of group = C2
+    # df = df[df["system.group"] != "C2"]
+    # fig = plot_aggregated_lines(df,
+    #                             x="time",
+    #                             y="state_pred_loss_t/test",
+    #                             group_variables=['model.name', 'system.group'],
+    #                             line_styles=line_styles,
+    #                             color_group=color_group,
+    #                             area_metric="std",
+    #                             label_replace={"model.name":   "Model",
+    #                                            "system.group": "Group",
+    #                                            "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
+    #                                            "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
+    #                                                            r"C}_2$", }
+    #                             )
+    # # Set the figure size to a quarter of an A4 page
+    # fig.update_layout(**layout_config)
+    # fig.update_xaxes(title_text="Prediction horizon [s]")
+    # fig.update_yaxes(title_text="state prediction MSE",
+    #                  type="log",
+    #                  )
+    # # fig.show()
+    # data_path = Path("mini_cheetah_mse_vs_time.csv")
+    # fig.write_html(data_path.with_suffix(".html"))
+    # fig.write_image(data_path.with_suffix(".svg"))
+    # fig.write_image(data_path.with_suffix(".png"))
+    # # fig.show()
     # ==========================================================================
     # ========================LINEAR EXPERIMENT ================================
     # ==========================================================================
@@ -350,8 +374,8 @@ if __name__ == "__main__":
                                 line_width=3,
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_{10}$",
+                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
+                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
                                                }
 
                                 )
@@ -380,8 +404,8 @@ if __name__ == "__main__":
                                 line_width=3,
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_{10}$",
+                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
+                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
                                                }
 
                                 )
@@ -408,8 +432,8 @@ if __name__ == "__main__":
                                 line_width=3,
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_{10}$",
+                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
+                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
                                                }
 
                                 )
@@ -437,8 +461,8 @@ if __name__ == "__main__":
                                 line_width=3,
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}_{\Omega}=\mathbb{C}_{10}$",
+                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
+                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
                                                }
 
                                 )
@@ -479,9 +503,9 @@ if __name__ == "__main__":
                                 area_metric="std",
                                 label_replace={"model.name":   "Model",
                                                "system.group": "Group",
-                                               "C2":           r"$\mathbb{G}_{\Omega}=\mathbb{C}_2$",
-                                               "K4":           r"$\mathbb{G}_{\Omega}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}_{\Omega}=\mathbb{K}_4 \times \mathbb{"
+                                               "C2":           r"$\mathbb{G}=\mathbb{C}_2$",
+                                               "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
+                                               "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
                                                                r"C}_2$", }
                                 )
 
