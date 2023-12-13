@@ -101,9 +101,9 @@ def main(cfg: DictConfig):
                           callbacks=[ckpt_call, stop_call],
                           fast_dev_run=10 if cfg.debug else False,
                           enable_progress_bar=True,  # cfg.debug_loops or cfg.debug,
-                          limit_train_batches=5 if cfg.debug_loops else 1.0,
-                          limit_test_batches=10 if cfg.debug_loops else 1.0,
-                          limit_val_batches=10 if cfg.debug_loops else 1.0,
+                          limit_train_batches=2 if cfg.debug_loops else 1.0,
+                          limit_test_batches=2 if cfg.debug_loops else 1.0,
+                          limit_val_batches=2 if cfg.debug_loops else 1.0,
                           )
 
         # Load lightning module handling the operations of all model variants
@@ -193,6 +193,7 @@ def get_model(cfg, datamodule):
                     corr_w=cfg.model.corr_w,
                     obs_fn_params=obs_fn_params,
                     enforce_constant_fn=cfg.model.constant_function,
+                    # reuse_input_observable=cfg.model.reuse_input_observable,
                     )
     elif cfg.model.name.lower() == "e-dae":
         assert cfg.system.pred_horizon >= 1
@@ -204,6 +205,7 @@ def get_model(cfg, datamodule):
                          group_avg_trick=cfg.model.group_avg_trick,
                          state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn,
                          enforce_constant_fn=cfg.model.constant_function,
+                         # reuse_input_observable=cfg.model.reuse_input_observable,
                          )
     elif cfg.model.name.lower() == "e-dpnet":
         assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"

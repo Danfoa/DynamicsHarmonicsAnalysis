@@ -25,4 +25,4 @@ dynamic_mode: forward_minus_0_4
 
 data_path: '${system.name}/raysim_recordings/${system.terrain}/${system.dynamic_mode}'
 
-summary: S:${system.dynamic_mode}-OS:${system.obs_state_ratio}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}
+summary: S:${system.dynamic_mode}-OS:${system.obs_state_ratio}-G:${system.group}-H:${system.pred_horizon}-EH:${system.eval_pred_horizon}

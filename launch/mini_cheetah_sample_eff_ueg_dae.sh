@@ -1,7 +1,7 @@
 
 seeds="1,2,3,4"
-exp_name="mini_sample_eff_terrain_uge"
-shared_params="exp_name=${exp_name} system.terrain=uneven_easy model.obs_pred_w=1.0 model.num_hidden_units=256 seed=${seeds} model.activation=ReLU model.batch_size=512"
+exp_name="mini_sample_eff_terrain_uge400"
+shared_params="exp_name=${exp_name} system.terrain=uneven_easy system.max_epochs=400 model.obs_pred_w=1.0 model.num_hidden_units=256 seed=${seeds} model.activation=ReLU model.batch_size=512"
 hydra_params="hydra.launcher.n_jobs=2"
 
 #python train_observables.py --multirun  model=dae-aug exp_name=performance hydra.launcher.n_jobs=2 device=1 seed=0,1

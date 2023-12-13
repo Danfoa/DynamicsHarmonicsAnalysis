@@ -11,6 +11,7 @@ from nn.LinearDynamics import LinearDynamics
 from nn.latent_markov_dynamics import LatentMarkovDynamics
 from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import obs_state_space_metrics
+from utils.mysc import traj_from_states
 
 log = logging.getLogger(__name__)
 

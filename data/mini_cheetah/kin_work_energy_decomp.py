@@ -67,23 +67,23 @@ if __name__ == "__main__":
         gridcolor='rgba(0,0,0,0.01)'
         )
     yaxis_style = dict(
-        titlefont=dict(size=desired_font_size),  # Set desired font size for y-axis title
+        titlefont=dict(size=desired_font_size - 8),  # Set desired font size for y-axis title
         tickfont=dict(size=desired_font_size - 8),  # Set desired font size for y-axis
-        gridcolor='rgba(0,0,0,0.01)', showline=True, linewidth=0.1,
+        gridcolor='rgba(0,0,0,0.01)',
+        showline=True,
+        linewidth=0.1,
         linecolor='rgba(0,0,0,0.1)',
         )
     # Set legend box horizontal and vertical position
-    legend_style = dict(x=0.0, y=1.0,
+    legend_style = dict(x=1.0, y=1.0,
                         font=dict(size=desired_font_size - 8),
                         bgcolor='rgba(1.0,1.0,1.0,0.7)',  # Set background color to 0.4 alpha,
-                        orientation="h",
+                        orientation="v",
                         )
-    layout_config = dict(width=200, height=200,
+    layout_config = dict(width=300, height=200,
                          plot_bgcolor='white',
                          paper_bgcolor='white',
-                         # Draw mild grid lines with an alpha of 0.1
                          margin=dict(l=10, r=10, t=10, b=10),
-                         # Set legend box in the upper right corner inside the plot
                          legend=legend_style,
                          xaxis=xaxis_style,
                          yaxis=yaxis_style,
@@ -240,20 +240,21 @@ if __name__ == "__main__":
                                      fillcolor=iso_comp_colors[iso_comp_id],
                                      # Use spline interpolation
                                      line_shape='spline',
-                                     showlegend=False),
+                                     showlegend=True),
                           row=row_count, col=1)
             # Set the y axis label as the iso component name
             fig.update_yaxes(range=[0, max_energy * 1.1], nticks=2,
-                             row=row_count, col=1)
+                             row=row_count, col=1, **yaxis_style)
             row_count += 1
         fig.update_layout(layout_config, template='plotly_white',)
         # Ensure the y axis has only two ticks, the max energy and 0
-        fig.update_yaxes(**yaxis_style, nticks=2)
-        fig.update_xaxes(**xaxis_style)
-        fig.update_xaxes(title="Time[s]", row=len(kin_energy_iso_decomp_t), col=1)
-        # fig.show()
-        file_path = record_path/ "kinetic_energy_decomposition"
+        fig.update_xaxes(**xaxis_style, title="Time[s]", row=len(kin_energy_iso_decomp_t), col=1)
+        # Set a unique y label for all subplots centered in the middle of the figure
+        fig.update_yaxes(**yaxis_style, title="Kinetic Energy [J]", row=len(kin_energy_iso_decomp_t)-1, col=1)
+
+        base_path = Path(__file__).parent.parent.parent / 'media' / 'images' / 'umich_dataset'
+
+        file_path = base_path / f"{recording_name}_kin_energy_decomposition_{G.name}"
         fig.write_image(file_path.with_suffix(".svg"))
-        fig.write_image(file_path.with_suffix(".png"))
         print(f"Saved figure to {file_path}")
 

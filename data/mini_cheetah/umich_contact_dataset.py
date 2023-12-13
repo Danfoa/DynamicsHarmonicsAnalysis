@@ -47,14 +47,14 @@ def mat_to_dynamics_recordings(data_path: Path,
         # Extract the system's measurements/observations
         contacts = raw_data['contacts']  # 4 dim binary vector: [right_front, left_front, right_hind, left_hind]
         q_js_t = raw_data['q']  # Joint positions
-        v_js_t = raw_data['qd']  # Joint Velocities
+        joint_vel_t = raw_data['qd']  # Joint Velocities
         # Convert the joint positions to a symmetry-enabled reference frame, and the appropriate joint parametrization.
         q_js_ms = q_js_t + q0[7:]  # Add offset to the measurements from UMich
         cos_q_js, sin_q_js = np.cos(q_js_ms), np.sin(q_js_ms)  # convert from angle to unit circle parametrization
         # Define joint positions [q1, q2, ..., qn] -> [cos(q1), sin(q1), ..., cos(qn), sin(qn)] format.
-        q_js_unit_circle_t = np.stack([cos_q_js, sin_q_js], axis=2)
-        q_js_unit_circle_t = q_js_unit_circle_t.reshape(q_js_unit_circle_t.shape[0], -1)
-        assert np.allclose((cos_q_js[0, 0], sin_q_js[0, 0]), q_js_unit_circle_t[0][:2])
+        joint_pos = np.stack([cos_q_js, sin_q_js], axis=2)
+        joint_pos = joint_pos.reshape(joint_pos.shape[0], -1)
+        assert np.allclose((cos_q_js[0, 0], sin_q_js[0, 0]), joint_pos[0][:2])
 
         # feet_pos = raw_data['p']  # Feet positions [x, y, z] w.r.t. each leg frame (no idea orientation of these)
         # feet_vel = raw_data['v']  # Feet velocities [dx, dy, dz] w.r.t. each leg frame
@@ -89,28 +89,45 @@ def mat_to_dynamics_recordings(data_path: Path,
                 description=f"Mini Cheetah {Path(data_name).stem}",
                 info=dict(num_traj=1, trajectory_length=q_js_t.shape[0]),
                 dynamics_parameters=dict(dt=dt, group=dict(group_name=G.name, group_order=G.order())),
-                recordings=dict(q_js=q_js_unit_circle_t[None, idx].astype(np.float32),
-                                v_js=v_js_t[None, idx].astype(np.float32),
+                recordings=dict(joint_pos=joint_pos[None, idx].astype(np.float32),
+                                joint_vel=joint_vel_t[None, idx].astype(np.float32),
                                 joint_torques=torques[None, idx].astype(np.float32),
                                 # imu_acc=imu_acc[None, idx].astype(np.float32),
-                                imu_ori=imu_ori[None, idx].astype(np.float32),
-                                imu_ang_vel=imu_ang_vel[None, idx].astype(np.float32),
+                                base_ori=imu_ori[None, idx].astype(np.float32),
+                                base_ang_vel=imu_ang_vel[None, idx].astype(np.float32),
                                 # feet_vel=feet_vel[None, idx].astype(np.float32),
                                 # contact_forces=contact_forces[None, idx].astype(np.float32)
                                 ),
-                state_obs=('q_js', 'v_js', 'imu_ang_vel'),
+                state_obs=('joint_pos', 'joint_vel', 'base_ang_vel'),
                 action_obs=('torques',),
-                obs_representations=dict(q_js=rep_Q_js,
-                                         v_js=rep_TqQ_js,
+                obs_representations=dict(joint_pos=rep_Q_js,
+                                         joint_vel=rep_TqQ_js,
                                          joint_torques=rep_TqQ_js,
                                          # imu_acc=rep_imu_acc,
-                                         imu_ori=rep_imu_ori,
-                                         imu_ang_vel=rep_imu_ang_vel,
+                                         base_ori=rep_imu_ori,
+                                         base_ang_vel=rep_imu_ang_vel,
                                          # feet_vel=rep_feet_vel,
                                          # contact_forces=rep_contact_forces
                                          ),
+                # base_pos=base_pos[None, ...].astype(np.float32),
+                # base_z=base_pos[None, :, [2]].astype(np.float32),
+                # base_vel=base_vel[None, ...].astype(np.float32),
+                # base_ori=base_ori[None, ...].astype(np.float32),
+                # base_ang_vel=base_ang_vel[None, ...].astype(np.float32),
+                # feet_pos=feet_pos[None, ...].astype(np.float32),
+                # joint_pos=joint_pos[None, ...].astype(np.float32),
+                # joint_vel=joint_vel[None, ...].astype(np.float32),
+                # joint_torques=joint_torques[None, ...].astype(np.float32),
+                # gait=gait[None, ...].astype(np.float32),
+                # ref_base_vel=ref_base_vel[None, ...].astype(np.float32),
+                # ref_base_ori=ref_base_ori[None, ...].astype(np.float32),
+                # ref_base_ang_vel=ref_base_ang_vel[None, ...].astype(np.float32),
+                # ref_feet_pos=ref_feet_pos[None, ...].astype(np.float32),
+                # base_z_error=base_z_error[None, ...].astype(np.float32),
+                # base_vel_error=base_vel_error[None, ...].astype(np.float32),
+                # base_ang_vel_error=base_ang_vel_error[None, ...].astype(np.float32),
                 # Ensure the angles in the unit circle are not disturbed by the normalization.
-                obs_moments=dict(q_js=(np.zeros(q_js_unit_circle_t.shape[-1]), np.ones(q_js_unit_circle_t.shape[-1]))),
+                obs_moments=dict(q_js=(np.zeros(joint_pos.shape[-1]), np.ones(joint_pos.shape[-1]))),
                 )
 
             if partition == "train":

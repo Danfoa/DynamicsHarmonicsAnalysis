@@ -1,6 +1,6 @@
 seeds="0,1,2,3,4"
 
-shared_params="exp_name=MseVsTime system=linear_system seed=${seeds} system.n_constraints=1 system.obs_state_ratio=3 system.state_dim=100"
+shared_params="exp_name=mse_vs_time system=linear_system seed=${seeds} system.n_constraints=1 system.obs_state_ratio=3 system.state_dim=50"
 hydra_params="hydra.launcher.n_jobs=4"
 
 python train_observables.py --multirun device=0 system.group=C5  model=dae  system.noise_level=4 seed=0,1,2,3 ${hydra_params} ${shared_params} &

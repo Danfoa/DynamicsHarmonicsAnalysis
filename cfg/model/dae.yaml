@@ -10,5 +10,5 @@ corr_w: 0.0
 # Optimization hyperparameters parameters
 lr: 1e-3
 equivariant: False
-
+reuse_input_observable: False
 summary: ${model.name}-Obs_w:${model.obs_pred_w}-Orth_w:${model.orth_w}-Act:${model.activation}-B:${model.bias}-BN:${model.batch_norm}-LR:${model.lr}-L:${model.num_layers}-${model.num_hidden_units}

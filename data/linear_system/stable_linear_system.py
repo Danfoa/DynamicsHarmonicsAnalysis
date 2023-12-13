@@ -326,7 +326,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
     seed_everything(120)
-    order = 5
+    order = 10
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -347,7 +347,7 @@ if __name__ == '__main__':
     # Parameters of the state space.
     for n_constraints in [1]: # [0, 1]:
         # Define the state representation.
-        for multiplicity in [20]:
+        for multiplicity in [3]:
             # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
             max_time_constant = 5  # [s] Maximum time constant of the system.
             min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.
@@ -371,9 +371,10 @@ if __name__ == '__main__':
 
             # Generate trajectories of the system dynamics
             n_trajs = 170
-            trajs_per_noise_level = []
-            for noise_level in tqdm(range(10), desc="noise level"):
+            trajs_per_noise_level = {}
+            for noise_level in tqdm(range(2, 3), desc="noise level"):
                 sigma = T * 0.0025 * noise_level
+                # sigma = T * 0.004 * noise_level
                 state_trajs = []
                 for _ in range(n_trajs):
                     # Sample initial condition
@@ -381,9 +382,9 @@ if __name__ == '__main__':
                     t, state_traj = evolve_linear_dynamics(
                         A_G, x0, dt, T, sigma, constraint_matrix=P_G, constraint_offset=z_G)
                     state_trajs.append(state_traj)
-                trajs_per_noise_level.append(np.asarray(state_trajs))
+                trajs_per_noise_level[noise_level] = np.asarray(state_trajs)
 
-            for noise_level, state_trajs in tqdm(enumerate(trajs_per_noise_level), desc="saving recordings"):
+            for noise_level, state_trajs in tqdm(trajs_per_noise_level.items(), desc="saving recordings"):
                 # Save the recordings to train test val splits
                 path_2_system = Path(__file__).parents[1]
                 assert path_2_system.exists(), f"Invalid Dataset path {path_2_system.absolute()}"
