@@ -40,7 +40,7 @@ def decom_signal_into_isotypic_components(signal: np.ndarray, rep: Representatio
         iso_dims = iso_comp_dims[irrep_id]
         iso_comp_signals[irrep_id] = signal_iso[..., iso_dims]
 
-    iso_comp_signals_orig_basis = {}
+    iso_comp_signals_orig_basis = OrderedDict()
     # Compute the signals of each isotypic component in the original basis
     for irrep_id, _ in isotypic_representations.items():
         iso_dims = iso_comp_dims[irrep_id]

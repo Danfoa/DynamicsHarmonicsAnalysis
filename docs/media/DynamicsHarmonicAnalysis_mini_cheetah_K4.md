@@ -28,60 +28,62 @@ Next to each animation we plot the kinetic energy of each of the configurations 
 ### In forest
 [//]: # (recording_name=forest)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-forest_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/forest_kin_energy_decomposition_Klein4.svg" width="29%" /> 
+  <img src="../media/animations/mini-cheetah_Klein4-forest_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/forest_kin_energy_decomposition_Klein4.svg" width="29%" /> 
 </p>
 
 ### In grass 
 [//]: # (recording_name=grass)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-grass_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/grass_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-grass_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/grass_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 ### In concrete
 [//]: # (recording_name=concrete_difficult_slippery)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-concrete_difficult_slippery_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/concrete_difficult_slippery_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-concrete_difficult_slippery_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/concrete_difficult_slippery_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 ### In concrete while walking in circles
 [//]: # (recording_name=concrete_right_circle)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-concrete_right_circle_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/concrete_right_circle_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-concrete_right_circle_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/concrete_right_circle_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 ### In terrain of middle sized pebbles
 [//]: # (recording_name=middle_pebble)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-middle_pebble_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/middle_pebble_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-middle_pebble_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/middle_pebble_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
+
+
 
 ## Jumping gait
 ### In concrete 
 [//]: # (recording_name=air_jumping_gait)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-air_jumping_gait_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/air_jumping_gait_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-air_jumping_gait_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/air_jumping_gait_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 ## Pronking gait
 ### In concrete
 [//]: # (recording_name=concrete_pronking)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-concrete_pronking_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/concrete_pronking_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-concrete_pronking_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/concrete_pronking_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 ## Galloping gait 
 ### In concrete
 [//]: # (recording_name=concrete_galloping)
 <p float="left">
-  <img src="../docs/media/animations/mini-cheetah_Klein4-concrete_galloping_harmonic_analysis.gif" width="68%" />
-  <img src="../docs/media/images/umich_dataset/concrete_galloping_kin_energy_decomposition_Klein4.svg" width="29%" />
+  <img src="../media/animations/mini-cheetah_Klein4-concrete_galloping_harmonic_analysis.gif" width="68%" />
+  <img src="../media/images/umich_dataset/concrete_galloping_kin_energy_decomposition_Klein4.svg" width="29%" />
 </p>
 
 [](data/mini_cheetah/recordings/concrete_galloping/work_concrete_galloping_decomp.html)
