@@ -1,1 +1,2 @@
-docs/* linguist-vendored
+docs/* linguist-vendored=true
+*.html linguist-detectable=false
