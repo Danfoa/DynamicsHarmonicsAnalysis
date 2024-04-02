@@ -1,3 +1,4 @@
+import copy
 import logging
 import time
 from pathlib import Path
@@ -13,9 +14,10 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
-from morpho_symm.data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
+from morpho_symm.data.DynamicsRecording import DynamicsRecording, split_train_val_test
 from utils.mysc import traj_from_states
 from utils.plotting import plot_system_3D, plot_trajectories, plot_two_panel_trajectories
+from kooplearn.data import multi_traj_to_context, TensorContextDataset
 
 log = logging.getLogger(__name__)
 
@@ -24,186 +26,196 @@ class DynamicsDataModule(LightningDataModule):
 
     def __init__(self,
                  data_path: Path,
-                 pred_horizon: Union[int, float] = 0.25,
-                 eval_pred_horizon: Union[int, float] = 0.5,
-                 test_pred_horizon: Union[int, float] = 0.5,
-                 train_ratio: float = 1.0,
+                 pred_horizon: Union[int, float],
+                 val_pred_horizon: Union[int, float],
+                 test_pred_horizon: Union[int, float],
+                 lookback_len: int = 1,
+                 split_ratios: tuple = (0.7, 0.15, 0.15),  # Train, Test, Validation
+                 data_augmentation: bool = False,
+                 state_obs: Optional[tuple[str]] = None,
+                 standardize: bool = True,
                  system_cfg: Optional[dict] = None,
                  batch_size: int = 256,
-                 frames_per_step: int = 1,
                  num_workers: int = 0,
-                 augment: bool = False,
-                 device='cpu',
-                 state_obs: Optional[tuple[str]] = None,
-                 action_obs: Optional[tuple[str]] = None,
-                 standardize: bool = True,
+                 device: torch.device = torch.device('cpu')
                  ):
+        """ Data module for dynamics model training and evaluation using data from a DynamicsRecording object.
+
+        Args:
+            data_path (Path): Path to the directory containing the recordings of the dynamics system.
+            pred_horizon (Union[int, float], optional): Length of the context_windows (past/present frames + future
+            frames).
+                If float, it represents the fraction of the entire trajectory time horizon.
+            val_pred_horizon (Union[int, float], optional): Length of the context_windows (past/present frames +
+            future frames)
+                for the validation set. If float, it represents the fraction of the entire trajectory time horizon.
+            test_pred_horizon (Union[int, float], optional): Length of the context_windows (past/present frames +
+            future frames)
+                for the test set. If float, it represents the fraction of the entire trajectory time horizon.
+            lookback_len (int, optional): Number of frames to consider in the past for each time step. Defaults to 1.
+            split_ratios (tuple, optional): Ratios for splitting the dataset into train, test, and validation sets.
+                Defaults to (0.7, 0.15, 0.15).
+            data_augmentation (bool, optional): Apply symmetric data augmentation to training and validation sets if
+                the state group representation is defined in the DynamicsRecording. Defaults to False.
+            state_obs (Optional[tuple[str]], optional): Ordered names of the scalar/vector-valued observations in the
+                DynamicsRecording that compose the system's state. E.g. if the DynamicsRecording has the observations
+                ['energy', 'momentum', 'position', 'velocity'], and state_obs=('position', 'velocity'), then the
+                state samples `x_t = [<position>, <velocity>]` will be composed only by the 'position' and 'velocity'
+                observations. Defaults to None, in which case the DynamicsRecording's default state_obs is used.
+            standardize (bool, optional): Standardize the state and action observations by subtracting the mean and
+                dividing by the standard deviation. Defaults to True. If the state group representation is defined this
+                standardization computes the symmetry-corrected mean and variance.
+            system_cfg (Optional[dict], optional): Configuration dictionary with system parameters. Defaults to None.
+            batch_size (int, optional): Batch size for the dataloaders. Defaults to 256.
+            num_workers (int, optional): Number of workers for the dataloaders. Defaults to 0.
+        """
+
         super().__init__()
         if system_cfg is None:
             system_cfg = {}
         self._data_path = data_path
         self.system_cfg = system_cfg if system_cfg is not None else {}
-        self.noise_level = self.system_cfg.get('noise_level', None)
-        self.train_ratio = train_ratio
-        self.augment = augment
-        self.frames_per_step = frames_per_step
+        self.split_ratios = split_ratios
+        self.augment = data_augmentation
+        self.lookback_len = lookback_len
+
         if isinstance(pred_horizon, float):
             assert 0 < pred_horizon <= 1.0, "Prediction horizon need be in H∈(0., 1.]. Predict H % of the trajectory"
             self.pred_horizon = pred_horizon
         elif isinstance(pred_horizon, int):
             assert pred_horizon >= 1, "At least we need to forecast a single dynamics step"
             self.pred_horizon = pred_horizon
-        self.eval_pred_horizon = eval_pred_horizon
+
+        self.eval_pred_horizon = val_pred_horizon
         self.test_pred_horizon = test_pred_horizon
         self.batch_size = batch_size
         self.num_workers = num_workers
         # Metadata and dynamics information
-        self.metadata, self.dt = None, None
         self.state_obs = state_obs
-        self.action_obs = action_obs
         self.standardize = standardize
-        self._val_dataloader, self._test_dataloader, self._train_dataloader = None, None, None
-        # Symmetry parameters
+
+        # Symmetry group and group representations parameters
         self.symm_group = None
-        self.measurements_reps = {}
         self.gspace = None
-        self.state_type, self.action_field_type = None, None
+        self.state_type = None  # escnn.FieldType object. Only used when DynamicsRecording has symmetry information
         self.device = device
+
+        self.dt = None, None
+        self.state_mean, self.state_var = None, None
+        self._dynamic_recording = None  # DynamicsRecording object/s containing the recordings of observations. Private!
+        self._val_dataloader, self._test_dataloader, self._train_dataloader = None, None, None
         self.train_dataset, self.val_dataset, self.test_dataset = None, None, None
 
     def prepare_data(self):
 
         if self.prepared:
-            self.train_dataset = self.train_dataset.shuffle(buffer_size=self.train_dataset.dataset_size // 4)
+            # Shuffle trajectory. TODO: This should not be done here, but with the Dataset class
+            data = self.train_dataset.data
+            idx = torch.randperm(data.shape[0])
+            self.train_dataset.data = data[idx]
             log.info(f"Train dataset reshuffled")
             return
 
+        # Find the DynamicsRecording files in the data path
+        dyn_record_files = list(self._data_path.rglob('*.pkl'))
+        self._log_data_sources(dyn_record_files)
+
         start_time = time.time()
-        log.info(f"Preparing datasets {self._data_path}")
 
-        dyn_sys_data = set([a.parent for a in list(self._data_path.rglob('*train.pkl'))])
-        log.info(f"Found recordings \n {dyn_sys_data}")
-        if self.noise_level is not None:
-            system_data_path = [path for path in dyn_sys_data if f"noise_level={self.noise_level}" in str(path)]
-        else:
-            system_data_path = dyn_sys_data
+        if len(dyn_record_files) > 1:
+            raise NotImplementedError(f"Havent implemented gathering data from multiple recordings yet")
+        elif len(dyn_record_files) == 0:
+            raise ValueError(f"No `DynamicsRecordings` found in {self._data_path}")
 
-        log.info(f"Loading recordings {system_data_path}")
+        self._file_paths = copy.deepcopy(dyn_record_files)
+        dyn_record_path = dyn_record_files.pop()
 
-        if len(system_data_path) > 1:
-            raise RuntimeError(f"Multiple potential paths {system_data_path} found")
-        elif len(system_data_path) == 0:
-            raise ValueError(f"No recordings found in {self._data_path}")
-        system_data_path = system_data_path.pop()
+        # Load only the observables that are required to memory to avoid memory overflow
+        self._dynamic_recording: DynamicsRecording = DynamicsRecording.load_from_file(
+            dyn_record_path, obs_names=self.state_obs
+            )
 
-        train_data, test_data, val_data = get_train_test_val_file_paths(system_data_path)
-        # Obtain hugging face Iterable datasets instances
-        datasets, recording_metadata = get_dynamics_dataset(train_shards=train_data,
-                                                            test_shards=test_data,
-                                                            val_shards=val_data,
-                                                            train_ratio=self.train_ratio,
-                                                            train_pred_horizon=self.pred_horizon,
-                                                            eval_pred_horizon=self.eval_pred_horizon,
-                                                            test_pred_horizon=self.test_pred_horizon,
-                                                            frames_per_step=self.frames_per_step,
-                                                            state_obs=self.state_obs,
-                                                            action_obs=self.action_obs)
-        self.metadata: DynamicsRecording = recording_metadata
-        # observations_names = self.metadata.
-        self.dt = recording_metadata.dynamics_parameters['dt']
-        # In case no measurements are passed, we recover the ones from the DynamicsRecording
-        self.state_obs = recording_metadata.state_obs if self.state_obs is None else self.state_obs
-        self.action_obs = recording_metadata.action_obs if self.action_obs is None else self.action_obs
-        # Compute normalization mean and variance parameters for the state and action spaces.
-        self.state_mean, self.state_var = recording_metadata.state_moments()
-        self.action_mean, self.action_var = recording_metadata.action_moments()
+        train_data, val_data, test_data = split_train_val_test(
+            dyn_recording=self._dynamic_recording, partition_sizes=self.split_ratios
+            )
 
-        # Ensure samples contain torch.Tensors and not numpy arrays.
-        # Apply map to obtain flat state/next_state action/next_action values
-        train_dataset, test_dataset, val_dataset = datasets
+        if self.standardize:  # If standardization is enabled, use training data to estimate mean and variance
+            train_data.state_momements()
+            test_data.obs_moments = train_data.obs_moments
+            val_data.obs_moments = train_data.obs_moments
 
-        # Ensure what we shuffle the train dataset:
-        train_dataset = train_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 5000))
-        test_dataset = test_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
-        val_dataset = val_dataset.shuffle(buffer_size=min(train_dataset.dataset_size // 4, 1000), seed=18)
-        # Convert to torch. Apply map to get samples containing state and next state
-        # After mapping to state next state, remove all other observations
-        obs_to_remove = set(train_dataset.features.keys())
-        obs_to_remove.discard('state')
-        map_fn_kwargs = dict(state_observations=self.state_obs,
-                             state_mean=self.state_mean if self.standardize else None,
-                             state_std=np.sqrt(self.state_var) if self.standardize else None)
+        # Get the raw state trajectories of shape (traj_id, time, *state_dims) | GC will collect this references
+        train_trajs = train_data.get_state_trajs(standardize=self.standardize)
+        val_trajs = val_data.get_state_trajs(standardize=self.standardize)
+        test_trajs = test_data.get_state_trajs(standardize=self.standardize)
+        # Convert to np float32
+        train_trajs = np.float32(train_trajs)
+        val_trajs = np.float32(val_trajs)
+        test_trajs = np.float32(test_trajs)
 
-        self.train_dataset = train_dataset.with_format("torch").map(
-            DynamicsRecording.map_state_next_state,
-            batched=True,
-            fn_kwargs=map_fn_kwargs,
-            remove_columns=tuple(obs_to_remove))
-        self.test_dataset = test_dataset.with_format("torch").map(
-            DynamicsRecording.map_state_next_state,
-            batched=True,
-            fn_kwargs=map_fn_kwargs,
-            remove_columns=tuple(obs_to_remove))
-        self.val_dataset = val_dataset.with_format("torch").map(
-            DynamicsRecording.map_state_next_state,
-            batched=True,
-            fn_kwargs=map_fn_kwargs,
-            remove_columns=tuple(obs_to_remove))
+        # Split data into context windows using kooplean. Load data to device if available, and store reference of the
+        # raw dataset to do required regression tasks.
+        self.train_dataset = multi_traj_to_context(train_trajs,
+                                                   context_window_len=self.pred_horizon + self.lookback_len,
+                                                   backend="torch",
+                                                   device=self.device)
+        self.val_dataset = multi_traj_to_context(val_trajs,
+                                                 context_window_len=self.eval_pred_horizon + self.lookback_len,
+                                                 backend="torch",
+                                                 device=self.device)
+        self.test_dataset = multi_traj_to_context(test_trajs,
+                                                  context_window_len=self.test_pred_horizon + self.lookback_len,
+                                                  backend="torch",
+                                                  device=self.device)
 
-        # Configure the prediction dataloader for the approximating and evaluating the transfer operator. This will
-        # be a dataloader passing state and next state single step measurements:
-        datasets, recording_metadata = get_dynamics_dataset(train_shards=train_data,
-                                                            test_shards=None,
-                                                            val_shards=None,
-                                                            train_pred_horizon=1,
-                                                            eval_pred_horizon=1,
-                                                            frames_per_step=self.frames_per_step,
-                                                            state_obs=self.state_obs,
-                                                            action_obs=self.action_obs)
-
-
-        transfer_op_train_dataset, _, _ = datasets
-
-        self._transfer_op_train_dataset = transfer_op_train_dataset.with_format("torch").map(
-            DynamicsRecording.map_state_next_state, batched=True, fn_kwargs={'state_observations': self.state_obs},
-            remove_columns=tuple(obs_to_remove))
+        self.dt = self._dynamic_recording.dynamics_parameters['dt']
+        # In case no measurements are passed, we recover the ones from the DynamicsRecording file.
+        self.state_obs = self._dynamic_recording.state_obs if self.state_obs is None else self.state_obs
+        # Store normalization mean and variance parameters for the state space.
+        self.state_mean, self.state_var = self._dynamic_recording.state_moments()
 
         # Rebuilt the ESCNN representations of measurements _________________________________________________________
         # TODO: Handle dyn systems without symmetries
         # G_domain = escnn.group.O3()
-        self.symm_group = recording_metadata.dynamics_parameters['group']
+        self.symm_group = self._dynamic_recording.dynamics_parameters.get('group', None)
 
-        if 'subgroup_id' in self.system_cfg and self.system_cfg['subgroup_id'] is not None:
-            subgroup_id = eval(self.system_cfg['subgroup_id'])
-            if subgroup_id is not None:
-                # Restrict the symmetry group of the system to the subgroup with the given id
-                Gsub, sub2group, group2sub = self.symm_group.subgroup(subgroup_id)
-                new_reps = {}
-                for obs_name, obs_rep in recording_metadata.obs_representations.items():
-                    new_reps[obs_name] = obs_rep.restrict(subgroup_id)
-                recording_metadata.obs_representations = new_reps
-                self.symm_group = Gsub
-
-        # Construct state (and action) representations considering the `frames_per_step` and the concatenation
-        # convention of the function `map_state_next_state` in `DynamicsRecording.py`. Which defines the state
-        # with `F=frames_per_step` delayed coordinates as s_t = [m1_f,..., m1_f+F, m2_f,..., m2_f+F, ...] where mi_k
-        # is the measurement i at frame k.
-        state_reps = [[recording_metadata.obs_representations[m]] * self.frames_per_step for m in self.state_obs]
-        state_reps = [rep for frame_reps in state_reps for rep in frame_reps]  # flatten list of reps
-
-        # Use as default no basis space # TODO make more flexible
-        self.gspace = escnn.gspaces.no_base_space(self.symm_group)
-        # Define the state field type
-        self.state_type = FieldType(self.gspace, representations=state_reps)
-        # Define the action field type
-        self.action_field_type = None
-        if len(self.action_obs) > 0:
-            # construct action representations analog to the state representations
-            action_reps = [[recording_metadata.obs_representations[m]] * self.frames_per_step for m in self.action_obs]
-            action_reps = [rep for frame_reps in action_reps for rep in frame_reps]  # flatten list of reps
-            self.action_field_type = FieldType(self.gspace, representations=action_reps)
-
+        if self.symm_group is None:
+            pass
+        else:
+            # TODO: This seems a bit to "experiment specific" code and should be removed from here.
+            # however, we might need to provide this flexibility to the user.
+            if 'subgroup_id' in self.system_cfg and self.system_cfg['subgroup_id'] is not None:
+                subgroup_id = eval(self.system_cfg['subgroup_id'])
+                if subgroup_id is not None:
+                    # Restrict the symmetry group of the system to the subgroup with the given id
+                    Gsub, sub2group, group2sub = self.symm_group.subgroup(subgroup_id)
+                    new_reps = {}
+                    for obs_name, obs_rep in self._dynamic_recording.obs_representations.items():
+                        new_reps[obs_name] = obs_rep.restrict(subgroup_id)
+                    self._dynamic_recording.obs_representations = new_reps
+                    self.symm_group = Gsub
+            # Use as default no basis space # TODO make more flexible
+            self.gspace = escnn.gspaces.no_base_space(self.symm_group)
+            # Define the state field type
+            state_reps = self._dynamic_recording.state_representations()
+            self.state_type = FieldType(self.gspace, representations=state_reps)
         log.info(f"Data preparation done in {time.time() - start_time:.2f} [s]")
+
+    def _log_data_sources(self, dyn_record_files):
+        # Group files by their parent folder
+        data_folders = {}
+        for file in dyn_record_files:
+            parent_folder = str(file.parent)
+            if parent_folder not in data_folders:
+                data_folders[parent_folder] = []
+            data_folders[parent_folder].append(file.name)
+
+        log.info("Loading data from:")
+        # Print to console where the data is coming from
+        for folder, files in data_folders.items():
+            log.info(f"[DIR]: {folder}:")
+            for i, file in enumerate(files, start=1):
+                log.info(f"\t\t [FILE] {i}: {file}")
 
     def setup(self, stage: str) -> None:
         log.info(f"Setting up {stage} dataset")
@@ -218,41 +230,48 @@ class DynamicsDataModule(LightningDataModule):
         raise NotImplementedError("Implement this function in the derived class")
 
     def train_dataloader(self):
-        return DataLoader(dataset=self.train_dataset, batch_size=self.batch_size,
+        return DataLoader(dataset=self.train_dataset,
+                          batch_size=self.batch_size,
                           num_workers=self.num_workers,
                           collate_fn=self.collate_fn if not self.augment else self.data_augmentation_collate_fn,
                           persistent_workers=True if self.num_workers > 0 else False, drop_last=False)
 
     def val_dataloader(self):
-        return DataLoader(dataset=self.val_dataset, batch_size=self.batch_size, shuffle=False,
+        return DataLoader(dataset=self.val_dataset,
+                          batch_size=self.batch_size,
                           persistent_workers=True if self.num_workers > 0 else False,
                           num_workers=self.num_workers,
                           collate_fn=self.collate_fn,
                           drop_last=False)
 
     def test_dataloader(self):
-        return DataLoader(dataset=self.test_dataset, batch_size=self.batch_size, shuffle=False,
+        return DataLoader(dataset=self.test_dataset,
+                          batch_size=self.batch_size,
                           persistent_workers=True if self.num_workers > 0 else False,
                           collate_fn=self.collate_fn,
                           num_workers=self.num_workers,
                           drop_last=False)
 
     def predict_dataloader(self):
-        return DataLoader(dataset=self._transfer_op_train_dataset, batch_size=self.batch_size, pin_memory=False,
+        return DataLoader(dataset=self.test_dataset,
+                          batch_size=self.batch_size,
+                          persistent_workers=True if self.num_workers > 0 else False,
                           collate_fn=self.collate_fn,
-                          num_workers=self.num_workers, shuffle=False, drop_last=False)
-
-    def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
-        return super().transfer_batch_to_device(batch, device, dataloader_idx)
+                          num_workers=self.num_workers,
+                          drop_last=False)
 
     @property
     def prepared(self):
         return self.train_dataset is not None
 
-    def collate_fn(self, batch_list: list) -> dict:
-        batch = torch.utils.data.default_collate(batch_list)
-        for k, v in batch.items():
-            batch[k] = v.to(self.device)
+    def collate_fn(self, batch) -> dict:
+        if isinstance(batch, TensorContextDataset):
+            return batch
+        elif isinstance(batch, list) and isinstance(batch[0], TensorContextDataset):
+            batch = torch.utils.data.default_collate([a.data for a in batch])
+            return TensorContextDataset(batch)
+        else:
+            batch = torch.utils.data.default_collate(batch)
         return batch
 
     def data_augmentation_collate_fn(self, batch_list: list) -> dict:
@@ -286,22 +305,22 @@ class DynamicsDataModule(LightningDataModule):
             batch['next_action'] = g_next_action
         return batch
 
-    def plot_sample_trajs(self):
-        num_trajs = 5
-        fig = None
-        styles = {'Train': dict(width=3, dash='solid'),
-                  'Test':  dict(width=2, dash='2px'),
-                  'Val':   dict(width=1, dash='5px')}
-        for partition, dataloader in zip(['Train', 'Test', 'Val'],
-                                         [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
-            batch = next(iter(dataloader))
-            state = batch['state']
-            next_state = batch['next_state']
-            state_traj = traj_from_states(state, next_state)
-
-            fig = plot_trajectories(state_traj, fig=fig, dt=self.dt, main_style=styles[partition],
-                                    main_legend_label=partition, n_trajs_to_show=num_trajs, title="Sample Trajectories")
-        fig.show()
+    # def plot_sample_trajs(self):
+    #     num_trajs = 5
+    #     fig = None
+    #     styles = {'Train': dict(width=3, dash='solid'),
+    #               'Test':  dict(width=2, dash='2px'),
+    #               'Val':   dict(width=1, dash='5px')}
+    #     for partition, dataloader in zip(['Train', 'Test', 'Val'],
+    #                                      [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
+    #         batch = next(iter(dataloader))
+    #         state = batch['state']
+    #         next_state = batch['next_state']
+    #         state_traj = traj_from_states(state, next_state)
+    #
+    #         fig = plot_trajectories(state_traj, fig=fig, dt=self.dt, main_style=styles[partition],
+    #                                 main_legend_label=partition, n_trajs_to_show=num_trajs, title="Sample Trajectories")
+    #     fig.show()
 
 
 if __name__ == "__main__":
@@ -318,12 +337,12 @@ if __name__ == "__main__":
 
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=10,
-                                     eval_pred_horizon=10,
+                                     val_pred_horizon=10,
                                      test_pred_horizon=150,
-                                     frames_per_step=1,
+                                     lookback_len=1,
                                      num_workers=1,
                                      batch_size=1000,
-                                     augment=False,
+                                     data_augmentation=False,
                                      standardize=True,
                                      # state_obs=('base_z_error', 'base_vel_error', 'base_ang_vel_error', ),
                                      # action_obs=tuple(),

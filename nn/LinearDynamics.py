@@ -97,6 +97,81 @@ class LinearDynamics(MarkovDynamics):
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 
+    def forcast_modes(self, state: Tensor, n_steps: int = 1, rank=-1) -> Tensor:
+        batch, state_dim = state.shape
+
+        eig, V, V_inv = self.eigval_decomp()
+        if rank < 0:
+            eig_tol = torch.finfo(torch.float64).eps * 5
+            rank = min(self.state_dim, torch.sum(torch.abs(eig) > eig_tol).item())
+        else:
+            rank = min(self.state_dim, rank)
+        assert rank == -1 or rank >= 1, f"Invalid rank {rank} for state_dim {self.state_dim}"
+        # Only consider the first 'rank' eigenvalues and eigenvectors
+        eig = eig[:rank]
+        V = V[:, :rank]
+        V_inv = V_inv[:rank, :]
+
+        # Convert the state tensor to the same dtype as V
+        state_cmplx = state.to(dtype=V.dtype)
+
+        # Project the state onto the eigenvectors of the transfer operator
+        # Shape of state_modes: [batch, rank]
+        state_modes_eigbasis = torch.einsum("ij,...j->...i", V_inv, state_cmplx)
+
+        # Generate a tensor of steps from 1 to n_steps. Shape of steps: [n_steps, 1]
+        steps = torch.arange(0, n_steps + 1).to(state.device).unsqueeze(-1)
+
+        # Compute the power of the eigenvalues for each step. Shape of eig_power: [n_steps, rank]
+        eig_power = torch.pow(eig.unsqueeze(0), steps)
+
+        # Compute the trajectory of the modes by multiplying the modes by the powered eigenvalues
+        # Shape of mode_traj: [..., n_steps, rank]
+        mode_traj_eigbasis = torch.einsum('...r,sr->...sr', state_modes_eigbasis, eig_power)
+
+        # Compute the trajectory of the modes in the original coordinates by multiplying the modes by the matrix V
+        # Shape of mode_traj_orig_coords: [..., n_steps, rank, state_dim]
+        mode_traj_orig_coords = torch.einsum('sr,...tr->...trs', V, mode_traj_eigbasis)
+
+        # Ensure that the recovered modes are approximately real and cast to original dtype
+        # mode_traj_orig_coords = mode_traj_orig_coords.to(dtype=state.dtype)
+
+        # Test the above operations by applying the expected evolution of the first mode to the initial state
+        T = (V @ torch.diag(eig) @ V_inv).to(dtype=state.dtype)
+        step = 2
+        T_s = (V @ torch.diag(torch.pow(eig, step)) @ V_inv).to(dtype=state.dtype)
+        batch_idx = 2
+        x_0 = state[batch_idx, :]
+        x_s = T_s @ x_0
+        # The sum of the modes should be equal to the state
+        x_s_modes = mode_traj_orig_coords[batch_idx, step, :]
+        x_s_rec = torch.sum(x_s_modes, dim=0)
+        assert torch.allclose(x_s_rec.imag, torch.zeros_like(x_s), atol=1e-3, rtol=1e-3), \
+            f"Reconstruction has imaginary component: {torch.max(x_s_rec.imag)}"
+        assert torch.allclose(x_s, x_s_rec.real, atol=1e-2, rtol=1e-2), f"Invalid mode evolution: {torch.max(x_s - x_s_rec.real)}"
+
+        return eig, mode_traj_orig_coords
+
+    @torch.no_grad()
+    def eigval_decomp(self):
+        if self.is_trainable:
+            T = self.transfer_op.weight
+            # b = self.transfer_op.bias
+        else:
+            T = self.transfer_op
+            # b = self.transfer_op_bias
+
+        # TODO: Remove.... Set random orthogonal matrix
+        T = torch.randn_like(T)
+        eig, V = torch.linalg.eig(T)  # T = V @ diag(eig) @ V_inv
+
+        # Sort the eigenvalues in descending order of magnitude
+        _, idx = torch.sort(torch.abs(eig), descending=True, dim=0, stable=True)
+        eig = eig[idx]
+        V = V[:, idx]
+        V_inv = torch.linalg.inv(V)
+        return eig, V, V_inv
+
     def get_transfer_op(self):
         if self.is_trainable:
             raise RuntimeError("This model was initialized as trainable")

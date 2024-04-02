@@ -9,11 +9,9 @@ import pandas as pd
 from plotly.subplots import make_subplots
 
 from data.DynamicsRecording import DynamicsRecording, get_train_test_val_file_paths
-import morpho_symm
 from morpho_symm.utils.robot_utils import load_symmetric_system
-from morpho_symm.utils.rep_theory_utils import isotypic_decomp_representation, irreps_stats
-
-from utils.plotting import plot_trajectories
+from morpho_symm.utils.abstract_harmonics_analysis import isotypic_decomp_representation
+from morpho_symm.utils.rep_theory_utils import irreps_stats
 
 
 def decom_signal_into_isotypic_components(signal: np.ndarray, rep: Representation):
@@ -95,9 +93,9 @@ if __name__ == "__main__":
 
     rep_Qjs = G.representations['Q_js']
     rep_TqQjs = G.representations['TqQ_js']
-    rep_R3 = G.representations['Rd']
-    rep_R3_pseudo = G.representations['Rd_pseudo']
-    rep_E3 = G.representations['Ed']
+    rep_R3 = G.representations['R3']
+    rep_R3_pseudo = G.representations['R3_pseudo']
+    rep_E3 = G.representations['E3']
 
     path_to_data = Path(__file__).parent
     assert path_to_data.exists(), f"Invalid Dataset path {path_to_data.absolute()}"
@@ -252,7 +250,7 @@ if __name__ == "__main__":
         # Set a unique y label for all subplots centered in the middle of the figure
         fig.update_yaxes(**yaxis_style, title="Kinetic Energy [J]", row=len(kin_energy_iso_decomp_t)-1, col=1)
 
-        base_path = Path(__file__).parent.parent.parent / 'media' / 'images' / 'umich_dataset'
+        base_path = Path(__file__).parent.parent.parent / 'docs' / 'media' / 'images' / 'umich_dataset'
 
         file_path = base_path / f"{recording_name}_kin_energy_decomposition_{G.name}"
         fig.write_image(file_path.with_suffix(".svg"))

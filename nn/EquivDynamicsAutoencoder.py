@@ -15,7 +15,7 @@ from nn.markov_dynamics import MarkovDynamics
 from morpho_symm.nn.EMLP import EMLP
 from utils.losses_and_metrics import obs_state_space_metrics, iso_metrics_2_obs_space_metrics
 from utils.mysc import batched_to_flat_trajectory
-from morpho_symm.utils.rep_theory_utils import isotypic_basis
+from morpho_symm.utils.abstract_harmonics_analysis import isotypic_basis
 
 log = logging.getLogger(__name__)
 

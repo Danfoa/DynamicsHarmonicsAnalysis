@@ -16,10 +16,6 @@ from lightning_fabric import seed_everything
 from omegaconf import DictConfig, OmegaConf
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DeepProjections import DPNet
-from nn.DynamicsAutoEncoder import DAE
-from nn.EquivDeepPojections import EquivDPNet
-from nn.EquivDynamicsAutoencoder import EquivDAE
 from nn.LightningLatentMarkovDynamics import LightLatentMarkovDynamics
 from utils.mysc import check_if_resume_experiment, class_from_name, format_scientific
 
@@ -57,15 +53,15 @@ def main(cfg: DictConfig):
         # Get the Lightning data module handling training/test/val data loaders
         datamodule = DynamicsDataModule(data_path,
                                         batch_size=cfg.model.batch_size,
-                                        frames_per_step=cfg.system.frames_per_state,
+                                        lookback_len=cfg.system.frames_per_state,
                                         pred_horizon=cfg.system.pred_horizon,
-                                        eval_pred_horizon=cfg.system.eval_pred_horizon,
+                                        val_pred_horizon=cfg.system.eval_pred_horizon,
                                         test_pred_horizon=cfg.system.test_pred_horizon,
                                         system_cfg=cfg.system,
                                         num_workers=cfg.num_workers,
                                         device=device,
-                                        train_ratio=cfg.system.train_ratio,
-                                        augment=cfg.model.augment,
+                                        train_ratio=cfg.system.split_ratios,
+                                        data_augmentation=cfg.model.augment,
                                         state_obs=cfg.system.get('state_obs', None),
                                         action_obs=cfg.system.get('action_obs', None),
                                         standardize=cfg.system.standardize)
@@ -139,7 +135,7 @@ def main(cfg: DictConfig):
             stats.print_stats('koopman_robotics')
 
         if training_successful:
-            if not cfg.debug :  # Loading best model and test it
+            if not cfg.debug:  # Loading best model and test it
                 if best_path.exists():
                     best_ckpt = torch.load(best_path)
                     pl_model.eval()
@@ -157,9 +153,6 @@ def main(cfg: DictConfig):
             raise RuntimeError("Training failed. Check logs for details.")
     else:
         log.warning(f"Training run done. Check {run_path} for results.")
-
-
-
 
 
 def get_model(cfg, datamodule):
@@ -185,6 +178,7 @@ def get_model(cfg, datamodule):
 
     if cfg.model.name.lower() in ["dae", "dae-aug"]:
         assert cfg.system.pred_horizon >= 1
+        from nn.DynamicsAutoEncoder import DAE
         model = DAE(state_dim=state_dim,
                     obs_state_dim=obs_state_dim,
                     dt=datamodule.dt,
@@ -197,6 +191,7 @@ def get_model(cfg, datamodule):
                     )
     elif cfg.model.name.lower() == "e-dae":
         assert cfg.system.pred_horizon >= 1
+        from nn.EquivDynamicsAutoencoder import EquivDAE
         model = EquivDAE(state_rep=datamodule.state_type.representation,
                          obs_state_dim=obs_state_dim,
                          dt=datamodule.dt,
@@ -209,6 +204,7 @@ def get_model(cfg, datamodule):
                          )
     elif cfg.model.name.lower() == "e-dpnet":
         assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
+        from nn.EquivDeepPojections import EquivDPNet
         model = EquivDPNet(state_rep=datamodule.state_type.representation,
                            obs_state_dim=obs_state_dim,
                            max_ck_window_length=cfg.model.max_ck_window_length,
@@ -222,6 +218,7 @@ def get_model(cfg, datamodule):
                            group_avg_trick=cfg.model.group_avg_trick)
     elif cfg.model.name.lower() == "dpnet":
         assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
+        from nn.DeepProjections import DPNet
         model = DPNet(state_dim=datamodule.state_type.size,
                       obs_state_dim=obs_state_dim,
                       max_ck_window_length=cfg.model.max_ck_window_length,

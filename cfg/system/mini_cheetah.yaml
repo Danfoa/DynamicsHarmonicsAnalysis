@@ -9,7 +9,7 @@ max_epochs: 200
 early_stop_epochs: 30
 standardize: True
 
-obs_state_ratio: 5                             # obs_state_dim = obs_state_ratio * state_dim
+obs_state_ratio: 1                             # obs_state_dim = obs_state_ratio * state_dim
 
 state_obs: ['joint_pos', 'joint_vel', 'base_z', 'base_vel', 'base_ori', 'base_ang_vel']
 action_obs: []

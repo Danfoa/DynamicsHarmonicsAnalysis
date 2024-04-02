@@ -28,7 +28,7 @@ from utils.losses_and_metrics import (forecasting_loss_and_metrics, iso_metrics_
                                       obs_state_space_metrics)
 from utils.mysc import traj_from_states
 from utils.linear_algebra import full_rank_lstsq_symmetric
-from morpho_symm.utils.rep_theory_utils import isotypic_basis
+from morpho_symm.utils.abstract_harmonics_analysis import isotypic_basis
 
 log = logging.getLogger(__name__)
 
@@ -264,11 +264,11 @@ if __name__ == "__main__":
     device = torch.device('cuda:0')
     data_module = DynamicsDataModule(data_path=mock_path,
                                      pred_horizon=pred_horizon,
-                                     eval_pred_horizon=100,
-                                     frames_per_step=1,
+                                     val_pred_horizon=100,
+                                     lookback_len=1,
                                      num_workers=0,
                                      batch_size=batch_size,
-                                     augment=True,
+                                     data_augmentation=True,
                                      device=device,
                                      )
     data_module.prepare_data()

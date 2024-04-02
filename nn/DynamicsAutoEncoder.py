@@ -90,6 +90,16 @@ class DAE(LatentMarkovDynamics):
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
         return pred_state_traj, pred_obs_state_traj
 
+    def forcast_modes(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
+        assert state.shape[-1] == self.state_dim, f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
+        time_horizon = n_steps + 1
+
+        obs_state = self.obs_fn(state)
+        eig, pred_obs_modes_state_traj = self.obs_space_dynamics.forcast_modes(state=obs_state, n_steps=n_steps)
+        pred_state_modes_traj = self.inv_obs_fn(pred_obs_modes_state_traj)
+
+        return pred_state_modes_traj, pred_obs_modes_state_traj
+
     def compute_loss_and_metrics(self,
                                  state: Tensor,
                                  next_state: Tensor,
@@ -100,6 +110,7 @@ class DAE(LatentMarkovDynamics):
                                  pred_obs_state_one_step: Tensor,
                                  ) -> (Tensor, dict[str, Tensor]):
 
+        self.forcast_modes(state, n_steps=2)
         _, forecast_metrics = super(DAE, self).compute_loss_and_metrics(
             state=state,
             next_state=next_state,

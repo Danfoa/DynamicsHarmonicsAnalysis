@@ -11,11 +11,11 @@ standardize: False
 
 # Dynamics parameters
 state_dim: 3                                   # Dimension of the system's state
-obs_state_ratio: 1                             # obs_state_dim = obs_state_ratio * state_dim
+obs_state_ratio: 3                             # obs_state_dim = obs_state_ratio * state_dim
 frames_per_state: 1                            # Number of time-frames to use as a Markov Process state time step
 pred_horizon: 2                                # Number (or percentage) of Markov Process state time steps to predict into the future
 eval_pred_horizon: 20                          # Number (or percentage) of Markov Process state time steps to predict into the future
-test_pred_horizon: .5                          # Number (or percentage) of Markov Process state time steps to predict into the future
+test_pred_horizon: 20                          # Number (or percentage) of Markov Process state time steps to predict into the future
 noise_level: 2                                 # Scale of the Wiener process noise from 0 to 9 (0 is no noise)
 n_constraints: 1
 

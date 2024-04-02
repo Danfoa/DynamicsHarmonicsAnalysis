@@ -6,13 +6,13 @@ from typing import Optional
 
 import escnn
 from lightning import seed_everything
-from morpho_symm.utils.rep_theory_utils import isotypic_decomp_representation, isotypic_basis
+from morpho_symm.utils.abstract_harmonics_analysis import isotypic_basis
 import numpy as np
 import scipy
 from escnn.group import Representation, directsum
 from tqdm import tqdm
 
-from data.DynamicsRecording import DynamicsRecording
+from morpho_symm.data.DynamicsRecording import DynamicsRecording
 from utils.mysc import companion_matrix, random_orthogonal_matrix
 from utils.linear_algebra import matrix_average_trick
 from utils.plotting import plot_system_2D, plot_system_3D, plot_trajectories
@@ -326,7 +326,7 @@ def evolve_linear_dynamics(A: np.ndarray, init_state: np.ndarray, dt: float, sim
 if __name__ == '__main__':
     np.set_printoptions(precision=3)
     seed_everything(120)
-    order = 10
+    order = 3
     subgroups_ids = dict(C2=('cone', 1),
                          Tetrahedral=('fulltetra',),
                          Octahedral=(True, 'octa',),
@@ -347,7 +347,7 @@ if __name__ == '__main__':
     # Parameters of the state space.
     for n_constraints in [1]: # [0, 1]:
         # Define the state representation.
-        for multiplicity in [3]:
+        for multiplicity in [1]:
             # Generate stable equivariant linear dynamics withing a range of fast and slow dynamics
             max_time_constant = 5  # [s] Maximum time constant of the system.
             min_period = max_time_constant / 3  # [s] Minimum period of oscillation of the fastest transient mode.

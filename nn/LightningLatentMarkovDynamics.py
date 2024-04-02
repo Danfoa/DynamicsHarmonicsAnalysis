@@ -209,6 +209,7 @@ class LightLatentMarkovDynamics(LightningModule):
         wandb_logger = self.logger.experiment
         # Get the learned transfer operator.
         linear_dynamics = self.model.obs_space_dynamics
+
         if isinstance(linear_dynamics, EquivLinearDynamics):
             df_eigvals = None
             model_state_type = linear_dynamics.state_type
