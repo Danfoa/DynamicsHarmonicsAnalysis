@@ -115,7 +115,7 @@ def full_rank_lstsq_symmetric(X: Tensor,
 
 
 def full_rank_lstsq(X: Tensor, Y: Tensor, driver='gelsd', bias=True) -> [Tensor, Union[Tensor, None]]:
-    """Compute the least squares solution of the linear system `X' = A·X + B`. Assuming full rank X and A.
+    """Compute the least squares solution of the linear system `Y = A·X + B`. Assuming full rank X and A.
     Args:<
         X: (|x|, n_samples) Data matrix of the initial states.
         Y: (|y|, n_samples) Data matrix of the next states.

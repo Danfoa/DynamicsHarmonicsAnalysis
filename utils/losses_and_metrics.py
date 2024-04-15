@@ -385,7 +385,7 @@ def compute_chain_projection_scores(CCov: Tensor, Cov: Tensor, Cov_prime: Tensor
     """
     assert (len(CCov.shape) == 4 and CCov.shape[0] == CCov.shape[1]
             and CCov.shape[2] == CCov.shape[3]), f"Expected Cov_t_dt of shape (T, T, state_dim, state_dim)"
-    assert (len(Cov.shape) == 3 and Cov.shape[0] == Cov.shape[1], f"Expected Cov of shape (T, state_dim, state_dim)")
+    assert len(Cov.shape) == 3 and Cov.shape[0] == Cov.shape[1], f"Expected Cov of shape (T, state_dim, state_dim)"
     assert Cov.shape == Cov_prime.shape, f"Expected Cov_prime of shape (T, state_dim, state_dim)"
     time_horizon, state_dim, _ = Cov.shape
 

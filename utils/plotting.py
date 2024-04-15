@@ -256,7 +256,7 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
 
     # Validate the input array shape
     if len(trajs.shape) != 3:
-        raise ValueError("Input array should have shape (num_trajs, time, state_dimension).")
+        raise ValueError(f"Input array should have shape (num_trajs, time, state_dimension) got {trajs.shape}")
 
     num_trajs, time, state_dimension = trajs.shape
     n_trajs_to_show = min(num_trajs, n_trajs_to_show)
@@ -283,7 +283,16 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
         secondary_style = dict(width=1)
 
     # Generate color sequence from the chosen colorscale
-    color_seq = colors.qualitative.__dict__[colorscale][:n_trajs_to_show]
+    try:
+        color_seq = colors.qualitative.__dict__[colorscale][:n_trajs_to_show]
+    except KeyError:
+        import plotly.express as px
+        colorscale = px.colors.get_colorscale(colorscale)
+        # Generate n evenly spaced points between 0 and 1
+        points = np.linspace(0, 1, n_trajs_to_show)
+        # Interpolate the colorscale at these points
+        color_seq = px.colors.sample_colorscale(colorscale, points)
+
 
     # Loop through each state dimension and plot it
     for dim in range(state_dimension):
@@ -297,7 +306,7 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
             y_vals = trajs[traj_idx, :, dim]
             x_vals = np.arange(time) * dt
 
-            legend_group = f"{traj_idx}"
+            legend_group = f"{main_legend_label}_{traj_idx}"
             fig.add_trace(
                 go.Scatter(x=x_vals, y=y_vals, mode='lines',
                            line=dict(color=color, **main_style),
@@ -334,12 +343,18 @@ def plot_trajectories(trajs, secondary_trajs=None, fig=None, colorscale='Prism',
         mse_time = np.mean(mse_time_traj, axis=0)
 
         x_vals = np.arange(mse_time.shape[0]) * dt
+
+        color = color_seq[0]
+        # Replace rgb( with rgba( to add opacity
+        color = color.replace('rgb(', 'rgba(').replace(')', f',{0.1})')
+
         fig.add_trace(
             go.Scatter(x=x_vals, y=mse_time, mode='lines',
-                       fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.1)',  # Added fill options here
-                       line=dict(color='red', width=2),
-                       name=f"MSE",
-                       legendgroup=f"MSE", showlegend=False),
+                       fill='tozeroy',
+                       fillcolor=color, # Added fill options here
+                       line=dict(color=color, width=1),
+                       name=main_legend_label,
+                       legendgroup=f"{main_legend_label}_{0}", showlegend=False),
             row=num_rows, col=num_cols + col_shift
             )
         fig.update_yaxes(title_text="Mean Square Error", row=num_rows, col=num_cols + col_shift)
