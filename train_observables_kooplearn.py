@@ -16,7 +16,6 @@ from hydra.utils import get_original_cwd
 from lightning import Trainer, seed_everything
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
-from morpho_symm.nn.MLP import MLP
 from omegaconf import DictConfig, OmegaConf
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader
@@ -98,8 +97,8 @@ def main(cfg: DictConfig):
 
         # Compute the spectral decomposition of the learned evolution operator =========================================
         sample_batch = next(iter(datamodule.test_dataloader()))
-        sample_batch.to(device=latent_dyn_model.evolution_operator().device,
-                        dtype=latent_dyn_model.evolution_operator().dtype)
+        sample_batch.to(device=latent_dyn_model.evolution_operator.device,
+                        dtype=latent_dyn_model.evolution_operator.dtype)
         out = latent_dyn_model.evolve_forward(sample_batch)
         pred_state = out['pred_state']
         latent_obs = out['latent_obs']
@@ -309,13 +308,13 @@ def configure_experiment_trainer(cfg, ckpt_call, run_path, seed_path, wb_logger=
 
 def get_model(cfg, state_dim: int, state_type: FieldType):
     # state_dim = cfg.system.state_dim
-    obs_state_dim = math.ceil(cfg.system.obs_state_ratio * state_dim)
+    latent_state_dim = math.ceil(cfg.system.obs_state_ratio * state_dim)
     num_hidden_neurons = cfg.model.num_hidden_units
 
-    if obs_state_dim > num_hidden_neurons:
+    if latent_state_dim > num_hidden_neurons:
         # Set num_hidden_neurons to be the closest power of 2 to obs_state_dim from above
         # For obs_state_dim=210 -> num_hidden_neurons=256
-        num_hidden_neurons = 2 ** math.ceil(math.log2(obs_state_dim))
+        num_hidden_neurons = 2 ** math.ceil(math.log2(latent_state_dim))
 
     # Get the selected model for observation learning _____________________________________________________________
     if cfg.model.equivariant:
@@ -329,36 +328,45 @@ def get_model(cfg, state_dim: int, state_type: FieldType):
                          bias=cfg.model.bias,
                          batch_norm=cfg.model.batch_norm)
 
-    if cfg.model.name.lower() in ["dae", "dae-aug"]:
-        assert cfg.system.pred_horizon >= 1
-        from kooplearn.models.ae.dynamic import DynamicAE
+    assert cfg.system.pred_horizon >= 1
 
-        encoder_kwargs = dict(in_dim=state_dim, out_dim=obs_state_dim, **obs_fn_params)
-        decoder_kwargs = dict(in_dim=obs_state_dim, out_dim=state_dim, **obs_fn_params)
+    if cfg.model.name.lower() in ["dae", "dae-aug"]:
+        from kooplearn.models.ae.dynamic import DynamicAE
+        from morpho_symm.nn.MLP import MLP
+
+        encoder_kwargs = dict(in_dim=state_dim, out_dim=latent_state_dim, **obs_fn_params)
+        decoder_kwargs = dict(in_dim=latent_state_dim, out_dim=state_dim, **obs_fn_params)
         model = DynamicAE(encoder=MLP, encoder_kwargs=encoder_kwargs,
                           decoder=MLP, decoder_kwargs=decoder_kwargs,
-                          latent_dim=obs_state_dim,
+                          latent_dim=latent_state_dim,
                           loss_weights=None,
                           evolution_op_init_mode=cfg.model.evolution_op_init_mode, )
 
-    elif cfg.model.name.lower() == "e-dae":
-        assert cfg.system.pred_horizon >= 1
-        from nn.EquivDynamicsAutoencoder import EquivDAE
-        model = EquivDAE(state_rep=datamodule.state_type.representation,
-                         obs_state_dim=obs_state_dim,
-                         dt=datamodule.dt,
-                         orth_w=cfg.model.orth_w,
-                         obs_fn_params=obs_fn_params,
-                         group_avg_trick=cfg.model.group_avg_trick,
-                         state_dependent_obs_dyn=cfg.model.state_dependent_obs_dyn,
-                         enforce_constant_fn=cfg.model.constant_function,
-                         # reuse_input_observable=cfg.model.reuse_input_observable,
-                         )
+    elif cfg.model.name.lower() == "e-dae" or cfg.model.name.lower() == "edae":
+        from morpho_symm.utils.abstract_harmonics_analysis import isotypic_basis
+        from kooplearn.models.ae.equiv_dynamic import EquivDynamicAE
+        from morpho_symm.nn.EMLP import EMLP
+
+        multiplicity = math.ceil(latent_state_dim / state_type.size)
+        # Define the observation space representation in the isotypic basis.
+        obs_iso_reps, obs_iso_dims = isotypic_basis(representation=state_type.representation,
+                                                    multiplicity=multiplicity,
+                                                    prefix='LatentState')
+        latent_state_type = FieldType(state_type.gspace, [rep_iso for rep_iso in obs_iso_reps.values()])
+
+        encoder_kwargs = dict(in_type=state_type, out_type=latent_state_type, **obs_fn_params)
+        decoder_kwargs = dict(in_type=latent_state_type, out_type=state_type, **obs_fn_params)
+
+        model = EquivDynamicAE(encoder=EMLP, encoder_kwargs=encoder_kwargs,
+                               decoder=EMLP, decoder_kwargs=decoder_kwargs,
+                               loss_weights=None,
+                               evolution_op_init_mode=cfg.model.evolution_op_init_mode)
+
     elif cfg.model.name.lower() == "e-dpnet":
         assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
         from nn.EquivDeepPojections import EquivDPNet
         model = EquivDPNet(state_rep=datamodule.state_type.representation,
-                           obs_state_dim=obs_state_dim,
+                           obs_state_dim=latent_state_dim,
                            max_ck_window_length=cfg.model.max_ck_window_length,
                            dt=datamodule.dt,
                            ck_w=cfg.model.ck_w,
@@ -372,7 +380,7 @@ def get_model(cfg, state_dim: int, state_type: FieldType):
         assert cfg.model.max_ck_window_length <= cfg.system.pred_horizon, "max_ck_window_length <= pred_horizon"
         from nn.DeepProjections import DPNet
         model = DPNet(state_dim=datamodule.state_type.size,
-                      obs_state_dim=obs_state_dim,
+                      obs_state_dim=latent_state_dim,
                       max_ck_window_length=cfg.model.max_ck_window_length,
                       dt=datamodule.dt,
                       ck_w=cfg.model.ck_w,
