@@ -11,9 +11,10 @@ batch_norm: False                               # Do not enable this for now.
 bias: True
 constant_function: True                         # Whether to ensure the constant function is on the obs/function space.
 
+evolution_op_init_mode: 'stable'
 
 # Optimization hyperparameters parameters
 lr: 1e-3
-batch_size: 1024
+batch_size: 2048
 
 

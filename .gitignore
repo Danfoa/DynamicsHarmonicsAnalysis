@@ -11,3 +11,7 @@ experiments/
 .vscode/
 
 *.pkl
+
+.ipynb_checkpoints/
+_tmp/
+lightning_logs/

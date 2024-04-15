@@ -31,6 +31,7 @@ class DynamicsDataModule(LightningDataModule):
                  test_pred_horizon: Union[int, float],
                  lookback_len: int = 1,
                  split_ratios: tuple = (0.7, 0.15, 0.15),  # Train, Test, Validation
+                 train_ratio: float = 1.0,   # Percentage of trining data to use. Useful for debugging
                  data_augmentation: bool = False,
                  state_obs: Optional[tuple[str]] = None,
                  standardize: bool = True,
@@ -75,7 +76,10 @@ class DynamicsDataModule(LightningDataModule):
             system_cfg = {}
         self._data_path = data_path
         self.system_cfg = system_cfg if system_cfg is not None else {}
+        assert np.isclose(np.sum(split_ratios), 1.0), "Dataset train/val/split ratios must sum to 1.0"
         self.split_ratios = split_ratios
+        assert 0.01 < train_ratio <= 1.0, "Train ratio must be in (0.01, 1.0]"
+        self.train_ratio = train_ratio
         self.augment = data_augmentation
         self.lookback_len = lookback_len
 
@@ -140,7 +144,7 @@ class DynamicsDataModule(LightningDataModule):
             )
 
         if self.standardize:  # If standardization is enabled, use training data to estimate mean and variance
-            train_data.state_momements()
+            train_data.state_moments()
             test_data.obs_moments = train_data.obs_moments
             val_data.obs_moments = train_data.obs_moments
 
@@ -168,6 +172,21 @@ class DynamicsDataModule(LightningDataModule):
                                                   backend="torch",
                                                   device=self.device)
 
+        # TODO: Remove from here.
+        # Shuffle the samples of the partitions
+        idx = torch.randperm(self.train_dataset.data.shape[0])
+        self.train_dataset.data = self.train_dataset.data[idx]
+        idx = torch.randperm(self.val_dataset.data.shape[0])
+        self.val_dataset.data = self.val_dataset.data[idx]
+        idx = torch.randperm(self.test_dataset.data.shape[0])
+        self.test_dataset.data = self.test_dataset.data[idx]
+
+        # TODO: Do somewhere else or more beautifully
+        # If required (self.train_ratio< 1.0), reduce the training dataset size, for sample efficiency experiments
+        if self.train_ratio < 1.0:
+            n_samples = int(self.train_ratio * self.train_dataset.data.shape[0])
+            self.train_dataset.data = self.train_dataset.data[:n_samples]
+
         self.dt = self._dynamic_recording.dynamics_parameters['dt']
         # In case no measurements are passed, we recover the ones from the DynamicsRecording file.
         self.state_obs = self._dynamic_recording.state_obs if self.state_obs is None else self.state_obs
@@ -175,13 +194,9 @@ class DynamicsDataModule(LightningDataModule):
         self.state_mean, self.state_var = self._dynamic_recording.state_moments()
 
         # Rebuilt the ESCNN representations of measurements _________________________________________________________
-        # TODO: Handle dyn systems without symmetries
         # G_domain = escnn.group.O3()
         self.symm_group = self._dynamic_recording.dynamics_parameters.get('group', None)
-
-        if self.symm_group is None:
-            pass
-        else:
+        if self.symm_group is not None:
             # TODO: This seems a bit to "experiment specific" code and should be removed from here.
             # however, we might need to provide this flexibility to the user.
             if 'subgroup_id' in self.system_cfg and self.system_cfg['subgroup_id'] is not None:
@@ -264,7 +279,7 @@ class DynamicsDataModule(LightningDataModule):
     def prepared(self):
         return self.train_dataset is not None
 
-    def collate_fn(self, batch) -> dict:
+    def collate_fn(self, batch) -> Any:
         if isinstance(batch, TensorContextDataset):
             return batch
         elif isinstance(batch, list) and isinstance(batch[0], TensorContextDataset):
@@ -274,16 +289,10 @@ class DynamicsDataModule(LightningDataModule):
             batch = torch.utils.data.default_collate(batch)
         return batch
 
-    def data_augmentation_collate_fn(self, batch_list: list) -> dict:
-        batch = torch.utils.data.default_collate(batch_list)
-        for k, v in batch.items():
-            batch[k] = v.to(self.device)
-        state = batch['state']
-        next_state = batch['next_state']
+    def data_augmentation_collate_fn(self, batch) -> Any:
+        batch = self.collate_fn(batch)
 
-        action = batch.get('action', None)
-        next_action = batch.get('next_action', None)
-
+        state = batch.data
         # Sample a random symmetry transformation
         g = self.symm_group.sample()
         if g == self.symm_group.identity:  # Avoid the computational overhead of applying the identity
@@ -292,35 +301,24 @@ class DynamicsDataModule(LightningDataModule):
         rep_state = self.state_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
         # Use einsum notation to apply the tensor operations required. Here o=state_dim is the output dimension,
         # s=state_dim is the input dimension, b=batch_size, t=horizon, ... = arbitrary dimensions
-        g_state = torch.einsum("os,bs...->bo...", rep_state, state)
-        g_next_state = torch.einsum("os,bts...->bto...", rep_state, next_state)
+        g_state = torch.einsum("os,...s->...o", rep_state, state)
+        g_batch = TensorContextDataset(g_state)
+        return g_batch
 
-        batch['state'] = g_state
-        batch['next_state'] = g_next_state
-        if action is not None:
-            rep_action = self.action_field_type.fiber_representation(g).to(dtype=state.dtype, device=state.device)
-            g_action = torch.einsum("oa,ba...->bo...", rep_action, action)
-            g_next_action = torch.einsum("oa,bta...->bto...", rep_action, next_action)
-            batch['action'] = g_action
-            batch['next_action'] = g_next_action
-        return batch
+    def plot_sample_trajs(self):
+        num_trajs = 3
+        fig = None
+        styles = {'Train': dict(width=3, dash='solid'),
+                  'Test':  dict(width=2, dash='2px'),
+                  'Val':   dict(width=1, dash='5px')}
+        for partition, dataloader in zip(['Train', 'Test', 'Val'],
+                                         [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
+            state_traj = next(iter(dataloader))
+            state_traj = state_traj.data.detach().cpu()
+            fig = plot_trajectories(state_traj, fig=fig, dt=self.dt, main_style=styles[partition],
+                                    main_legend_label=partition, n_trajs_to_show=num_trajs, title="Sample Trajectories")
+        return fig
 
-    # def plot_sample_trajs(self):
-    #     num_trajs = 5
-    #     fig = None
-    #     styles = {'Train': dict(width=3, dash='solid'),
-    #               'Test':  dict(width=2, dash='2px'),
-    #               'Val':   dict(width=1, dash='5px')}
-    #     for partition, dataloader in zip(['Train', 'Test', 'Val'],
-    #                                      [self.train_dataloader(), self.test_dataloader(), self.val_dataloader()]):
-    #         batch = next(iter(dataloader))
-    #         state = batch['state']
-    #         next_state = batch['next_state']
-    #         state_traj = traj_from_states(state, next_state)
-    #
-    #         fig = plot_trajectories(state_traj, fig=fig, dt=self.dt, main_style=styles[partition],
-    #                                 main_legend_label=partition, n_trajs_to_show=num_trajs, title="Sample Trajectories")
-    #     fig.show()
 
 
 if __name__ == "__main__":

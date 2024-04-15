@@ -5,22 +5,22 @@ name: 'mini_cheetah'
 subgroup_id: null
 group: 'K4xC2'
 
-max_epochs: 200
+max_epochs: 400
 early_stop_epochs: 30
 standardize: True
 
-obs_state_ratio: 1                             # obs_state_dim = obs_state_ratio * state_dim
+obs_state_ratio: 2                             # obs_state_dim = obs_state_ratio * state_dim
 
-state_obs: ['joint_pos', 'joint_vel', 'base_z', 'base_vel', 'base_ori', 'base_ang_vel']
+state_obs: ['joint_pos', 'joint_vel', 'joint_torques', 'base_z_error', 'base_ori', 'base_vel_error', 'base_ang_vel_error']
 action_obs: []
 
 # dt = 0.0012 s   this is the average delta time between observations.
 frames_per_state:  1                                 # Number of time-frames to use as a Markov Process state time step
-pred_horizon:      30                                # Number (or percentage) of Markov Process state time steps to predict into the future
+pred_horizon:      200                                # Number (or percentage) of Markov Process state time steps to predict into the future
 eval_pred_horizon: ${system.pred_horizon}            # Number (or percentage) of Markov Process state time steps to predict into the future
-test_pred_horizon: 100
+test_pred_horizon: 400
 
-terrain: flat
+terrain: uneven_medium
 dynamic_mode: forward_minus_0_4
 
 data_path: '${system.name}/raysim_recordings/${system.terrain}/${system.dynamic_mode}'
