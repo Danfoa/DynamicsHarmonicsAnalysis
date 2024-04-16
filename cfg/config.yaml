@@ -40,6 +40,7 @@ hydra:
         item_sep: " "
         exclude_keys:
           - model
+          - system
           - device
           - exp_name
           - model.max_epochs     # Metrics included in model.summary
@@ -65,13 +66,13 @@ hydra:
           - system.data_path
           - system.group
           - system.noise_level
+          - system.latent_state_pred_w
           - debug
           - debug_loops
           - seed
-          - max_epochs
-
+          - system.max_epochs
   sweep:
-    dir: ./experiments/${hydra.job.name}/
+    dir: ./experiments/${system.name}/${hydra.job.name}/
     subdir: ${system.summary}_${model.summary}_${hydra.job.override_dirname}
 
 #  job_logging:

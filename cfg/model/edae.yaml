@@ -3,15 +3,14 @@ defaults:
 
 name: E-DAE
 # Model hyperparameters
-obs_pred_w: 1.0                                 # Cost function weight for prediction in observation space Z
-orth_w: 0.0                                     # Weight of the orthonormal regularization term in the loss function
-corr_w: 0.0
+latent_state_pred_w: 4.0                         # Cost function weight for prediction in observation space Z
+state_pred_w: 1.0                                # Cost function weight for prediction in state space X
+orth_w: 0.0                                      # Weight of the orthonormal regularization term in the loss function
 
 # Optimization hyperparameters parameters
 lr: 1e-3
 equivariant: True
+augment: False
 
-# Model hyperparameters
-state_dependent_obs_dyn: False                  # Whether to use state-dependent observation dynamics
-group_avg_trick: True
-
+# Latent representation hyperparameter
+#rep_Z: regular #  regular | state               # Define the representation of the latent space as multiplicities of the group regular/state representations

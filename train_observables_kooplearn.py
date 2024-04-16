@@ -2,7 +2,7 @@ import cProfile
 import logging
 import math
 import os
-import pstats
+import pathlib
 import time
 from pathlib import Path
 
@@ -10,20 +10,15 @@ import hydra
 import numpy as np
 import torch
 from escnn.nn import FieldType
-from morpho_symm.data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
-
 from hydra.utils import get_original_cwd
 from lightning import Trainer, seed_everything
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from scipy.spatial.transform import Rotation
-from torch.utils.data import DataLoader
 
 from data.DynamicsDataModule import DynamicsDataModule
-from nn.DynamicsAE2 import DynamicAE
-from nn.LightningLatentMarkovDynamics import LightLatentMarkovDynamics
-from utils.mysc import check_if_resume_experiment, class_from_name, format_scientific
+from utils.mysc import check_if_resume_experiment, class_from_name
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +85,14 @@ def main(cfg: DictConfig):
         pl_latent_dyn_model = latent_dyn_model.fit(trainer=pl_trainer, datamodule=datamodule)
         training_successful = pl_trainer.state.status == "finished"
 
+        if training_successful:  # Test the model =================================================================
+            # Test best model. Selected as the model with lowest evaluation loss during training.
+            best_path = pathlib.Path(ckpt_call.dirpath).joinpath(ckpt_call.filename + ckpt_call.FILE_EXTENSION)
+            # pl_trainer.test(datamodule=datamodule, verbose=True, ckpt_path=str(best_path))
+            pl_trainer.test(pl_latent_dyn_model, datamodule=datamodule, verbose=True)
+            # TODO: uncomment 
+            # wandb_logger.experiment.finish()
+
         # Temporary ==================================================================================================
 
         import plotly.io as pio
@@ -101,52 +104,66 @@ def main(cfg: DictConfig):
                         dtype=latent_dyn_model.evolution_operator.dtype)
         out = latent_dyn_model.evolve_forward(sample_batch)
         pred_state = out['pred_state']
+        pred_state_lin_decoded = out['pred_state_lin_decoded']
         latent_obs = out['latent_obs']
         pred_latent_obs = out['pred_latent_obs']
-        state_lin_rec = torch.einsum('...ol,...l->...o', latent_dyn_model.lin_decoder, pred_latent_obs.data)
-        state_lin_rec = state_lin_rec.detach().cpu().numpy()
+        # state_lin_pred = latent_dyn_model.decode_contexts(pred_latent_obs, decoder=latent_dyn_model.lin_decoder)
+        # state_lin_pred = state_lin_pred.data.detach().cpu().numpy()
+        rec_state_lin_decoded = latent_dyn_model.decode_contexts(latent_obs, decoder=latent_dyn_model.lin_decoder)
+        rec_state = latent_dyn_model.decode_contexts(latent_obs, decoder=latent_dyn_model.decoder)
 
         from utils.plotting import plot_trajectories
-        batch_idx = 0
-        x_traj = sample_batch.data.cpu().detach().numpy()[[batch_idx]]
-        x_traj_pred = pred_state.data.cpu().detach().numpy()[[batch_idx]]
-        x_traj_pred_lin_decoder = state_lin_rec[[batch_idx]]
+        x_traj = sample_batch.data.cpu().detach().numpy()
+        x_traj_pred = pred_state.data.cpu().detach().numpy()
+        x_traj_rec = rec_state.data.cpu().detach().numpy()
+        x_traj_pred_lin_decoder = pred_state_lin_decoded.data.cpu().detach().numpy()
+        x_traj_rec_lin_decoder = rec_state_lin_decoded.data.cpu().detach().numpy()
 
         # Compute the modes _________________________________________________________________
-        mode_info = latent_dyn_model.modes(sample_batch[batch_idx])
+        mode_info = latent_dyn_model.modes(sample_batch)
         mode_info.dt = 0.003
-        mode_info.plot_eigfn_dynamics()
+        fig_eigfn = mode_info.plot_eigfn_dynamics()
+        fig_eigfn.show()
         # mode_info.visual_mode_selection()
 
         n_modes = mode_info.n_modes
         state_modes = mode_info.modes  # (batch, time, mode_idx, state_dim)
-        x_traj_modes = state_modes[[batch_idx]]
+        x_traj_modes = state_modes
         eigvals = mode_info.eigvals
 
         diff_mode_trajs = [x_traj_pred_lin_decoder]
-        fig = plot_trajectories(x_traj, secondary_trajs=x_traj_pred_lin_decoder, dt=mode_info.dt, colorscale='Dark2',
-                                main_legend_label="all_modes", main_style=dict(width=1), secondary_style=dict(width=2))
-        for n_modes_to_show, color_scale in zip([1, 5, 9, 12],
+
+        N_TRAJS = 1
+        fig = plot_trajectories(x_traj, secondary_trajs=x_traj_pred, dt=mode_info.dt, shade_area=True,
+                                main_legend_label="non-linear_pred", n_trajs_to_show=N_TRAJS,
+                                main_style=dict(width=3))
+        fig = plot_trajectories(x_traj, secondary_trajs=x_traj_pred_lin_decoder, dt=mode_info.dt, fig=fig,
+                                colorscale='Dark2',
+                                main_legend_label="linear-pred", main_style=dict(width=1), n_trajs_to_show=N_TRAJS,
+                                secondary_style=dict(width=2))
+        plot_trajectories(x_traj, secondary_trajs=x_traj_rec, fig=fig, dt=mode_info.dt, colorscale='Plotly',
+                          shade_area=True, main_legend_label="non-linear_rec", main_style=dict(width=2), n_trajs_to_show=N_TRAJS,
+                          secondary_style=dict(width=2))
+        plot_trajectories(x_traj, secondary_trajs=x_traj_rec_lin_decoder, fig=fig, dt=mode_info.dt, colorscale='Set1',
+                          shade_area=True, main_legend_label="linear_rec", main_style=dict(width=2), n_trajs_to_show=N_TRAJS,
+                          secondary_style=dict(width=2))
+
+        for n_modes_to_show, color_scale in zip([1, 12, n_modes],
                                                 ['Viridis', 'Cividis', 'Plasma', 'Inferno', 'Magma']):
             x_traj_modes_n = x_traj_modes[:, :, :n_modes_to_show]
             x_traj_rec = np.sum(x_traj_modes_n, axis=-2)
             diff_mode_trajs.append(x_traj_rec)
-            plot_trajectories(x_traj, secondary_trajs=x_traj_rec, fig=fig, dt=mode_info.dt, colorscale=color_scale,
-                              main_legend_label=f"n_modes={n_modes_to_show}", main_style=dict(width=1),
-                              secondary_style=dict(width=2))
-        plot_trajectories(x_traj, secondary_trajs=x_traj_pred, fig=fig, dt=mode_info.dt, shade_area=True,
-                          main_style=dict(width=2))
+            # plot_trajectories(x_traj, secondary_trajs=x_traj_rec, fig=fig, dt=mode_info.dt, colorscale=color_scale,
+            #                   main_legend_label=f"n_modes={n_modes_to_show}", main_style=dict(width=1),
+            #                   secondary_style=dict(width=2), n_trajs_to_show=N_TRAJS,
+            #                   )
 
         fig.show()
-
+        raise Exception("Stop here")
         # Visualize modes in the real robot. _______________________________________________________________________
-        import morpho_symm
-        from morpho_symm.data.DynamicsRecording import DynamicsRecording
-        from morpho_symm.utils.algebra_utils import matrix_to_quat_xyzw, permutation_matrix
-        from morpho_symm.utils.rep_theory_utils import group_rep_from_gens
+        from morpho_symm.utils.algebra_utils import matrix_to_quat_xyzw
         from morpho_symm.utils.pybullet_visual_utils import configure_bullet_simulation
-        from morpho_symm.utils.pybullet_visual_utils import (draw_vector, draw_plane, render_camera_trajectory,
-                                                             spawn_robot_instances)
+        from morpho_symm.utils.pybullet_visual_utils import (spawn_robot_instances)
         from morpho_symm.utils.robot_utils import load_symmetric_system
         from hydra.core.global_hydra import GlobalHydra
         GlobalHydra.instance().clear()
@@ -156,12 +173,12 @@ def main(cfg: DictConfig):
 
         def get_obs_from_state(state: np.array):
             """Auxiliary function to extract the different observations of the state."""
-            q_js = state[..., :12]                 #  (12,)  -> [0, 12)
-            v_js = state[..., 12:24]               #  (12,)  -> [12, 24)
-            base_z = state[..., [24]]              #  (1,)   -> [24, 25)
-            base_vel = state[..., 25:28]           #  (3,)   -> [25, 28)
-            base_ori = state[..., 28:31]           #  (3,)   -> [28, 31)
-            base_ang_vel = state[..., 31:]         #  (3,)   -> [31, 34)
+            q_js = state[..., :12]  # (12,)  -> [0, 12)
+            v_js = state[..., 12:24]  # (12,)  -> [12, 24)
+            base_z = state[..., [24]]  # (1,)   -> [24, 25)
+            base_vel = state[..., 25:28]  # (3,)   -> [25, 28)
+            base_ori = state[..., 28:31]  # (3,)   -> [28, 31)
+            base_ang_vel = state[..., 31:]  # (3,)   -> [31, 34)
             return q_js, v_js, base_z, base_vel, base_ori, base_ang_vel
 
         def get_state_from_obs(q_js, v_js, base_z, base_vel, base_ori, base_ang_vel, base_pos):
@@ -176,13 +193,12 @@ def main(cfg: DictConfig):
             q_js_unit_circle_t = q_js_unit_circle_t.reshape(-1)
 
             q = np.concatenate([base_pos, q_ori, q_js_unit_circle_t], axis=-1)
-            v = np.concatenate([np.zeros(6,), v_js], axis=-1)
+            v = np.concatenate([np.zeros(6, ), v_js], axis=-1)
             return q, v
-
 
         offset = max(0.2, 1.8 * robot.hip_height)
         n_mode_trajs = len(diff_mode_trajs)
-        base_positions = [[0, 0, 0]] +  [[0, 2 * i * robot.hip_height, 0] for i in range(1, n_mode_trajs + 2)]
+        base_positions = [[0, 0, 0]] + [[0, 2 * i * robot.hip_height, 0] for i in range(1, n_mode_trajs + 2)]
         robots = spawn_robot_instances(
             robot, bullet_client=pb, base_positions=base_positions, tint=True, alpha=1.0)
 
@@ -204,7 +220,8 @@ def main(cfg: DictConfig):
 
                 for k, mode_traj in enumerate(state_traj_modes):
                     s_t_mode = mode_traj[t]
-                    q_t_mode, v_t_mode = get_state_from_obs(*get_obs_from_state(s_t_mode), base_pos=base_positions[k + 1])
+                    q_t_mode, v_t_mode = get_state_from_obs(*get_obs_from_state(s_t_mode),
+                                                            base_pos=base_positions[k + 1])
                     robots[k + 2].reset_state(q_t_mode, v_t_mode)
                 time.sleep(0.01)
 
@@ -339,7 +356,9 @@ def get_model(cfg, state_dim: int, state_type: FieldType):
         model = DynamicAE(encoder=MLP, encoder_kwargs=encoder_kwargs,
                           decoder=MLP, decoder_kwargs=decoder_kwargs,
                           latent_dim=latent_state_dim,
-                          loss_weights=None,
+                          loss_weights=dict(rec=cfg.model.state_pred_w,
+                                            pred=cfg.model.state_pred_w,
+                                            lin=cfg.model.latent_state_pred_w),
                           evolution_op_init_mode=cfg.model.evolution_op_init_mode, )
 
     elif cfg.model.name.lower() == "e-dae" or cfg.model.name.lower() == "edae":
