@@ -1,36 +1,24 @@
-import cProfile
-import copy
 import logging
-import pstats
 import time
-from pathlib import Path
-from typing import Optional, Protocol, Union
+from typing import Optional, Union
 
-import numpy as np
 import torch
-from lightning import seed_everything
-from plotly.graph_objs import Figure
+from morpho_symm.nn.MLP import MLP
 from torch import Tensor
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
-from data.DynamicsDataModule import DynamicsDataModule
-from nn.LinearDynamics import LinearDynamics
-from nn.ObservableNet import ObservableNet
 from nn.latent_markov_dynamics import LatentMarkovDynamics
+from nn.LinearDynamics import LinearDynamics
 from nn.markov_dynamics import MarkovDynamics
-from morpho_symm.nn.MLP import MLP
-from utils.losses_and_metrics import (
-    forecasting_loss_and_metrics,
-    obs_state_space_metrics,
-    )
-from utils.mysc import (batched_to_flat_trajectory, flat_to_batched_trajectory, print_dict,
-                        random_orthogonal_matrix,
-                        states_from_traj,
-                        traj_from_states)
+from nn.ObservableNet import ObservableNet
 from utils.linear_algebra import full_rank_lstsq
-from utils.plotting import (combine_side_by_side, plot_system_2D, plot_system_3D, plot_trajectories,
-                            plot_two_panel_trajectories)
+from utils.losses_and_metrics import (
+    obs_state_space_metrics,
+)
+from utils.mysc import (
+    batched_to_flat_trajectory,
+    states_from_traj,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,24 +30,24 @@ class DPNet(LatentMarkovDynamics):
         activation=torch.nn.ReLU,
         batch_norm=True,
         bias=False,
-        init_mode='fan_in',
-        )
+        init_mode="fan_in",
+    )
 
     def __init__(
-            self,
-            state_dim: int,
-            obs_state_dim: int,
-            dt: Union[float, int] = 1,
-            max_ck_window_length: int = 6,
-            ck_w: float = 0.1,
-            orth_w: float = 0.1,
-            enforce_constant_fn: bool = True,
-            use_spectral_score: bool = True,
-            explicit_transfer_op: bool = True,
-            obs_fn_params: Optional[dict] = None,
-            linear_decoder: bool = True,
-            **markov_dyn_params
-            ):
+        self,
+        state_dim: int,
+        obs_state_dim: int,
+        dt: Union[float, int] = 1,
+        max_ck_window_length: int = 6,
+        ck_w: float = 0.1,
+        orth_w: float = 0.1,
+        enforce_constant_fn: bool = True,
+        use_spectral_score: bool = True,
+        explicit_transfer_op: bool = True,
+        obs_fn_params: Optional[dict] = None,
+        linear_decoder: bool = True,
+        **markov_dyn_params,
+    ):
         assert ck_w == 0 or max_ck_window_length >= 1, "Minimum window_size of Chapman-Kolmogorov reg is 2 steps"
         self.state_dim, self.obs_state_dim = state_dim, obs_state_dim
         self.dt = dt
@@ -84,27 +72,32 @@ class DPNet(LatentMarkovDynamics):
         # Variable holding the transfer operator used to evolve the observable state in time.
 
         # Initialize the base class
-        super(DPNet, self).__init__(obs_fn=obs_fn,
-                                    inv_obs_fn=inv_obs_fn,
-                                    obs_state_dynamics=obs_state_dym,
-                                    state_dim=state_dim,
-                                    obs_state_dim=obs_state_dim,
-                                    dt=dt,
-                                    **markov_dyn_params)
+        super(DPNet, self).__init__(
+            obs_fn=obs_fn,
+            inv_obs_fn=inv_obs_fn,
+            obs_state_dynamics=obs_state_dym,
+            state_dim=state_dim,
+            obs_state_dim=obs_state_dim,
+            dt=dt,
+            **markov_dyn_params,
+        )
 
     def forecast(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
 
         This function uses the empirical transfer operator to compute forcast the observable state.
+
         Args:
             state: (batch_dim, obs_state_dim) Initial observable state of the system.
             n_steps: Number of steps to predict.
             **kwargs:
         Returns:
             pred_obs_state_traj: (batch_dim, n_steps, obs_state_dim) Predicted observable state.
+
         """
-        assert len(state.shape) == 2 and state.shape[-1] == self.state_dim, \
+        assert len(state.shape) == 2 and state.shape[-1] == self.state_dim, (
             f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
+        )
         time_horizon = n_steps + 1
 
         preprocessed_state = self.pre_process_state(state=state)
@@ -117,53 +110,61 @@ class DPNet(LatentMarkovDynamics):
 
         pred_state_traj = self.post_process_state(state_traj=pred_state_traj)
 
-        assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), \
+        assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), (
             f"{pred_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.state_dim})"
-        assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), \
+        )
+        assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), (
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
+        )
 
-        return dict(pred_state_traj=pred_state_traj,
-                    pred_obs_state_traj=pred_obs_state_traj)
+        return dict(pred_state_traj=pred_state_traj, pred_obs_state_traj=pred_obs_state_traj)
 
-    def pre_process_obs_state(self,
-                              obs_state_traj: Tensor,
-                              obs_state_traj_aux: Optional[Tensor] = None) -> dict[str, Tensor]:
-        """ Apply transformations to the observable state trajectory.
+    def pre_process_obs_state(
+        self, obs_state_traj: Tensor, obs_state_traj_aux: Optional[Tensor] = None
+    ) -> dict[str, Tensor]:
+        """Apply transformations to the observable state trajectory.
+
         Args:
             obs_state_traj: (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
             obs_state_traj_aux: (batch * time, obs_state_dim) or (batch, time, obs_state_dim)
+
         Returns:
             Directory containing
                 - obs_state_traj: (batch, time, obs_state_dim) tensor.
                 - obs_state_traj_aux: (batch, time, obs_state_dim) tensor.
+
         """
-        obs_state_traj = super().pre_process_obs_state(obs_state_traj)['obs_state_traj']
-        obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)['obs_state_traj']
+        obs_state_traj = super().pre_process_obs_state(obs_state_traj)["obs_state_traj"]
+        obs_state_traj_aux = super().pre_process_obs_state(obs_state_traj_aux)["obs_state_traj"]
         return dict(obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux)
 
-    def compute_loss_and_metrics(self,
-                                 obs_state_traj: Tensor,
-                                 obs_state_traj_aux: Tensor,
-                                 pred_obs_state_traj: Optional[Tensor] = None,
-                                 state: Optional[Tensor] = None,
-                                 next_state: Optional[Tensor] = None,
-                                 pred_state_traj: Optional[Tensor] = None,
-                                 rec_state_traj: Optional[Tensor] = None,
-                                 ) -> (Tensor, dict[str, Tensor]):
-
+    def compute_loss_and_metrics(
+        self,
+        obs_state_traj: Tensor,
+        obs_state_traj_aux: Tensor,
+        pred_obs_state_traj: Optional[Tensor] = None,
+        state: Optional[Tensor] = None,
+        next_state: Optional[Tensor] = None,
+        pred_state_traj: Optional[Tensor] = None,
+        rec_state_traj: Optional[Tensor] = None,
+    ) -> (Tensor, dict[str, Tensor]):
         obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, obs_state_traj_aux)
 
-        loss = self.compute_loss(spectral_score=obs_space_metrics["spectral_score"],
-                                 corr_score=obs_space_metrics["corr_score"],
-                                 ck_reg=obs_space_metrics["ck_reg"],
-                                 orth_reg=obs_space_metrics["orth_reg"])
+        loss = self.compute_loss(
+            spectral_score=obs_space_metrics["spectral_score"],
+            corr_score=obs_space_metrics["corr_score"],
+            ck_reg=obs_space_metrics["ck_reg"],
+            orth_reg=obs_space_metrics["orth_reg"],
+        )
 
-        _, metrics = super().compute_loss_and_metrics(state=state,
-                                                      next_state=next_state,
-                                                      pred_state_traj=pred_state_traj,
-                                                      rec_state_traj=rec_state_traj,
-                                                      obs_state_traj=obs_state_traj,
-                                                      pred_obs_state_traj=pred_obs_state_traj)
+        _, metrics = super().compute_loss_and_metrics(
+            state=state,
+            next_state=next_state,
+            pred_state_traj=pred_state_traj,
+            rec_state_traj=rec_state_traj,
+            obs_state_traj=obs_state_traj,
+            pred_obs_state_traj=pred_obs_state_traj,
+        )
         obs_space_metrics.update(metrics)
 
         return loss, obs_space_metrics
@@ -173,13 +174,15 @@ class DPNet(LatentMarkovDynamics):
             raise ValueError("aux_obs_space is True but obs_state_traj_aux is None")
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
-        obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
-                                                    obs_state_traj_aux=obs_state_traj_aux,
-                                                    max_ck_window_length=self.max_ck_window_length)
+        obs_space_metrics = obs_state_space_metrics(
+            obs_state_traj=obs_state_traj,
+            obs_state_traj_aux=obs_state_traj_aux,
+            max_ck_window_length=self.max_ck_window_length,
+        )
         return obs_space_metrics
 
     def compute_loss(self, spectral_score: Tensor, corr_score: Tensor, ck_reg: Tensor, orth_reg: Tensor):
-        """ Compute DPNet loss term.
+        """Compute DPNet loss term.
 
         Args:
             spectral_score: (time_horizon - 1) Tensor containing the average spectral score between time steps separated
@@ -196,10 +199,11 @@ class DPNet(LatentMarkovDynamics):
             ck_reg: (time_horizon - 1,) Average CK error per `dt` time steps. That is:
                 ck_error[dt - 2] = avg(|| Cov(t, t+dt) - Cov(t, t+1) Cov(t+1, t+2) ... Cov(t+dt-1, t+dt) ||) |
                 ∀ t in [0, time_horizon - 2], dt in [2, min(time_horizon - 2, ck_window_length)]
+
         Returns:
             loss: Scalar tensor containing the DPNet loss.
-        """
 
+        """
         transfer_op_inv_score = spectral_score if self.use_spectral_score else corr_score
 
         transfer_op_inv_score = torch.mean(transfer_op_inv_score)  # / self.obs_state_dim
@@ -209,7 +213,7 @@ class DPNet(LatentMarkovDynamics):
         score = transfer_op_inv_score - ck_regularization - orth_regularization
 
         loss = -score  # Change sign to minimize the loss and maximize the score.
-        assert not torch.isnan(loss), f"Loss is NaN."
+        assert not torch.isnan(loss), "Loss is NaN."
         return loss
 
     @torch.no_grad()
@@ -222,11 +226,14 @@ class DPNet(LatentMarkovDynamics):
         pinv(X) = V S^-1 U^*. Where V :(obs_state_dim, obs_state_dim) and U: (n_samples, n_samples)
         Then the empirical transfer operator A is computed as:
         A := X' pinv(X)
+
         Args:
             train_data_loader: Train data loader containing the state and next state data to construct the
             data matrices X and X', using the current observable functions.
+
         Returns:
             A: The empirical single-step transfer operator of observable state linear dynamics.
+
         """
         # We construct the data matrices X and X' using the current observable functions.
         train_data = {}
@@ -244,7 +251,7 @@ class DPNet(LatentMarkovDynamics):
         obs_fn_output = self.obs_fn(state_traj)
         # Post process observable state
         obs_state_trajs = self.pre_process_obs_state(*obs_fn_output)
-        obs_state_traj = obs_state_trajs.pop('obs_state_traj')
+        obs_state_traj = obs_state_trajs.pop("obs_state_traj")
 
         assert obs_state_traj.shape[1] == 2, f"Expected single step datapoints, got {obs_state_traj.shape[1]} steps."
         obs_state, next_obs_state = states_from_traj(obs_state_traj)
@@ -255,12 +262,14 @@ class DPNet(LatentMarkovDynamics):
         solution_op_metrics = self.obs_space_dynamics.update_transfer_op(X=X, X_prime=X_prime)
 
         metrics = solution_op_metrics
-        metrics['rank_obs_state'] = torch.linalg.matrix_rank(X).detach().to(torch.float)
+        metrics["rank_obs_state"] = torch.linalg.matrix_rank(X).detach().to(torch.float)
 
         if self.linear_decoder:
             # Predict the pre-processed state from the observable state
             # pre_state = self.pre_process_state(state)
-            inv_projector, inv_projector_bias, inv_projector_metrics = self.empirical_lin_inverse_projector(state, obs_state)
+            inv_projector, inv_projector_bias, inv_projector_metrics = self.empirical_lin_inverse_projector(
+                state, obs_state
+            )
             metrics.update(inv_projector_metrics)
             self.inverse_projector = inv_projector
             self.inverse_projector_bias = inv_projector_bias
@@ -270,27 +279,28 @@ class DPNet(LatentMarkovDynamics):
     def build_obs_fn(self, num_layers, identity=False, **kwargs):
         if identity:
             return lambda x: (x, x)
-        num_hidden_units = kwargs['num_hidden_units']
+        num_hidden_units = kwargs["num_hidden_units"]
         # Define the feature extractor used by the observable function.
-        encoder = MLP(in_dim=self.state_dim,
-                      out_dim=num_hidden_units,
-                      num_layers=num_layers,
-                      head_with_activation=True, **kwargs)
-        return ObservableNet(encoder=encoder,
-                             obs_dim=self.obs_state_dim,
-                             explicit_transfer_op=self.explicit_transfer_op)
+        encoder = MLP(
+            in_dim=self.state_dim, out_dim=num_hidden_units, num_layers=num_layers, head_with_activation=True, **kwargs
+        )
+        return ObservableNet(
+            encoder=encoder, obs_dim=self.obs_state_dim, explicit_transfer_op=self.explicit_transfer_op
+        )
 
     def build_inv_obs_fn(self, num_layers, linear_decoder: bool, identity=False, **kwargs):
         if identity:
             return lambda x: x
 
         if linear_decoder:
+
             def decoder(dpnet: DPNet, obs_state: Tensor):
-                assert hasattr(dpnet, 'inverse_projector'), "DPNet.inverse_projector not initialized."
+                assert hasattr(dpnet, "inverse_projector"), "DPNet.inverse_projector not initialized."
                 return torch.nn.functional.linear(
                     obs_state,
                     weight=dpnet.inverse_projector,
-                    bias=dpnet.inverse_projector_bias.T if dpnet.inverse_projector_bias is not None else None)
+                    bias=dpnet.inverse_projector_bias.T if dpnet.inverse_projector_bias is not None else None,
+                )
 
             return lambda x: decoder(self, x)
         else:
@@ -298,21 +308,20 @@ class DPNet(LatentMarkovDynamics):
             raise NotImplementedError("Need to handle the decoupled optimization of encoder/decoder")
 
     def build_obs_dyn_module(self) -> MarkovDynamics:
-        return LinearDynamics(state_dim=self.obs_state_dim,
-                              dt=self.dt,
-                              trainable=False,
-                              bias=self.enforce_constant_fn)
+        return LinearDynamics(state_dim=self.obs_state_dim, dt=self.dt, trainable=False, bias=self.enforce_constant_fn)
 
     def empirical_lin_inverse_projector(self, state: Tensor, obs_state: Tensor):
-        """ Compute the empirical inverse projector from the observable state to the pre-processed state.
+        """Compute the empirical inverse projector from the observable state to the pre-processed state.
 
         Args:
             state: (batch, state_dim) Tensor containing the pre-processed state.
             obs_state: (batch, obs_state_dim) Tensor containing the observable state.
+
         Returns:
             A: (state_dim, obs_state_dim) Tensor containing the empirical inverse projector.
             B: (state_dim, 1) Tensor containing the empirical inverse projector bias.
             rec_error: Scalar tensor containing the reconstruction error or "residual".
+
         """
         # Inverse projector is computed from the observable state to the pre-processed state
         pre_state = self.pre_process_state(state)
@@ -322,18 +331,18 @@ class DPNet(LatentMarkovDynamics):
 
         rec_error = torch.nn.functional.mse_loss(A @ X + B, Y)
 
-        metrics = dict(inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
-                       inverse_projector_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
-                       inverse_projector_error=rec_error)
+        metrics = dict(
+            inverse_projector_rank=torch.linalg.matrix_rank(A.detach()).to(torch.float),
+            inverse_projector_cond_num=torch.linalg.cond(A.detach()).to(torch.float),
+            inverse_projector_error=rec_error,
+        )
 
         return A, B, metrics
 
     def __repr__(self):
         str = super().__repr__()
         num_params = sum([param.nelement() for param in self.parameters()])
-        num_train_params = sum(
-            [param.nelement() for param in self.parameters() if param.requires_grad]
-            )
+        num_train_params = sum([param.nelement() for param in self.parameters() if param.requires_grad])
         str += (
             f"\n DPnet-ck_w:{self.ck_w}-orth_w:{self.orth_w} "
             f"\tParameters: {num_params} ({num_train_params} trainable)\n"
@@ -354,16 +363,19 @@ if __name__ == "__main__":
 
     change_of_basis = None  # Tensor(random_orthogonal_matrix(state_dim))
 
-    test_dpnet = DPNet(state_dim=state_dim,
-                       obs_state_dim=obs_state_dim,
-                       state_change_of_basis=change_of_basis,
-                       obs_fn_params=dict(identity=True))
+    test_dpnet = DPNet(
+        state_dim=state_dim,
+        obs_state_dim=obs_state_dim,
+        state_change_of_basis=change_of_basis,
+        obs_fn_params=dict(identity=True),
+    )
 
     random_state_traj = torch.randn(n_trajs, time, state_dim)
 
     out = test_dpnet(state=random_state_traj[:, 0, :], next_state=random_state_traj[:, 1:, :])
-    pred_state_traj = out['pred_state_traj']
+    pred_state_traj = out["pred_state_traj"]
 
     assert pred_state_traj.shape == random_state_traj.shape, f"{pred_state_traj.shape} != {random_state_traj.shape}"
-    assert torch.allclose(pred_state_traj, random_state_traj, rtol=1e-5,
-                          atol=1e-5), f"{pred_state_traj - random_state_traj}"
+    assert torch.allclose(pred_state_traj, random_state_traj, rtol=1e-5, atol=1e-5), (
+        f"{pred_state_traj - random_state_traj}"
+    )

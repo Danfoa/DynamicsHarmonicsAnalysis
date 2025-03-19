@@ -1,17 +1,15 @@
 import logging
-from typing import Optional, Tuple, Union
-
 import math
+from typing import Optional, Union
+
 import torch
 from morpho_symm.nn.MLP import MLP
-from plotly.graph_objs import Figure
 from torch import Tensor
 
-from nn.LinearDynamics import LinearDynamics
 from nn.latent_markov_dynamics import LatentMarkovDynamics
+from nn.LinearDynamics import LinearDynamics
 from nn.markov_dynamics import MarkovDynamics
 from utils.losses_and_metrics import obs_state_space_metrics
-from utils.mysc import traj_from_states
 
 log = logging.getLogger(__name__)
 
@@ -23,21 +21,21 @@ class DAE(LatentMarkovDynamics):
         activation=torch.nn.ELU,
         batch_norm=True,
         bias=False,
-        init_mode='fan_in',
-        )
+        init_mode="fan_in",
+    )
 
     def __init__(
-            self,
-            state_dim: int,
-            obs_state_dim: int,
-            dt: Union[float, int] = 1,
-            obs_pred_w: float = 0.1,
-            orth_w: float = 0.1,
-            corr_w: float = 0.0,
-            obs_fn_params: Optional[dict] = None,
-            enforce_constant_fn: bool = True,
-            **markov_dyn_params
-            ):
+        self,
+        state_dim: int,
+        obs_state_dim: int,
+        dt: Union[float, int] = 1,
+        obs_pred_w: float = 0.1,
+        orth_w: float = 0.1,
+        corr_w: float = 0.0,
+        obs_fn_params: Optional[dict] = None,
+        enforce_constant_fn: bool = True,
+        **markov_dyn_params,
+    ):
         self.state_dim, self.obs_state_dim = state_dim, obs_state_dim
         self.dt = dt
         self.orth_w = orth_w
@@ -56,24 +54,28 @@ class DAE(LatentMarkovDynamics):
         obs_state_dym = self.build_obs_dyn_module()
         # Variable holding the transfer operator used to evolve the observable state in time.
         # Initialize the base class
-        super(DAE, self).__init__(obs_fn=obs_fn,
-                                  inv_obs_fn=inv_obs_fn,
-                                  obs_state_dynamics=obs_state_dym,
-                                  state_dim=state_dim,
-                                  obs_state_dim=obs_state_dim,
-                                  dt=dt,
-                                  **markov_dyn_params)
+        super(DAE, self).__init__(
+            obs_fn=obs_fn,
+            inv_obs_fn=inv_obs_fn,
+            obs_state_dynamics=obs_state_dym,
+            state_dim=state_dim,
+            obs_state_dim=obs_state_dim,
+            dt=dt,
+            **markov_dyn_params,
+        )
 
     def forecast(self, state: Tensor, n_steps: int = 1, **kwargs) -> [dict[str, Tensor]]:
         """Forward pass of the dynamics model, producing a prediction of the next `n_steps` states.
 
         This function uses the empirical transfer operator to compute forcast the observable state.
+
         Args:
             state: (batch_dim, obs_state_dim) Initial observable state of the system.
             n_steps: Number of steps to predict.
             **kwargs:
         Returns:
             pred_next_obs_state: (batch_dim, n_steps, obs_state_dim) Predicted observable state.
+
         """
         assert state.shape[-1] == self.state_dim, f"Invalid state: {state.shape}. Expected (batch, {self.state_dim})"
         time_horizon = n_steps + 1
@@ -84,37 +86,41 @@ class DAE(LatentMarkovDynamics):
 
         pred_state_traj = self.inv_obs_fn(pred_obs_state_traj)
 
-        assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), \
+        assert pred_state_traj.shape == (self._batch_size, time_horizon, self.state_dim), (
             f"{pred_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.state_dim})"
-        assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), \
+        )
+        assert pred_obs_state_traj.shape == (self._batch_size, time_horizon, self.obs_state_dim), (
             f"{pred_obs_state_traj.shape}!=({self._batch_size}, {time_horizon}, {self.obs_state_dim})"
+        )
         return pred_state_traj, pred_obs_state_traj
 
-    def compute_loss_and_metrics(self,
-                                 state: Tensor,
-                                 next_state: Tensor,
-                                 pred_state_traj: Tensor,
-                                 rec_state_traj: Tensor,
-                                 obs_state_traj: Tensor,
-                                 pred_obs_state_traj: Tensor,
-                                 pred_obs_state_one_step: Tensor,
-                                 ) -> (Tensor, dict[str, Tensor]):
-
+    def compute_loss_and_metrics(
+        self,
+        state: Tensor,
+        next_state: Tensor,
+        pred_state_traj: Tensor,
+        rec_state_traj: Tensor,
+        obs_state_traj: Tensor,
+        pred_obs_state_traj: Tensor,
+        pred_obs_state_one_step: Tensor,
+    ) -> (Tensor, dict[str, Tensor]):
         _, forecast_metrics = super(DAE, self).compute_loss_and_metrics(
             state=state,
             next_state=next_state,
             pred_state_traj=pred_state_traj,
             rec_state_traj=rec_state_traj,
             obs_state_traj=obs_state_traj,
-            pred_obs_state_traj=pred_obs_state_traj, )
+            pred_obs_state_traj=pred_obs_state_traj,
+        )
 
         # obs_space_metrics = self.get_obs_space_metrics(obs_state_traj, pred_obs_state_one_step)
 
-        loss = self.compute_loss(state_rec_loss=forecast_metrics['state_rec_loss'],
-                                 state_pred_loss=forecast_metrics['state_pred_loss'],
-                                 obs_pred_loss=forecast_metrics['obs_pred_loss'],
-                                 # orth_reg=obs_space_metrics["orth_reg"]
-                                 )
+        loss = self.compute_loss(
+            state_rec_loss=forecast_metrics["state_rec_loss"],
+            state_pred_loss=forecast_metrics["state_pred_loss"],
+            obs_pred_loss=forecast_metrics["obs_pred_loss"],
+            # orth_reg=obs_space_metrics["orth_reg"]
+        )
 
         # metrics = dict(**forecast_metrics, **obs_space_metrics)
         metrics = dict(**forecast_metrics)
@@ -126,17 +132,14 @@ class DAE(LatentMarkovDynamics):
         # Compute Covariance and Cross-Covariance operators for the observation state space.
         # Spectral and Projection scores, and CK loss terms.
         time_horizon = obs_state_traj.shape[1]
-        obs_space_metrics = obs_state_space_metrics(obs_state_traj=obs_state_traj,
-                                                    obs_state_traj_aux=obs_state_traj_aux,
-                                                    max_ck_window_length=time_horizon - 1)
+        obs_space_metrics = obs_state_space_metrics(
+            obs_state_traj=obs_state_traj, obs_state_traj_aux=obs_state_traj_aux, max_ck_window_length=time_horizon - 1
+        )
         return obs_space_metrics
 
-    def compute_loss(self,
-                     state_rec_loss: Tensor,
-                     state_pred_loss: Tensor,
-                     obs_pred_loss: Tensor,
-                     orth_reg: Optional[Tensor]=None):
-
+    def compute_loss(
+        self, state_rec_loss: Tensor, state_pred_loss: Tensor, obs_pred_loss: Tensor, orth_reg: Optional[Tensor] = None
+    ):
         state_loss = state_rec_loss + state_pred_loss
 
         # Set the weight of the observation prediction loss to be proportional to the state dimension

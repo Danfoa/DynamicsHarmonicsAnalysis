@@ -4,12 +4,12 @@ import numpy as np
 import pybullet
 from escnn.group import Group, Representation
 from morpho_symm.data.DynamicsRecording import DynamicsRecording, split_train_val_test
-from pybullet_utils.bullet_client import BulletClient
-from scipy.spatial.transform import Rotation
-
 from morpho_symm.utils.algebra_utils import permutation_matrix
 from morpho_symm.utils.rep_theory_utils import escnn_representation_form_mapping, group_rep_from_gens
 from morpho_symm.utils.robot_utils import load_symmetric_system
+from pybullet_utils.bullet_client import BulletClient
+from scipy.spatial.transform import Rotation
+
 
 def get_kinematic_three_rep(G: Group):
     #  [0   1    2   3]
@@ -186,7 +186,7 @@ def convert_mini_cheetah_raysim_recordings(data_path: Path):
         action_obs=("joint_torques",),
         obs_representations=dict(
             joint_pos=rep_TqQ_js,  # Joint-Space observations
-            joint_pos_S1=rep_Q_js, # Joint-Space position unit circle parametrization.
+            joint_pos_S1=rep_Q_js,  # Joint-Space position unit circle parametrization.
             joint_vel=rep_TqQ_js,
             joint_torques=rep_TqQ_js,
             # Base body observations
@@ -225,13 +225,11 @@ def convert_mini_cheetah_raysim_recordings(data_path: Path):
         data_recording.compute_obs_moments(obs_name=obs_name)
 
     train_dr, val_dr, test_dr = split_train_val_test(
-        data_recording,
-        partition_sizes=(0.7, 0.15, 0.15),
-        split_dimension='time'
-        )
+        data_recording, partition_sizes=(0.7, 0.15, 0.15), split_dimension="time"
+    )
 
     for dr, p_name in zip([train_dr, val_dr, test_dr], ["train", "val", "test"]):
-        file_name  = f"n_trajs={dr.info['num_traj']}-frames={dr.info['trajectory_length']}-{p_name}.pkl"
+        file_name = f"n_trajs={dr.info['num_traj']}-frames={dr.info['trajectory_length']}-{p_name}.pkl"
         dr.save_to_file(data_path.parent.parent / file_name)
         print(f"{p_name} Dynamics Recording saved to {data_path.parent.parent / file_name}")
 
@@ -241,5 +239,7 @@ if __name__ == "__main__":
     modes = ["forward_minus_0_4", "forward_minus_0_4_yawrate_0_4", "forward_minus_0_4_yawrate_minus_0_4"]
     for terrain in terrains:
         for mode in modes:
-            data_path = Path(f"data/mini_cheetah/raysim_recordings/{terrain}/{mode}/heightmap_logger/state_reduced_nmpc.npy")
+            data_path = Path(
+                f"data/mini_cheetah/raysim_recordings/{terrain}/{mode}/heightmap_logger/state_reduced_nmpc.npy"
+            )
             convert_mini_cheetah_raysim_recordings(data_path)

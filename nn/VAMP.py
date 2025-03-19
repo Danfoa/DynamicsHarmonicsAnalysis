@@ -1,25 +1,32 @@
+import logging
 from typing import Iterable
 
 import torch
-
-from data.DynamicsRecording import STATES, CTRLS
-from nn.EquivariantLinearDynamics import EquivariantLinearDynamics
 from src.RobotEquivariantNN.nn.EMLP import MLP
 
-
-import logging
-
+from data.DynamicsRecording import CTRLS, STATES
+from nn.EquivariantLinearDynamics import EquivariantLinearDynamics
 from utils.losses_and_metrics import observation_dynamics_error
 
 log = logging.getLogger(__name__)
 
-class VAMP(torch.nn.Module):
 
-    def __init__(self, state_dim: int, obs_dim: int, dt: float, pred_horizon: int = 1, reg_lambda=1e-2, n_layers=3,
-                 n_hidden_neurons=32, n_head_layers=None, robot=None, activation: torch.nn.Module = torch.nn.ReLU,
-                 **kwargs):
-        """
-        :param pred_horizon: Number of time-steps to compute correlation score.
+class VAMP(torch.nn.Module):
+    def __init__(
+        self,
+        state_dim: int,
+        obs_dim: int,
+        dt: float,
+        pred_horizon: int = 1,
+        reg_lambda=1e-2,
+        n_layers=3,
+        n_hidden_neurons=32,
+        n_head_layers=None,
+        robot=None,
+        activation: torch.nn.Module = torch.nn.ReLU,
+        **kwargs,
+    ):
+        """:param pred_horizon: Number of time-steps to compute correlation score.
         :param activation:
         :return:
         """
@@ -27,7 +34,7 @@ class VAMP(torch.nn.Module):
         assert isinstance(pred_horizon, int) and pred_horizon >= 1, "Number of time-steps must be an integer >= 1"
         self.pred_horizon = pred_horizon
         assert isinstance(dt, float) and dt > 0, "Time-step must be a positive float"
-        self.dt =dt
+        self.dt = dt
         assert reg_lambda >= 0, "Regularization coefficient must be non-negative"
         self.reg_lambda = reg_lambda
         n_head_layers = n_layers if n_head_layers is None else n_head_layers
@@ -38,9 +45,14 @@ class VAMP(torch.nn.Module):
         # Ideally sharing the same backbone will make this module efficient at extracting the features required to
         # create the observations at each time-step.
         # Input to encoder is expected to be [batch_size, time_steps, state_dim]
-        self.encoder = MLP(d_in=state_dim, d_out=output_dim, ch=n_hidden_neurons, n_layers=n_layers,
-                           activation=[activation] * (n_layers - 1) + [torch.nn.Identity],)
-                           # activation=[activation] * n_layers)
+        self.encoder = MLP(
+            d_in=state_dim,
+            d_out=output_dim,
+            ch=n_hidden_neurons,
+            n_layers=n_layers,
+            activation=[activation] * (n_layers - 1) + [torch.nn.Identity],
+        )
+        # activation=[activation] * n_layers)
 
         # heads = []
         # for head_id in range(pred_horizon + 1):
@@ -95,7 +107,7 @@ class VAMP(torch.nn.Module):
         z_pred = torch.zeros_like(z)
         z_pred[:, 0, :] = z0
         for i in range(1, n_frames):
-            z_pred[:, i, :] = torch.matmul(z_pred[:, i-1, :], self.K)
+            z_pred[:, i, :] = torch.matmul(z_pred[:, i - 1, :], self.K)
 
         # TODO: Once everything works use eigendecomp for forcasting
         # dts = torch.arange(0, n_frames, device=z.device) * self.dt
@@ -105,7 +117,7 @@ class VAMP(torch.nn.Module):
         # z_eigen = self.observation_dynamics.obs2eigenbasis(z)
         # return obs and predictions in eigenbasis for now.
         # return {'z': z_eigen, 'z_pred': z_eigen_pred, 'z_obs': z, 'z_pred_obs': z_pred}
-        return {'z': z, 'z_pred': z_pred}
+        return {"z": z, "z_pred": z_pred}
 
     def approximate_koopman_op(self, bacthed_obs: list[torch.Tensor]):
         assert isinstance(bacthed_obs, list), "We expect a list of observations of [(batch_size, time, obs_dim), ...]"
@@ -119,7 +131,7 @@ class VAMP(torch.nn.Module):
         X, Y = [], []
         for t in range(n_frames - 1):
             X += [obs[:, t, :] for obs in bacthed_obs]
-            Y += [obs[:, t+1, :] for obs in bacthed_obs]
+            Y += [obs[:, t + 1, :] for obs in bacthed_obs]
         X = torch.cat(X, dim=0)
         Y = torch.cat(Y, dim=0)
 
@@ -146,12 +158,11 @@ class VAMP(torch.nn.Module):
 
     def evaluate_observation_space(self, obs: torch.Tensor, state: torch.Tensor) -> dict:
         out = self.forecast(state)
-        metrics = observation_dynamics_error(z=out['z'][:, 1:, :], z_pred=out['z_pred'][:, 1:, :])
+        metrics = observation_dynamics_error(z=out["z"][:, 1:, :], z_pred=out["z_pred"][:, 1:, :])
         return metrics
 
     def compute_loss_metrics(self, obs, _):
-        """
-        This function takes a list of observations per time frame ([M, z_t+i*dt] | i ∈ [0,..., n_frames),
+        """This function takes a list of observations per time frame ([M, z_t+i*dt] | i ∈ [0,..., n_frames),
             M=batch_size/n_samples) and computes the generalized Rayleigh score between z_0 and each
             following time frame z_0+i*dt | i ∈ [1,...,n_frames).
             TODO: result is an avg of the correlation scores??
@@ -164,9 +175,9 @@ class VAMP(torch.nn.Module):
         n_frames = obs.shape[1]
         assert n_frames >= 2, "We expect at least 2 observations to compute correlation score"
 
-        gen_rayleigh_quotients = []       # Rayleigh quotient for each time-step
-        reg_gen_rayleigh_quotients = []   # Regularized Rayleigh quotient for each time-step
-        obs_independence_scores = []              # Regularization terms indicating orthogonality of observations
+        gen_rayleigh_quotients = []  # Rayleigh quotient for each time-step
+        reg_gen_rayleigh_quotients = []  # Regularized Rayleigh quotient for each time-step
+        obs_independence_scores = []  # Regularization terms indicating orthogonality of observations
         obs_covZZ_Fnorms, obs_covZZ_OPnorms, obs_covZZ_sval_min = [], [], []
         obs_covXY_sval_min, obs_covXY_OPnorms = [], []
 
@@ -188,7 +199,9 @@ class VAMP(torch.nn.Module):
 
         for i in range(1, n_frames):
             Y_uncentered = obs[:, i, :]
-            Y, covYY, covYY_eigvals, covYY_Fnorm, covYY_OPnorm, covYY_reg = self.compute_statistical_metrics(Y_uncentered)
+            Y, covYY, covYY_eigvals, covYY_Fnorm, covYY_OPnorm, covYY_reg = self.compute_statistical_metrics(
+                Y_uncentered
+            )
 
             # Obtain empirical estimate of Cross-covariance matrix
             # CovXY = X^H·Y   | a^H : Hermitian (conjugate transpose) of a
@@ -203,7 +216,7 @@ class VAMP(torch.nn.Module):
             covXY_svals = torch.linalg.svdvals(covXY)  # + (1e-6 * torch.eye(covXY.shape[0], device=covXY.device)))
             covXY_Fnorm = torch.norm(covXY_svals, p=2)
             covXY_max_singval, covXY_min_singval = covXY_svals[0], covXY_svals[-1]
-            assert torch.isclose(covXY_Fnorm, torch.linalg.matrix_norm(covXY, ord='fro'))
+            assert torch.isclose(covXY_Fnorm, torch.linalg.matrix_norm(covXY, ord="fro"))
             covXY_OPnorm = covXY_max_singval
 
             # Compute the generalized Rayleigh quotient
@@ -228,21 +241,20 @@ class VAMP(torch.nn.Module):
         avg_rayleigh_score = torch.mean(torch.stack(gen_rayleigh_quotients))
         avg_reg_rayleigh_score = torch.mean(torch.stack(reg_gen_rayleigh_quotients))
         # Store relevant metrics.
-        metrics['avg_obs_dependence'] = torch.mean(torch.stack(obs_independence_scores))
-        metrics['avg_CovZZ_Fnorm'] = torch.mean(torch.stack(obs_covZZ_Fnorms))
-        metrics['avg_CovZZ_OPnorm'] = torch.mean(torch.stack(obs_covZZ_OPnorms))
-        metrics['avg_CovZZ_sval_min'] = torch.mean(torch.stack(obs_covZZ_sval_min))
-        metrics['avg_gen_rayleigh'] = avg_rayleigh_score
-        metrics['avg_reg_gen_rayleigh'] = avg_reg_rayleigh_score
-        metrics['CovXY_OPnorm'] = torch.mean(torch.stack(obs_covXY_OPnorms))
-        metrics['CovXY_sval_min'] = torch.mean(torch.stack(obs_covXY_sval_min))
+        metrics["avg_obs_dependence"] = torch.mean(torch.stack(obs_independence_scores))
+        metrics["avg_CovZZ_Fnorm"] = torch.mean(torch.stack(obs_covZZ_Fnorms))
+        metrics["avg_CovZZ_OPnorm"] = torch.mean(torch.stack(obs_covZZ_OPnorms))
+        metrics["avg_CovZZ_sval_min"] = torch.mean(torch.stack(obs_covZZ_sval_min))
+        metrics["avg_gen_rayleigh"] = avg_rayleigh_score
+        metrics["avg_reg_gen_rayleigh"] = avg_reg_rayleigh_score
+        metrics["CovXY_OPnorm"] = torch.mean(torch.stack(obs_covXY_OPnorms))
+        metrics["CovXY_sval_min"] = torch.mean(torch.stack(obs_covXY_sval_min))
         # We assume the optimizer is set (as default) to minimize the loss. Thus, we return the negative of the score.
         return -avg_reg_rayleigh_score, metrics
 
     @staticmethod
     def compute_statistical_metrics(Z):
-        """
-        For a multi-dimensional random variable Z this functions makes the following process: Center the samples,
+        """For a multi-dimensional random variable Z this functions makes the following process: Center the samples,
         compute the covariance matrix `covZZ`, compute the Frobenius norm of the covariance matrix `covZZ_Fnorm`,
         and a metric indicating the independence/orthogonality of the dimensions of Z (i.e., the norm of the difference
         between the covariance matrix and the identity matrix, divided by dimension of the obs, so a value of 1 will
@@ -266,7 +278,7 @@ class VAMP(torch.nn.Module):
         """
         assert Z.state_dim() == 2, "We expect a batch of samples of shape (M, dim(z)) | M = batch_size"
         # Z_mean = torch.mean(Z_uncentered, dim=0, keepdim=True)
-        Z_centered = Z    # Avoid centering feature maps for now - Z_mean
+        Z_centered = Z  # Avoid centering feature maps for now - Z_mean
         # Compute covariance per sample in batch
         covZZ = torch.matmul((Z_centered.conj()[:, :, None]), Z_centered[:, None, :])
         # Average over the M samples in batch. i.e. (M, dim(z), dim(z)) -> (dim(z), dim(z))
@@ -294,8 +306,7 @@ class VAMP(torch.nn.Module):
 
     @staticmethod
     def _backward_hook(module, grad_input, grad_output) -> None:
-        """
-        We use the backward hook to identify when the observation function (the NN generating the obs) gets
+        """We use the backward hook to identify when the observation function (the NN generating the obs) gets
         parameter updates. This implies the space of observations changes and thus the Koopman Operator on this space
         needs to be recomputed.
         :param module:
@@ -305,14 +316,13 @@ class VAMP(torch.nn.Module):
             module._set_updated_eigenmatrix(False)
 
     def get_metric_labels(self) -> Iterable[str]:
-        return ['avg_gen_rayleigh', 'avg_obs_dependence', 'obs_dyn_error']
+        return ["avg_gen_rayleigh", "avg_obs_dependence", "obs_dyn_error"]
 
     def batch_unpack(self, batch):
         return self.state_ctrl_to_x(batch)
 
     def state_ctrl_to_x(self, batch):
-        """
-        Mapping from batch of ClosedLoopDynamics data points to NN model input-output data points
+        """Mapping from batch of ClosedLoopDynamics data points to NN model input-output data points
         """
         inputs = torch.concatenate([batch[STATES], batch[CTRLS]], dim=2)
         return inputs
@@ -321,5 +331,4 @@ class VAMP(torch.nn.Module):
         return x
 
     def get_hparams(self):
-        return {'encoder': self.encoder.get_hparams(),
-                'pred_horizon': self.pred_horizon}
+        return {"encoder": self.encoder.get_hparams(), "pred_horizon": self.pred_horizon}

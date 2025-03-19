@@ -18,8 +18,7 @@ def interleave_with_conjugate(a: torch.Tensor):
 
 
 def view_as_complex(a: torch.Tensor):
-    """
-    Convert real valued tensors where the last dimension is expected to hold complex valued scalars flattened:
+    """Convert real valued tensors where the last dimension is expected to hold complex valued scalars flattened:
     i.e., the last dimension holds a = [Re(å_1), Im(å_1),...,Re(å_k), Im(å_k)]
     :param a: Real valued Tensor of dimension (..., 2k) being k the number of complex scalars in a
     :return: Å: Complex valued Tensor of dimension (..., k) holding Å=[å1,å2,...,åk]

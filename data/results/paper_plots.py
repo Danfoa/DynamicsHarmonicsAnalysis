@@ -13,18 +13,20 @@ from plotly.graph_objs import Figure
 from tqdm import tqdm
 
 
-def plot_aggregated_lines(df: pd.DataFrame,
-                          x: str,
-                          y: str,
-                          group_variables: Union[str, Iterable[str]],
-                          color_sequence=px.colors.qualitative.Dark2,
-                          area_alpha=0.3,
-                          line_width=2,
-                          line_styles: Optional[dict] = None,
-                          color_group: Optional[dict] = None,
-                          area_metric="min-max",
-                          label_replace: Optional[dict] = None) -> Figure:
-    """ Plot aggregated lines showing mean/min/max of y for each value of x for every combination of group_variables
+def plot_aggregated_lines(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    group_variables: Union[str, Iterable[str]],
+    color_sequence=px.colors.qualitative.Dark2,
+    area_alpha=0.3,
+    line_width=2,
+    line_styles: Optional[dict] = None,
+    color_group: Optional[dict] = None,
+    area_metric="min-max",
+    label_replace: Optional[dict] = None,
+) -> Figure:
+    """Plot aggregated lines showing mean/min/max of y for each value of x for every combination of group_variables
 
     Args:
         df: Dataframe containing the data to plot
@@ -37,6 +39,7 @@ def plot_aggregated_lines(df: pd.DataFrame,
         color_group: Dictionary mapping (potentially substrings of) groups labels to line styles
     Returns:
         fig: Figure object
+
     """
     assert x in df.columns, f"x={x} not in df.columns: {df.columns}"
     assert y in df.columns, f"y={y} not in df.columns: {df.columns}"
@@ -102,79 +105,130 @@ def plot_aggregated_lines(df: pd.DataFrame,
                 color = ref_colors.get(val, color) if ref_colors is not None else color
 
         color_area = color.replace("rgb", "rgba").replace(")", f",{area_alpha})")
-        common_kwargs = dict(line_shape='spline')
+        common_kwargs = dict(line_shape="spline")
 
         group_label = group_label if label_replace is None else label_replace.get(group_label, group_label)
         # Mean
         fig.add_trace(
-            go.Scatter(x=series_x_vals, y=y_mean, mode='lines', name=group_label, legendgroup=group_label,
-                       showlegend=show_true_legend,
-                       line=dict(color=color, width=line_width, **line_style), **common_kwargs, ))
+            go.Scatter(
+                x=series_x_vals,
+                y=y_mean,
+                mode="lines",
+                name=group_label,
+                legendgroup=group_label,
+                showlegend=show_true_legend,
+                line=dict(color=color, width=line_width, **line_style),
+                **common_kwargs,
+            )
+        )
         # Bottom and upper bounds
         fig.add_trace(
-            go.Scatter(x=series_x_vals, y=y_bottom, mode='lines', line=dict(width=0),
-                       name=group_label + ' Lower', legendgroup=group_label, showlegend=False,
-                       fill=None, **common_kwargs))
+            go.Scatter(
+                x=series_x_vals,
+                y=y_bottom,
+                mode="lines",
+                line=dict(width=0),
+                name=group_label + " Lower",
+                legendgroup=group_label,
+                showlegend=False,
+                fill=None,
+                **common_kwargs,
+            )
+        )
         fig.add_trace(
-            go.Scatter(x=series_x_vals, y=y_upper, mode='lines', line=dict(width=0),
-                       name=group_label + ' Upper', legendgroup=group_label, showlegend=False,
-                       fill='tonexty', fillcolor=color_area, **common_kwargs))
+            go.Scatter(
+                x=series_x_vals,
+                y=y_upper,
+                mode="lines",
+                line=dict(width=0),
+                name=group_label + " Upper",
+                legendgroup=group_label,
+                showlegend=False,
+                fill="tonexty",
+                fillcolor=color_area,
+                **common_kwargs,
+            )
+        )
         line_count += 1
 
     if not show_true_legend:
         for hp, trace_styles in line_styles.items():
             hp_name = hp if label_replace is None else label_replace.get(hp, hp)
             # Fake Legend Titles
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines',
-                                     name=f'{hp_name}',
-                                     line=dict(color='rgba(255,255,255,0)'),
-                                     showlegend=True,
-                                     legendrank=3))
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="lines",
+                    name=f"{hp_name}",
+                    line=dict(color="rgba(255,255,255,0)"),
+                    showlegend=True,
+                    legendrank=3,
+                )
+            )
             for name, style in trace_styles.items():
                 name = name if label_replace is None else label_replace.get(name, name)
                 fig.add_trace(
-                    go.Scatter(x=[None], y=[None], mode='lines', name=name,
-                               line=dict(color='black', width=line_width, **style),
-                               legendrank=2))
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="lines",
+                        name=name,
+                        line=dict(color="black", width=line_width, **style),
+                        legendrank=2,
+                    )
+                )
 
         for hp, trace_colors in color_group.items():
             hp_name = hp if label_replace is None else label_replace.get(hp, hp)
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines',
-                                     name=f'{hp_name}',
-                                     line=dict(color='rgba(255,255,255,0)'),
-                                     showlegend=True,
-                                     legendrank=1))
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="lines",
+                    name=f"{hp_name}",
+                    line=dict(color="rgba(255,255,255,0)"),
+                    showlegend=True,
+                    legendrank=1,
+                )
+            )
             for name, color in trace_colors.items():
                 name = name if label_replace is None else label_replace.get(name, name)
                 fig.add_trace(
-                    go.Scatter(x=[None], y=[None], mode='lines', name=name, line=dict(color=color, width=line_width),
-                               legendrank=0))
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="lines",
+                        name=name,
+                        line=dict(color=color, width=line_width),
+                        legendrank=0,
+                    )
+                )
 
-    fig.update_layout(plot_bgcolor='white',
-                      paper_bgcolor='white',
-                      # Draw mild grid lines with an alpha of 0.1
-                      yaxis=dict(gridcolor='rgba(0,0,0,0.1)',
-                                 showline=True,
-                                 linewidth=1.0,
-                                 linecolor='rgba(0,0,0,0.3)'),
-                      xaxis=dict(gridcolor='rgba(0,0,0,0.1)',
-                                 showline=True,
-                                 linewidth=1.0,
-                                 linecolor='rgba(0,0,0,0.3)'),
-                      autosize=True,
-                      ),
+    (
+        fig.update_layout(
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            # Draw mild grid lines with an alpha of 0.1
+            yaxis=dict(gridcolor="rgba(0,0,0,0.1)", showline=True, linewidth=1.0, linecolor="rgba(0,0,0,0.3)"),
+            xaxis=dict(gridcolor="rgba(0,0,0,0.1)", showline=True, linewidth=1.0, linecolor="rgba(0,0,0,0.3)"),
+            autosize=True,
+        ),
+    )
     return fig
 
 
-def plot_aggregated_bars(df: pd.DataFrame,
-                         x: str,
-                         y: str,
-                         group_variables: Union[str, Iterable[str]],
-                         color_sequence=px.colors.qualitative.Dark2,
-                         color_group: Optional[dict] = None,
-                         style_args: Optional[dict] = None,
-                         label_replace: Optional[dict] = None) -> Figure:
-    """ Plot aggregated lines showing mean/min/max of y for each value of x for every combination of group_variables
+def plot_aggregated_bars(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    group_variables: Union[str, Iterable[str]],
+    color_sequence=px.colors.qualitative.Dark2,
+    color_group: Optional[dict] = None,
+    style_args: Optional[dict] = None,
+    label_replace: Optional[dict] = None,
+) -> Figure:
+    """Plot aggregated lines showing mean/min/max of y for each value of x for every combination of group_variables
 
     Args:
         df: Dataframe containing the data to plot
@@ -187,6 +241,7 @@ def plot_aggregated_bars(df: pd.DataFrame,
         color_group: Dictionary mapping (potentially substrings of) groups labels to line styles
     Returns:
         fig: Figure object
+
     """
     assert x in df.columns, f"x={x} not in df.columns: {df.columns}"
     assert y in df.columns, f"y={y} not in df.columns: {df.columns}"
@@ -258,40 +313,39 @@ def plot_aggregated_bars(df: pd.DataFrame,
 
         group_label = group_label if label_replace is None else label_replace.get(group_label, group_label)
 
-        fig.add_trace(go.Bar(
-            x=series_x_vals,
-            y=y_mean,
-            name=group_label,
-            marker_color=color,
-            showlegend=True,
-            error_y=dict(
-                type='data',
-                symmetric=False,
-                array=y_upper,
-                arrayminus=y_bottom,
-                thickness=1.5,
-                width=3,
-                color='black'),
-            **run_kwargs,
+        fig.add_trace(
+            go.Bar(
+                x=series_x_vals,
+                y=y_mean,
+                name=group_label,
+                marker_color=color,
+                showlegend=True,
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=y_upper,
+                    arrayminus=y_bottom,
+                    thickness=1.5,
+                    width=3,
+                    color="black",
+                ),
+                **run_kwargs,
             ),
-            )
+        )
 
         bar_count += 1
 
-    fig.update_layout(plot_bgcolor='white',
-                      paper_bgcolor='white',
-                      barmode='group',
-                      # Draw mild grid lines with an alpha of 0.1
-                      yaxis=dict(gridcolor='rgba(0,0,0,0.1)',
-                                 showline=True,
-                                 linewidth=1.0,
-                                 linecolor='rgba(0,0,0,0.3)'),
-                      xaxis=dict(gridcolor='rgba(0,0,0,0.1)',
-                                 showline=True,
-                                 linewidth=1.0,
-                                 linecolor='rgba(0,0,0,0.3)'),
-                      autosize=True,
-                      ),
+    (
+        fig.update_layout(
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            barmode="group",
+            # Draw mild grid lines with an alpha of 0.1
+            yaxis=dict(gridcolor="rgba(0,0,0,0.1)", showline=True, linewidth=1.0, linecolor="rgba(0,0,0,0.3)"),
+            xaxis=dict(gridcolor="rgba(0,0,0,0.1)", showline=True, linewidth=1.0, linecolor="rgba(0,0,0,0.3)"),
+            autosize=True,
+        ),
+    )
     return fig
 
 
@@ -299,60 +353,61 @@ if __name__ == "__main__":
     # Generic layout config
     desired_font_size = 24
     layout_config = dict(
-        width=500, height=300,
+        width=500,
+        height=300,
         margin=dict(l=0, r=0, t=0, b=0),
         # Set legend box in the upper right corner inside the plot
-        legend=dict(x=1, y=1,
-                    xanchor='right',
-                    yanchor='top',
-                    font=dict(size=desired_font_size),
-                    # itemsizing='constant'
-                    ),
+        legend=dict(
+            x=1,
+            y=1,
+            xanchor="right",
+            yanchor="top",
+            font=dict(size=desired_font_size),
+            # itemsizing='constant'
+        ),
         xaxis=dict(
             titlefont=dict(size=desired_font_size),  # Set desired font size for x-axis title
-            tickfont=dict(size=desired_font_size-4),  # Set desired font size for x-axis
-            tickformat='s'
-            ),
+            tickfont=dict(size=desired_font_size - 4),  # Set desired font size for x-axis
+            tickformat="s",
+        ),
         yaxis=dict(
             type="log",
             titlefont=dict(size=desired_font_size),  # Set desired font size for y-axis title
-            tickfont=dict(size=desired_font_size-4),  # Set desired font size for y-axis
-            ),
+            tickfont=dict(size=desired_font_size - 4),  # Set desired font size for y-axis
+        ),
         autosize=False,
-        )
+    )
     color_pallet = px.colors.qualitative.Prism
-    line_styles = {'model.name': {"E-DAE":   dict(),
-                                  "DAE-AUG": dict(dash='dot'),
-                                  "DAE":     dict(dash='dash')}
-                   }
-    color_group = {'system.group': {"K4xC2": color_pallet[1],
-                                    "K4":    color_pallet[7]}
-                   }
-    mini_label_names = {"model.name":   "Model",
-                        "system.group": "Group",
-                        "C2":           r"$\mathbb{G}=\mathbb{C}_2$",
-                        "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
-                        "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
-                                        r"C}_2$", }
+    line_styles = {"model.name": {"E-DAE": dict(), "DAE-AUG": dict(dash="dot"), "DAE": dict(dash="dash")}}
+    color_group = {"system.group": {"K4xC2": color_pallet[1], "K4": color_pallet[7]}}
+    mini_label_names = {
+        "model.name": "Model",
+        "system.group": "Group",
+        "C2": r"$\mathbb{G}=\mathbb{C}_2$",
+        "K4": r"$\mathbb{G}=\mathbb{K}_4$",
+        "K4xC2": r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
+        r"C}_2$",
+    }
 
     data_path = Path("mini_cheetah_sample_eff_uneven_easy_terrain.csv")
     print(data_path)
     df = pd.read_csv(data_path)
     MINI_NUM_SAMPLES = 40000
-    df['system.train_ratio'] = df['system.train_ratio'] * MINI_NUM_SAMPLES
+    df["system.train_ratio"] = df["system.train_ratio"] * MINI_NUM_SAMPLES
     # Ignore all records of group = C2
     df = df[df["system.group"] != "C2"]
-    fig = plot_aggregated_lines(df,
-                                x="system.train_ratio",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="std",
-                                label_replace=mini_label_names,
-                                )
+    fig = plot_aggregated_lines(
+        df,
+        x="system.train_ratio",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="std",
+        label_replace=mini_label_names,
+    )
     # Set the figure size to a quarter of an A4 page
-    layout_config['legend'].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
+    layout_config["legend"].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
     fig.update_layout(**layout_config)
     fig.update_xaxes(title_text="training samples")
     fig.update_yaxes(title_text="state prediction MSE", type="log")
@@ -366,20 +421,21 @@ if __name__ == "__main__":
     print(data_path)
     df = pd.read_csv(data_path)
     STATE_DIM = 42
-    df['system.obs_state_ratio'] = df['system.obs_state_ratio'] * STATE_DIM
+    df["system.obs_state_ratio"] = df["system.obs_state_ratio"] * STATE_DIM
     # Ignore all records of group = C2
     df = df[df["system.group"] != "C2"]
-    fig = plot_aggregated_lines(df,
-                                x="system.obs_state_ratio",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="std",
-                                label_replace=mini_label_names
-                                )
+    fig = plot_aggregated_lines(
+        df,
+        x="system.obs_state_ratio",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="std",
+        label_replace=mini_label_names,
+    )
     # Set the figure size to a quarter of an A4 page
-    layout_config['legend'].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
+    layout_config["legend"].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
     fig.update_layout(**layout_config, showlegend=False)
     fig.update_xaxes(title_text="obs state dimension")
     fig.update_yaxes(title_text="state prediction MSE", type="linear")
@@ -395,51 +451,59 @@ if __name__ == "__main__":
     # Ignore all records of group = C2
     df = df[df["system.group"] != "C2"]
 
-    metric_names = ['state_q_err/test', 'state_dq_err/test', 'state_base_ang_vel_err/test',
-                    'state_base_ori_err/test',
-                    'state_base_vel_err/test', 'state_z_err/test']
+    metric_names = [
+        "state_q_err/test",
+        "state_dq_err/test",
+        "state_base_ang_vel_err/test",
+        "state_base_ori_err/test",
+        "state_base_vel_err/test",
+        "state_z_err/test",
+    ]
     # Convert the df to long format with a single column merging all the metrics
-    df = df.melt(id_vars=['model.name', 'system.group'],
-                 value_vars=metric_names, var_name='metric', value_name='value')
+    df = df.melt(id_vars=["model.name", "system.group"], value_vars=metric_names, var_name="metric", value_name="value")
     # Now melt the model.name and system.
-    import seaborn as sns
     import matplotlib as plt
+    import seaborn as sns
 
-    color_bar_group = {'system.group': {"K4xC2": color_pallet[1],
-                                        "K4":    color_pallet[7]
-                                        }
-                       }
+    color_bar_group = {"system.group": {"K4xC2": color_pallet[1], "K4": color_pallet[7]}}
 
-    style_args = {"DAE-K4xC2":     dict(marker_pattern_shape="x", opacity=1.),
-                  "DAE-AUG-K4":    dict(opacity=.5),
-                  "DAE-AUG-K4xC2": dict(opacity=.5),
-                  }
+    style_args = {
+        "DAE-K4xC2": dict(marker_pattern_shape="x", opacity=1.0),
+        "DAE-AUG-K4": dict(opacity=0.5),
+        "DAE-AUG-K4xC2": dict(opacity=0.5),
+    }
 
-    bar_label_replace = {"DAE-K4xC2":     "DAE",
-                         "DAE-AUG-K4xC2": "DAE-AUG",
-                         # r"$\text{DAE}_{aug}-\mathbb{G}=\mathbb{K}_4 \times \mathbb{C}_2$",
-                         "E-DAE-K4xC2":   "E-DAE",  # r"$\text{eDAE}-\mathbb{G}=\mathbb{K}_4 \times \mathbb{C}_2$",
-                         "DAE-AUG-K4":    "DAE-AUG",  # r"$\text{DAE}_{aug}-\mathbb{G}=\mathbb{K}_4$",
-                         "E-DAE-K4":      "E-DAE",  # r"$\text{eDAE}-\mathbb{G}=\mathbb{K}_4$",
-                         }
+    bar_label_replace = {
+        "DAE-K4xC2": "DAE",
+        "DAE-AUG-K4xC2": "DAE-AUG",
+        # r"$\text{DAE}_{aug}-\mathbb{G}=\mathbb{K}_4 \times \mathbb{C}_2$",
+        "E-DAE-K4xC2": "E-DAE",  # r"$\text{eDAE}-\mathbb{G}=\mathbb{K}_4 \times \mathbb{C}_2$",
+        "DAE-AUG-K4": "DAE-AUG",  # r"$\text{DAE}_{aug}-\mathbb{G}=\mathbb{K}_4$",
+        "E-DAE-K4": "E-DAE",  # r"$\text{eDAE}-\mathbb{G}=\mathbb{K}_4$",
+    }
 
-    x_labels = {"state_q_err/test":            r"$\mathbf{q}$",
-                "state_dq_err/test":           r"$\dot{\mathbf{q}}$",
-                "state_base_ang_vel_err/test": r"$\mathbf{w}$",
-                "state_base_ori_err/test":     r"$\mathbf{o}$",
-                "state_base_vel_err/test":     r"$\mathbf{v}$",
-                "state_z_err/test":            r"$z$",
-                }
+    x_labels = {
+        "state_q_err/test": r"$\mathbf{q}$",
+        "state_dq_err/test": r"$\dot{\mathbf{q}}$",
+        "state_base_ang_vel_err/test": r"$\mathbf{w}$",
+        "state_base_ori_err/test": r"$\mathbf{o}$",
+        "state_base_vel_err/test": r"$\mathbf{v}$",
+        "state_z_err/test": r"$z$",
+    }
     # Rename the metrics
     df = df.replace({"metric": x_labels})
 
-    fig = plot_aggregated_bars(df, x="metric", y="value",
-                               group_variables=['model.name', 'system.group'],
-                               color_group=color_bar_group,
-                               style_args=style_args,
-                               label_replace=bar_label_replace)
+    fig = plot_aggregated_bars(
+        df,
+        x="metric",
+        y="value",
+        group_variables=["model.name", "system.group"],
+        color_group=color_bar_group,
+        style_args=style_args,
+        label_replace=bar_label_replace,
+    )
     # Set the figure size to a quarter of an A4 page
-    layout_config['legend'].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
+    layout_config["legend"].update(bgcolor="rgba(1.0,1.0,1.0,0.7)")
     fig.update_layout(**layout_config, showlegend=True)
     fig.update_xaxes(title_text=None)
     fig.update_yaxes(type="log")
@@ -449,16 +513,17 @@ if __name__ == "__main__":
     fig.write_image(data_path.with_suffix(".png"), scale=3)
 
     # MSE vs Time =================================================
-    print(f"Mini Cheetah MSE vs Time")
+    print("Mini Cheetah MSE vs Time")
     data_path = Path("mini_cheetah_mse_vs_time.csv")
     if not data_path.exists():
         import wandb
+
         wandb.login()
         api = wandb.Api()
         project_path = "dls-csml/mini_cheetah"
         group_name = "mse_vs_time_final"
         metric_name = "state_pred_loss_t"
-        runs = api.runs(project_path, {"$and": [{"group": group_name}] })
+        runs = api.runs(project_path, {"$and": [{"group": group_name}]})
         print(f"Found {len(runs)} runs for group {group_name}")
         df = pd.DataFrame()
         download_path = Path("./artifacts")
@@ -479,7 +544,7 @@ if __name__ == "__main__":
                         print(f"Downloading artifact to : {artifact_file_path}")
                         # Download the artifact
                         table_dir = artifact.download()
-                        table_files = list(Path(table_dir).rglob('*test.table.json'))
+                        table_files = list(Path(table_dir).rglob("*test.table.json"))
                         if len(table_files) == 0:
                             print(f"Run {run.id} {run.name} did not save the state_pred_loss_t table")
                             continue
@@ -487,7 +552,7 @@ if __name__ == "__main__":
                         # Move the file to the specified base directory
                         os.rename(table_path, artifact_file_path)
 
-                    with artifact_file_path.open('r') as file:
+                    with artifact_file_path.open("r") as file:
                         json_dict = json.load(file)
                     df_run = pd.DataFrame(json_dict["data"], columns=json_dict["columns"])
                     break
@@ -506,27 +571,31 @@ if __name__ == "__main__":
         df = pd.read_csv(data_path)
     # Ignore all records of group = C2
     df = df[df["system.group"] != "C2"]
-    fig = plot_aggregated_lines(df,
-                                x="time",
-                                y="state_pred_loss_t/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="std",
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
-                                                               r"C}_2$", }
-                                )
+    fig = plot_aggregated_lines(
+        df,
+        x="time",
+        y="state_pred_loss_t/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="std",
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "K4": r"$\mathbb{G}=\mathbb{K}_4$",
+            "K4xC2": r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
+            r"C}_2$",
+        },
+    )
     # Set the figure size to a quarter of an A4 page
     fig.update_layout(**layout_config)
     fig.update_xaxes(title_text="Prediction horizon [s]")
-    fig.update_yaxes(title_text="state prediction MSE",
-                     type="log",
-                     # Ensure the y-axis ticks are [.2, .5, 1.0, 2, ...]
-                     tickvals=[.2, .4, .6, .8, 1, 2, 4, 6],
-                     )
+    fig.update_yaxes(
+        title_text="state prediction MSE",
+        type="log",
+        # Ensure the y-axis ticks are [.2, .5, 1.0, 2, ...]
+        tickvals=[0.2, 0.4, 0.6, 0.8, 1, 2, 4, 6],
+    )
     # fig.show()
     data_path = Path("mini_cheetah_mse_vs_time.csv")
     fig.write_html(data_path.with_suffix(".html"))
@@ -535,11 +604,12 @@ if __name__ == "__main__":
     # fig.show()
 
     # Dynamics Harmonic Analysis  =================================================
-    print(f"Dynamics Harmonic Analysis")
+    print("Dynamics Harmonic Analysis")
 
     data_path = Path("mini_cheetah_eigvals.csv")
     if not data_path.exists():
         import wandb
+
         wandb.login()
         api = wandb.Api()
         project_path = "dls-csml/mini_cheetah"
@@ -565,7 +635,7 @@ if __name__ == "__main__":
                         print(f"Downloading artifact to : {artifact_file_path}")
                         # Download the artifact
                         table_dir = artifact.download()
-                        table_files = list(Path(table_dir).rglob('*.table.json'))
+                        table_files = list(Path(table_dir).rglob("*.table.json"))
                         if len(table_files) == 0:
                             print(f"{metric_name} table not in Run {run.id} {run.name}")
                             continue
@@ -573,7 +643,7 @@ if __name__ == "__main__":
                         # Move the file to the specified base directory
                         os.rename(table_path, artifact_file_path)
 
-                    with artifact_file_path.open('r') as file:
+                    with artifact_file_path.open("r") as file:
                         json_dict = json.load(file)
                     df_run = pd.DataFrame(json_dict["data"], columns=json_dict["columns"])
                     break
@@ -593,47 +663,53 @@ if __name__ == "__main__":
 
     import numpy as np
 
-    df["eigval norm"] = np.sqrt(df['real'] ** 2 + df['imag'] ** 2)
-    df['Eigval frequency[Hz]'] = np.abs(np.arctan2(df['imag'], df['real'])) / 0.003
-    df['Eigval frequency[Hz]'] += 0.01
+    df["eigval norm"] = np.sqrt(df["real"] ** 2 + df["imag"] ** 2)
+    df["Eigval frequency[Hz]"] = np.abs(np.arctan2(df["imag"], df["real"])) / 0.003
+    df["Eigval frequency[Hz]"] += 0.01
 
-    df = df[df['system.group'] == 'K4xC2']
-    df = df[df['model.name'] == 'E-DAE']
+    df = df[df["system.group"] == "K4xC2"]
+    df = df[df["model.name"] == "E-DAE"]
     print(f"Models downloaded for {list(df['irrep'].unique())}")
-    df['run_type'] = df['model.name'] + '_' + df['system.group'] + '_' + df['irrep']
+    df["run_type"] = df["model.name"] + "_" + df["system.group"] + "_" + df["irrep"]
 
-    import seaborn as sns
     import matplotlib.pyplot as plt
 
     metric_name = "eigval norm"
-    hue_var = 'run_type'
-    run_types = df['run_type'].unique()
+    hue_var = "run_type"
+    run_types = df["run_type"].unique()
     print(f"Found {len(run_types)} run types: {run_types}")
-    num_hue = len(df['run_type'].unique())
+    num_hue = len(df["run_type"].unique())
     rename_hue = [r"$(%d)$" % i for i in range(1, num_hue + 1)]
     rename_dict = dict(zip(df[hue_var].unique(), rename_hue))
     df[hue_var] = df[hue_var].replace(dict(zip(df[hue_var].unique(), rename_hue)))
-    pallete = sns.cubehelix_palette(num_hue, rot=-.25, light=.7)
+    pallete = sns.cubehelix_palette(num_hue, rot=-0.25, light=0.7)
     # pallete = "rocket"
     # g = sns.FacetGrid(df, row=hue_var, hue=hue_var, aspect=3, height=.4, palette=pallete, sharex=True, sharey=True)
-    height = .4
+    height = 0.4
     aspect_ratio = 2.5
     font_size = 6
-    g = sns.FacetGrid(df, col=hue_var, hue=hue_var, aspect=aspect_ratio, height=height, palette=pallete, sharex=True, sharey=True)
-    kd_args = dict(alpha=1,
-                   bins=np.linspace(0.8,1.0,20),
-                   stat='count')
-    g.map_dataframe(sns.histplot,
-                    x=metric_name,
-                    fill=True,
-                    linewidth=0,
-                    **kd_args)
-    g.refline(y=0, linewidth=.1, linestyle="-", clip_on=False)
+    g = sns.FacetGrid(
+        df, col=hue_var, hue=hue_var, aspect=aspect_ratio, height=height, palette=pallete, sharex=True, sharey=True
+    )
+    kd_args = dict(alpha=1, bins=np.linspace(0.8, 1.0, 20), stat="count")
+    g.map_dataframe(sns.histplot, x=metric_name, fill=True, linewidth=0, **kd_args)
+    g.refline(y=0, linewidth=0.1, linestyle="-", clip_on=False)
+
     # Define and use a simple function to label the plot in axes coordinates
     def label(x, color, label):
         ax = plt.gca()
-        ax.text(.7, .85, label, fontweight="bold", fontsize=font_size+1, color=color,
-                ha="left", va="center", transform=ax.transAxes)
+        ax.text(
+            0.7,
+            0.85,
+            label,
+            fontweight="bold",
+            fontsize=font_size + 1,
+            color=color,
+            ha="left",
+            va="center",
+            transform=ax.transAxes,
+        )
+
     g.map(label, x=hue_var)
     g.set_titles("")
     g.set(yticks=[], ylabel="", xlabel="")
@@ -641,64 +717,68 @@ if __name__ == "__main__":
     fig = g.figure
     # Reduce the fornt size of the x ticks
     for ax in fig.axes:
-        ax.tick_params(axis='x', which='major', labelsize=font_size, pad=0.1)
+        ax.tick_params(axis="x", which="major", labelsize=font_size, pad=0.1)
     # Format the x ticks to a single significant digit
-    fig.axes[0].xaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+    fig.axes[0].xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     fig.savefig("mini_cheetah_eigval_norm.svg")
     # Phase
-    metric_name = 'Eigval frequency[Hz]'
-    hue_var = 'run_type'
-    g = sns.FacetGrid(df, col=hue_var, hue=hue_var, aspect=aspect_ratio, height=height, palette=pallete, sharex=True, sharey=True)
-    kd_args = dict(alpha=1,
-                   # bins=np.linspace(0,2.0,25),
-                   log_scale=True,
-                   stat='count')
-    g.map_dataframe(sns.histplot,
-                    x=metric_name,
-                    fill=True,
-                    linewidth=0,
-                    **kd_args)
-    g.refline(y=0, linewidth=.1, linestyle="-", clip_on=False)
+    metric_name = "Eigval frequency[Hz]"
+    hue_var = "run_type"
+    g = sns.FacetGrid(
+        df, col=hue_var, hue=hue_var, aspect=aspect_ratio, height=height, palette=pallete, sharex=True, sharey=True
+    )
+    kd_args = dict(
+        alpha=1,
+        # bins=np.linspace(0,2.0,25),
+        log_scale=True,
+        stat="count",
+    )
+    g.map_dataframe(sns.histplot, x=metric_name, fill=True, linewidth=0, **kd_args)
+    g.refline(y=0, linewidth=0.1, linestyle="-", clip_on=False)
     g.set_titles("")
     g.set(yticks=[], ylabel="", xlabel="")
     g.despine(bottom=True, left=True)
     fig = g.figure
     for ax in fig.axes:
-        ax.tick_params(axis='x', which='major', labelsize=font_size, pad=0.1)
+        ax.tick_params(axis="x", which="major", labelsize=font_size, pad=0.1)
     fig.savefig("mini_cheetah_eigval_freq.svg")
     # ==========================================================================
-    metric_name = 'Eigval frequency[Hz]'
+    metric_name = "Eigval frequency[Hz]"
     y_metric_name = "eigval norm"
     # height = .4
     # aspect_ratio = 2
-    g = sns.FacetGrid(df, col=hue_var, hue=hue_var, aspect=aspect_ratio, height=height, palette=pallete,
-                      # sharex=True,
-                      sharey=True
-                      )
-    kd_args = dict(alpha=1,
-                   # bins=np.linspace(0,2.0,25),
-                   cut=True,
-                   weights=y_metric_name,
-                   fill=True,
-                   bw_adjust=.05,
-                   # clip_on=False,
-                   log_scale=True,
-                   )
-    g.map_dataframe(sns.kdeplot,
-                    x=metric_name,
-                    linewidth=1,
-                    **kd_args)
+    g = sns.FacetGrid(
+        df,
+        col=hue_var,
+        hue=hue_var,
+        aspect=aspect_ratio,
+        height=height,
+        palette=pallete,
+        # sharex=True,
+        sharey=True,
+    )
+    kd_args = dict(
+        alpha=1,
+        # bins=np.linspace(0,2.0,25),
+        cut=True,
+        weights=y_metric_name,
+        fill=True,
+        bw_adjust=0.05,
+        # clip_on=False,
+        log_scale=True,
+    )
+    g.map_dataframe(sns.kdeplot, x=metric_name, linewidth=1, **kd_args)
     g.map(label, x=hue_var)
-    g.refline(y=0, linewidth=.1, linestyle="-", color=None, clip_on=False)
+    g.refline(y=0, linewidth=0.1, linestyle="-", color=None, clip_on=False)
     g.set_titles("")
     g.set(yticks=[], ylabel="", xlabel="")
     # g.despine(bottom=True, left=True)
     fig = g.figure
     for ax in fig.axes:
         # Set the x axis to log scale
-        ax.spines['left'].set_linewidth(.25)
-        ax.spines['bottom'].set_linewidth(.25)
-        ax.tick_params(axis='x', which='major', labelsize=font_size, pad=0.1)
+        ax.spines["left"].set_linewidth(0.25)
+        ax.spines["bottom"].set_linewidth(0.25)
+        ax.tick_params(axis="x", which="major", labelsize=font_size, pad=0.1)
     fig.savefig("mini_cheetah_eigval_power_spectrum.svg")
     fig.show()
 
@@ -711,32 +791,33 @@ if __name__ == "__main__":
     print(data_path)
     df = pd.read_csv(data_path)
     LINEAR_NUM_SAMPLES = 23600
-    df['system.train_ratio'] = df['system.train_ratio'] * LINEAR_NUM_SAMPLES
+    df["system.train_ratio"] = df["system.train_ratio"] * LINEAR_NUM_SAMPLES
 
     color_pallet = px.colors.qualitative.Prism
 
-    line_styles = {'model.name': {"E-DAE": dict(),
-                                  "DAE":   dict(dash='dash')}
-                   }
-    color_group = {'system.group': {"C10": color_pallet[0],
-                                    "C5":  color_pallet[10],
-                                    }
-                   }
-    fig = plot_aggregated_lines(df,
-                                x="system.train_ratio",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="min-max",
-                                line_width=3,
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
-                                               }
-
-                                )
+    line_styles = {"model.name": {"E-DAE": dict(), "DAE": dict(dash="dash")}}
+    color_group = {
+        "system.group": {
+            "C10": color_pallet[0],
+            "C5": color_pallet[10],
+        }
+    }
+    fig = plot_aggregated_lines(
+        df,
+        x="system.train_ratio",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="min-max",
+        line_width=3,
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "C5": r"$\large \mathbb{G}=\mathbb{C}_5$",
+            "C10": r"$\large \mathbb{G}=\mathbb{C}_{10}$",
+        },
+    )
     fig.update_layout(**layout_config, showlegend=False)
     fig.update_xaxes(title_text="training samples")
     fig.update_yaxes(title_text="state prediction MSE")
@@ -750,23 +831,24 @@ if __name__ == "__main__":
     print(data_path)
     df = pd.read_csv(data_path)
     STATE_DIM = 30
-    df['system.obs_state_ratio'] = df['system.obs_state_ratio'] * STATE_DIM
+    df["system.obs_state_ratio"] = df["system.obs_state_ratio"] * STATE_DIM
 
-    fig = plot_aggregated_lines(df,
-                                x="system.obs_state_ratio",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="min-max",
-                                line_width=3,
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
-                                               }
-
-                                )
+    fig = plot_aggregated_lines(
+        df,
+        x="system.obs_state_ratio",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="min-max",
+        line_width=3,
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "C5": r"$\large \mathbb{G}=\mathbb{C}_5$",
+            "C10": r"$\large \mathbb{G}=\mathbb{C}_{10}$",
+        },
+    )
     fig.update_layout(**layout_config, showlegend=False)
     fig.update_xaxes(title_text=r"$|\mathcal{X}|$ model state dimension")
     fig.update_yaxes(title_text="state prediction MSE", type="linear")
@@ -780,21 +862,22 @@ if __name__ == "__main__":
     print(data_path)
     df = pd.read_csv(data_path)
 
-    fig = plot_aggregated_lines(df,
-                                x="system.state_dim",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="min-max",
-                                line_width=3,
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
-                                               }
-
-                                )
+    fig = plot_aggregated_lines(
+        df,
+        x="system.state_dim",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="min-max",
+        line_width=3,
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "C5": r"$\large \mathbb{G}=\mathbb{C}_5$",
+            "C10": r"$\large \mathbb{G}=\mathbb{C}_{10}$",
+        },
+    )
     fig.update_layout(**layout_config, showlegend=False)
     fig.update_xaxes(title_text="state dimension")
     fig.update_yaxes(title_text="state prediction MSE", type="linear")
@@ -808,22 +891,23 @@ if __name__ == "__main__":
     print(data_path)
     df = pd.read_csv(data_path)
     BASE_SIGMA = 0.1
-    df['system.noise_level'] = df['system.noise_level'] * BASE_SIGMA
-    fig = plot_aggregated_lines(df,
-                                x="system.noise_level",
-                                y="state_pred_loss/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="min-max",
-                                line_width=3,
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C5":           r"$\large \mathbb{G}=\mathbb{C}_5$",
-                                               "C10":          r"$\large \mathbb{G}=\mathbb{C}_{10}$",
-                                               }
-
-                                )
+    df["system.noise_level"] = df["system.noise_level"] * BASE_SIGMA
+    fig = plot_aggregated_lines(
+        df,
+        x="system.noise_level",
+        y="state_pred_loss/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="min-max",
+        line_width=3,
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "C5": r"$\large \mathbb{G}=\mathbb{C}_5$",
+            "C10": r"$\large \mathbb{G}=\mathbb{C}_{10}$",
+        },
+    )
     fig.update_layout(**layout_config, showlegend=False)
     fig.update_xaxes(title_text=r"Noise variance")
     fig.update_yaxes(title_text="state prediction MSE", type="linear")
@@ -839,40 +923,54 @@ if __name__ == "__main__":
     # MSE vs time needs a bit of reformat
     df_reformatted = pd.DataFrame()
     for col in df.columns:
-        if "time" in col or "step" in col: continue
+        if "time" in col or "step" in col:
+            continue
         run_name, var_name = col.split(" - ")
         print(var_name)
         # var_name = var_name.split("__")[0]
-        if "_DAE" in run_name: print(run_name)
-        if not var_name == "state_pred_loss_t/test": continue
+        if "_DAE" in run_name:
+            print(run_name)
+        if not var_name == "state_pred_loss_t/test":
+            continue
         model_name = "E-DAE" if "E-DAE" in run_name else "DAE"
         system_group = "C5" if "C5" in run_name else "C10"
-        df_run = pd.DataFrame({"Name": run_name, "model.name": model_name, "system.group": system_group,
-                               "time": df["time"], var_name: df[col]})
+        df_run = pd.DataFrame(
+            {
+                "Name": run_name,
+                "model.name": model_name,
+                "system.group": system_group,
+                "time": df["time"],
+                var_name: df[col],
+            }
+        )
         df_run = df_run[np.logical_not(np.isnan(df_run[var_name]))]
         df_reformatted = pd.concat([df_reformatted, df_run], axis=0)
 
-    fig = plot_aggregated_lines(df_reformatted,
-                                x="time",
-                                y="state_pred_loss_t/test",
-                                group_variables=['model.name', 'system.group'],
-                                line_styles=line_styles,
-                                color_group=color_group,
-                                area_metric="std",
-                                label_replace={"model.name":   "Model",
-                                               "system.group": "Group",
-                                               "C2":           r"$\mathbb{G}=\mathbb{C}_2$",
-                                               "K4":           r"$\mathbb{G}=\mathbb{K}_4$",
-                                               "K4xC2":        r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
-                                                               r"C}_2$", }
-                                )
+    fig = plot_aggregated_lines(
+        df_reformatted,
+        x="time",
+        y="state_pred_loss_t/test",
+        group_variables=["model.name", "system.group"],
+        line_styles=line_styles,
+        color_group=color_group,
+        area_metric="std",
+        label_replace={
+            "model.name": "Model",
+            "system.group": "Group",
+            "C2": r"$\mathbb{G}=\mathbb{C}_2$",
+            "K4": r"$\mathbb{G}=\mathbb{K}_4$",
+            "K4xC2": r"$\mathbb{G}=\mathbb{K}_4 \times \mathbb{"
+            r"C}_2$",
+        },
+    )
 
     # Set the figure size to a quarter of an A4 page
     fig.update_layout(**layout_config)
     fig.update_xaxes(title_text="Prediction horizon [s]")
-    fig.update_yaxes(title_text="state prediction MSE",
-                     type="linear",
-                     )
+    fig.update_yaxes(
+        title_text="state prediction MSE",
+        type="linear",
+    )
     # fig.show()
     fig.write_html(data_path.with_suffix(".html"))
     fig.write_image(data_path.with_suffix(".svg"))

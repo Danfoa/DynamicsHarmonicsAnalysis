@@ -1,35 +1,30 @@
-import itertools
 import logging
-import random
-from collections import OrderedDict
 from typing import Optional, Union
 
 import escnn
 import numpy as np
-import scipy
 import torch
 from escnn.group import Representation
 from escnn.nn import FieldType, GeometricTensor
-from escnn.nn.modules.basismanager import BlocksBasisExpansion
 from torch import Tensor
 
 from nn.LinearDynamics import DmdSolver, LinearDynamics
-from utils.linear_algebra import full_rank_lstsq_symmetric, represent_linear_map_in_basis
+from utils.linear_algebra import full_rank_lstsq_symmetric
 
 log = logging.getLogger(__name__)
 
 
 class EquivLinearDynamics(LinearDynamics):
-
-    def __init__(self,
-                 state_type: FieldType,
-                 dmd_algorithm: Optional[DmdSolver] = None,
-                 dt: Optional[Union[float, int]] = 1,
-                 trainable=False,
-                 bias: bool = True,
-                 init_mode: str = "identity",
-                 group_avg_trick: bool = False):
-
+    def __init__(
+        self,
+        state_type: FieldType,
+        dmd_algorithm: Optional[DmdSolver] = None,
+        dt: Optional[Union[float, int]] = 1,
+        trainable=False,
+        bias: bool = True,
+        init_mode: str = "identity",
+        group_avg_trick: bool = False,
+    ):
         self.symm_group = state_type.fibergroup
         self.gspace = state_type.gspace
         self.state_rep: Representation = state_type.representation
@@ -37,13 +32,15 @@ class EquivLinearDynamics(LinearDynamics):
         dmd_algorithm = dmd_algorithm if dmd_algorithm is not None else full_rank_lstsq_symmetric
         self.state_type = state_type
 
-        super(EquivLinearDynamics, self).__init__(state_dim=state_type.size,
-                                                  state_rep=state_type.representation,
-                                                  dt=dt,
-                                                  trainable=trainable,
-                                                  bias=bias,
-                                                  init_mode=init_mode,
-                                                  dmd_algorithm=dmd_algorithm)
+        super(EquivLinearDynamics, self).__init__(
+            state_dim=state_type.size,
+            state_rep=state_type.representation,
+            dt=dt,
+            trainable=trainable,
+            bias=bias,
+            init_mode=init_mode,
+            dmd_algorithm=dmd_algorithm,
+        )
 
         # self.compute_endomorphism_basis()
         # self.iso_transfer_op = OrderedDict()
@@ -53,12 +50,15 @@ class EquivLinearDynamics(LinearDynamics):
         #     self.iso_transfer_op_bias[irrep_id] = None
 
     def forcast(self, state: GeometricTensor, n_steps: int = 1, **kwargs) -> Tensor:
-        """ Predict the next `n_steps` states of the system.
+        """Predict the next `n_steps` states of the system.
+
         Args:
             state: (batch, state_dim) Initial state of the system.
             n_steps: (int) Number of steps to predict.
+
         Returns:
             pred_state_traj: (batch, n_steps + 1, state_dim)
+
         """
         batch, state_dim = state.tensor.shape
         assert state.type == self.state_type, f"{state.type} != {self.state_type}"
@@ -84,21 +84,23 @@ class EquivLinearDynamics(LinearDynamics):
         assert pred_state_traj.shape == (batch, n_steps + 1, state_dim)
         return pred_state_traj
 
-    def pre_process_state(self,
-                          state: Union[Tensor, GeometricTensor],
-                          next_state: Optional[Union[Tensor, GeometricTensor]] = None) -> GeometricTensor:
+    def pre_process_state(
+        self, state: Union[Tensor, GeometricTensor], next_state: Optional[Union[Tensor, GeometricTensor]] = None
+    ) -> GeometricTensor:
         if isinstance(state, Tensor):
             state_trajectory = super().pre_process_state(state=state, next_state=next_state)
         else:
             state_trajectory = super().pre_process_state(
-                state=state.tensor, next_state=next_state.tensor if next_state is not None else None)
+                state=state.tensor, next_state=next_state.tensor if next_state is not None else None
+            )
         # Convert to Geometric Tensor
         return self.state_type(state_trajectory)
 
     def post_process_state(self, state_traj: GeometricTensor) -> Tensor:
         # Change back from Isotypic basis to original basis. Return Tensor instead of Geometric Tensor
         state_traj_input_basis = super().post_process_state(
-            state_traj=state_traj.tensor if isinstance(state_traj, GeometricTensor) else state_traj)
+            state_traj=state_traj.tensor if isinstance(state_traj, GeometricTensor) else state_traj
+        )
         return state_traj_input_basis
 
     # def update_transfer_op(self, X: Tensor, X_prime: Tensor, group_avg_trick: bool = True):
@@ -160,10 +162,7 @@ class EquivLinearDynamics(LinearDynamics):
     #                 solution_op_error_dist=iso_rec_error.detach().to(torch.float))
 
     def build_linear_map(self) -> escnn.nn.Linear:
-        return escnn.nn.Linear(in_type=self.state_type,
-                               out_type=self.state_type,
-                               bias=self.bias,
-                               initialize=False)
+        return escnn.nn.Linear(in_type=self.state_type, out_type=self.state_type, bias=self.bias, initialize=False)
 
     # def compute_endomorphism_basis(self):
     #     # When approximating the transfer/Koopman operator from the symmetric observable space, we know the operator
@@ -223,11 +222,13 @@ class EquivLinearDynamics(LinearDynamics):
             eigvals = torch.linalg.eigvals(matrix)
             eigvals_real = eigvals.real.detach().cpu().numpy()
             eigvals_imag = eigvals.imag.detach().cpu().numpy()
-            assert np.allclose(np.abs(eigvals_real), np.ones_like(eigvals_real), rtol=1e-4, atol=1e-4), \
+            assert np.allclose(np.abs(eigvals_real), np.ones_like(eigvals_real), rtol=1e-4, atol=1e-4), (
                 f"Eigenvalues with real part different from 1: {eigvals_real}"
-            assert np.allclose(eigvals_imag, np.zeros_like(eigvals_imag), rtol=1e-4, atol=1e-4), \
+            )
+            assert np.allclose(eigvals_imag, np.zeros_like(eigvals_imag), rtol=1e-4, atol=1e-4), (
                 f"Eigenvalues with imaginary part: {eigvals_imag}"
-            
+            )
+
             if self.bias and self.transfer_op.bias is not None:  # Set the bias to zero
                 self.transfer_op.bias.data = torch.zeros_like(self.transfer_op.bias.data)
         else:
@@ -240,10 +241,3 @@ if __name__ == "__main__":
     G = escnn.group.DihedralGroup(4)
     rep = G.representations["regular"]
     test_equiv_lin = EquivLinearDynamics(state_rep=rep, dt=1, trainable=True)
-
-
-
-
-
-
-

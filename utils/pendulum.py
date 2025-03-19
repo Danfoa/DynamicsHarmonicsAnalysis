@@ -3,7 +3,6 @@ import numpy as np
 
 
 class CostModelPendulum(crocoddyl.CostModelAbstract):
-
     def __init__(self, state, activation, nu):
         activation = activation if activation is not None else crocoddyl.ActivationModelQuad(state.ndx)
         crocoddyl.CostModelAbstract.__init__(self, state, activation, nu=nu)
@@ -37,14 +36,12 @@ class CostModelPendulum(crocoddyl.CostModelAbstract):
 
 
 class CostDataPendulum(crocoddyl.CostDataAbstract):
-
     def __init__(self, model, collector):
         crocoddyl.CostDataAbstract.__init__(self, model, collector)
         self.Rxx = np.zeros((3, 2))
 
 
 class ActuationModelPendulum(crocoddyl.ActuationModelAbstract):
-
     def __init__(self, state):
         crocoddyl.ActuationModelAbstract.__init__(self, state, 1)
         self.nv = state.nv
@@ -67,9 +64,8 @@ class ActuationModelPendulum(crocoddyl.ActuationModelAbstract):
 
 
 class ActuationDataPendulum(crocoddyl.ActuationDataAbstract):
-
     def __init__(self, model):
         crocoddyl.ActuationDataAbstract.__init__(self, model)
-        self.dtau_du[0] = 1.
-        self.tau_set = [True]    # DoF with actuators.
-        self.Mtau[0] = 1.
+        self.dtau_du[0] = 1.0
+        self.tau_set = [True]  # DoF with actuators.
+        self.Mtau[0] = 1.0

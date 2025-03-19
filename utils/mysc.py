@@ -1,16 +1,14 @@
 import importlib
 import json
+import math
 import pathlib
 import warnings
+from itertools import chain, combinations
 
 import numpy as np
 import torch.nn
-
-import math
-
-from itertools import chain, combinations
-
 from torch import Tensor
+
 
 class TemporaryNumpySeed:
     def __init__(self, seed):
@@ -24,14 +22,15 @@ class TemporaryNumpySeed:
     def __exit__(self, *args):
         np.random.set_state(self.state)
 
+
 def powerset(iterable):
-    "Return the list of all subsets of the input iterable"
+    """Return the list of all subsets of the input iterable"""
     s = list(iterable)
-    return list(chain.from_iterable(combinations(s, r) for r in range(len(s)+1)))
+    return list(chain.from_iterable(combinations(s, r) for r in range(len(s) + 1)))
 
 
 class NumpyEncoder(json.JSONEncoder):
-    """ Special json encoder for numpy types """
+    """Special json encoder for numpy types"""
 
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -49,7 +48,7 @@ def best_rectangular_grid(n):
     for i in range(2, int(math.sqrt(n)) + 1):
         if n % i == 0:
             new_pair = (i, n // i)
-            if (sum(new_pair) < best_perimeter):
+            if sum(new_pair) < best_perimeter:
                 best_pair = new_pair
                 best_perimeter = sum(new_pair)
 
@@ -74,6 +73,7 @@ def print_dict(d: dict, sort=False):
 
 def append_dictionaries(dict1, dict2, recursive=True):
     import torch
+
     result = {}
     for k in set(dict1) | set(dict2):
         item1, item2 = dict1.get(k, 0), dict2.get(k, 0)
@@ -85,13 +85,13 @@ def append_dictionaries(dict1, dict2, recursive=True):
             # try:
             result[k] = torch.hstack((item1, item2))
             # except RuntimeError as e:
-                # result[k] = torch.cat((torch.unsqueeze(item1, 0), torch.unsqueeze(item2, 0)))
+            # result[k] = torch.cat((torch.unsqueeze(item1, 0), torch.unsqueeze(item2, 0)))
         elif isinstance(item1, dict) and isinstance(item2, dict) and recursive:
             result[k] = append_dictionaries(item1, item2)
     return result
 
 
-def flatten_dict(d: dict, prefix=''):
+def flatten_dict(d: dict, prefix=""):
     a = {}
     for k, v in d.items():
         if isinstance(v, dict):
@@ -115,15 +115,16 @@ def check_if_resume_experiment(ckpt_call):
 
 
 def compare_dictionaries(dict1: dict, dict2: dict):
-    """
-    Recursively compare dictionaries which entries might be other dictionaries.
+    """Recursively compare dictionaries which entries might be other dictionaries.
     Any entry in one dictionary that is not present in the other dictionary needs to be reported.
+
     Args:
         dict1: A tree of dictionaries.
         dict2: A tree of dictionaries.
 
     Returns: The dictionary containing only the keys that are different between the two dictionaries. In all levels of
     the tree. Each entry of this difference dictionary is a tuple (val1, val2) when val1 != val2.
+
     """
     diff = {}
     for key in dict1.keys():
@@ -164,13 +165,11 @@ def companion_matrix(eig):
     real_part = np.real(eig)
     # imag_part = np.imag(eig)
 
-    return np.array([[2 * -np.abs(real_part), -np.abs(eig) ** 2],
-                     [1             ,             0]])
+    return np.array([[2 * -np.abs(real_part), -(np.abs(eig) ** 2)], [1, 0]])
 
 
 def random_well_conditioned_invertible_matrix(n, perturbation_scale=0.1):
-    """
-    Generate a nearly well-conditioned matrix of size n x n.
+    """Generate a nearly well-conditioned matrix of size n x n.
 
     Args:
     - n (int): Dimension of the matrix.
@@ -179,6 +178,7 @@ def random_well_conditioned_invertible_matrix(n, perturbation_scale=0.1):
 
     Returns:
     - numpy.ndarray: Generated matrix.
+
     """
     # Start with identity matrix
     T = np.eye(n)
@@ -231,14 +231,16 @@ import re
 
 
 def format_scientific(text):
-    """
-    Formats any number in a string to scientific notation with 2 significant figures.
+    """Formats any number in a string to scientific notation with 2 significant figures.
 
-    Parameters:
+    Parameters
+    ----------
     - text (str): The input text
 
-    Returns:
+    Returns
+    -------
     - str: Text with numbers formatted in scientific notation
+
     """
 
     # Function to replace each number with its scientific notation form
@@ -249,22 +251,23 @@ def format_scientific(text):
     # Regular expression to find numbers after "=" and replace them
     str = re.sub(r"(?<=\=)(\d+\.\d+|\d+\.|\.\d+|\d+)", replace_number, text)
     # Remove the following keywords from the string
-    keywords = ['model.', 'hydra.', 'system.']
+    keywords = ["model.", "hydra.", "system."]
     for keyword in keywords:
-        str = str.replace(keyword, '')
+        str = str.replace(keyword, "")
     return str
 
+
 def traj_from_states(state: Tensor, next_state: Tensor) -> Tensor:
-    """
-    Concatenate states and next_states into a trajectory.
+    """Concatenate states and next_states into a trajectory.
+
     Args:
         state: (batch_size, state_dim)
         next_state: (batch_size, state_dim) or (batch_size, time, state_dim)
 
     Returns:
         state_trajectory: (batch_size, time, state_dim)
-    """
 
+    """
     if len(state.shape) == 2:
         state = torch.unsqueeze(state, dim=1)
     if len(next_state.shape) == 2:
@@ -277,14 +280,17 @@ def traj_from_states(state: Tensor, next_state: Tensor) -> Tensor:
 
     return state_trajectory
 
+
 def states_from_traj(state_trajectory: Tensor) -> Tensor:
-    """
-    Split a trajectory into states and next_states.
+    """Split a trajectory into states and next_states.
+
     Args:
         state_trajectory: (batch_size, time, state_dim)
+
     Returns:
         state: (batch_size, state_dim)
         next_state: (batch_size, state_dim)
+
     """
     assert len(state_trajectory.shape) == 3, f"{state_trajectory.shape} - Expected (batch_size, time, state_dim)"
     state = state_trajectory[:, 0, :]
@@ -293,8 +299,7 @@ def states_from_traj(state_trajectory: Tensor) -> Tensor:
 
 
 def batched_to_flat_trajectory(x):
-    """
-    Converts a 3D tensor of shape (batch, time, dim) to a 2D tensor (batch * time, dim).
+    """Converts a 3D tensor of shape (batch, time, dim) to a 2D tensor (batch * time, dim).
     Ensures that the ordering of samples in time is not shuffled. The tensor is first made contiguous
     in memory to ensure that reshaping does not affect the data order.
 
@@ -303,6 +308,7 @@ def batched_to_flat_trajectory(x):
 
     Returns:
         torch.Tensor: Reshaped tensor of shape (batch * time, dim).
+
     """
     x_contiguous = x.contiguous()  # Needed for reshaping not to mess with the time order.
     x_reshaped = x_contiguous.view(-1, x_contiguous.size(-1))
@@ -310,8 +316,7 @@ def batched_to_flat_trajectory(x):
 
 
 def flat_to_batched_trajectory(x_reshaped, batch_size, state_dim):
-    """
-    Reshapes a 2D tensor back to a 3D tensor with potentially new feature dimension.
+    """Reshapes a 2D tensor back to a 3D tensor with potentially new feature dimension.
     Infers the time dimension from the shape of the 2D tensor.
 
     Args:
@@ -324,6 +329,7 @@ def flat_to_batched_trajectory(x_reshaped, batch_size, state_dim):
 
     The time dimension is inferred from the total number of elements in the 2D tensor
     and the known batch size. The tensor is reshaped back to its original 3D form.
+
     """
     total_elements = x_reshaped.size(0)
     assert total_elements % batch_size == 0, f"Total elements {total_elements} not divisible by batch size {batch_size}"
@@ -334,15 +340,17 @@ def flat_to_batched_trajectory(x_reshaped, batch_size, state_dim):
 
 
 def format_si(number, sig_figs=2):
-    """
-    Format a number in SI (International System of Units) notation.
+    """Format a number in SI (International System of Units) notation.
 
-    Parameters:
+    Parameters
+    ----------
         number (float or int): The number to format.
         sig_figs (int): The number of significant figures to use.
 
-    Returns:
+    Returns
+    -------
         str: The number formatted in SI notation.
+
     """
     si_prefixes = {
         -24: "y",  # yocto
@@ -350,26 +358,26 @@ def format_si(number, sig_figs=2):
         -18: "a",  # atto
         -15: "f",  # femto
         -12: "p",  # pico
-        -9:  "n",  # nano
-        -6:  "µ",  # micro
-        -3:  "m",  # milli
-        0:   "",
-        3:   "k",  # kilo
-        6:   "M",  # mega
-        9:   "G",  # giga
-        12:  "T",  # tera
-        15:  "P",  # peta
-        18:  "E",  # exa
-        21:  "Z",  # zetta
-        24:  "Y",  # yotta
-        }
+        -9: "n",  # nano
+        -6: "µ",  # micro
+        -3: "m",  # milli
+        0: "",
+        3: "k",  # kilo
+        6: "M",  # mega
+        9: "G",  # giga
+        12: "T",  # tera
+        15: "P",  # peta
+        18: "E",  # exa
+        21: "Z",  # zetta
+        24: "Y",  # yotta
+    }
 
     if number == 0:
         return "0"
 
     exponent = int(math.floor(math.log10(abs(number))))
     rounded_exp = exponent - (exponent % 3)
-    base = number / 10 ** rounded_exp
+    base = number / 10**rounded_exp
 
     r = f"{base:.{sig_figs}f}{si_prefixes.get(rounded_exp, 'e' + str(rounded_exp))}"
     return r
@@ -394,6 +402,7 @@ x_reconstructed = flat_to_batched_trajectory(x_transformed, batch_size, new_dim)
 
 # Check if time order is preserved
 time_order_preserved = all(
-    (x[i, j, 0] == x_reconstructed[i, j, 0]).item() for i in range(batch_size) for j in range(time_steps))
+    (x[i, j, 0] == x_reconstructed[i, j, 0]).item() for i in range(batch_size) for j in range(time_steps)
+)
 
 x, x_reconstructed, time_order_preserved
