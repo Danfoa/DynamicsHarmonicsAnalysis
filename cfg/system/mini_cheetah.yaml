@@ -11,7 +11,7 @@ standardize: True
 
 obs_state_ratio: 5                             # obs_state_dim = obs_state_ratio * state_dim
 
-state_obs: ['joint_pos', 'joint_vel', 'base_z', 'base_vel', 'base_ori', 'base_ang_vel']
+state_obs: ['joint_pos_S1', 'joint_vel', 'base_z', 'base_vel', 'base_ori', 'base_ang_vel']
 action_obs: []
 
 # dt = 0.0012 s   this is the average delta time between observations.

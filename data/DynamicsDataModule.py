@@ -10,10 +10,10 @@ from datasets.distributed import split_dataset_by_node
 from escnn.group import Representation
 from escnn.nn import FieldType
 from lightning import LightningDataModule
+from morpho_symm.data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
-from morpho_symm.data.DynamicsRecording import DynamicsRecording, get_dynamics_dataset, get_train_test_val_file_paths
 from utils.mysc import traj_from_states
 from utils.plotting import plot_system_3D, plot_trajectories, plot_two_panel_trajectories
 
@@ -116,7 +116,7 @@ class DynamicsDataModule(LightningDataModule):
         self.action_obs = recording_metadata.action_obs if self.action_obs is None else self.action_obs
         # Compute normalization mean and variance parameters for the state and action spaces.
         self.state_mean, self.state_var = recording_metadata.state_moments()
-        self.action_mean, self.action_var = recording_metadata.action_moments()
+        # self.action_mean, self.action_var = recording_metadata.action_moments()
 
         # Ensure samples contain torch.Tensors and not numpy arrays.
         # Apply map to obtain flat state/next_state action/next_action values
